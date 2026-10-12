@@ -19,7 +19,9 @@ if(env.SESSION_SECRET&&(env.SESSION_SECRET.length<32||env.SESSION_SECRET.startsW
 if(env.ENCRYPTION_KEY&&!/^[a-f\d]{64}$/i.test(env.ENCRYPTION_KEY))invalid.push('ENCRYPTION_KEY must contain exactly 64 hexadecimal characters');
 if(!['mongodb','sqlite'].includes(database))invalid.push('DATABASE_PROVIDER must be mongodb or sqlite');
 if(database==='mongodb'){
-  if(env.MONGODB_URI&&!/^mongodb(?:\+srv)?:\/\//.test(env.MONGODB_URI))invalid.push('MONGODB_URI must be a MongoDB connection string');
+  let uri=env.MONGODB_URI?.trim();
+  if(uri&&((uri.startsWith('"')&&uri.endsWith('"'))||(uri.startsWith("'")&&uri.endsWith("'"))))uri=uri.slice(1,-1).trim();
+  if(env.MONGODB_URI&&!/^mongodb(?:\+srv)?:\/\//.test(uri||''))invalid.push('MONGODB_URI must be a MongoDB connection string');
   if(!/^smartlead(?:_[a-z0-9_-]+)?$/.test(env.MONGODB_DATABASE||'smartlead'))invalid.push('MONGODB_DATABASE must be smartlead or start with smartlead_');
 }
 // Log names and validation results only; never connection strings, passwords, or keys.
