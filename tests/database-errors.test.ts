@@ -36,6 +36,14 @@ describe('safe database failure diagnostics',()=>{
       expect(JSON.stringify(databaseFailure(error))).not.toContain('private-');
     }
   });
+  it('identifies the Hostinger resolver parsing failure without exposing private details',()=>{
+    const error=new Prisma.PrismaClientInitializationError(`Error in connector: Error creating a database connection. (Kind: An error occurred during DNS resolution: io error: Error parsing resolv.conf: option at line 5 is not recognized, labels: {}, source: None) ${privateDetails}`,'6.19.0');
+    const diagnostic=databaseFailure(error);
+    expect(diagnostic).toMatchObject({reason:'DATABASE_DNS'});
+    expect(diagnostic?.message).toContain('standard MongoDB connection string with TLS enabled');
+    expect(JSON.stringify(diagnostic)).not.toContain('private-');
+    expect(JSON.stringify(diagnostic)).not.toContain('option at line 5');
+  });
   it('leaves ordinary application and record errors to the existing error handler',()=>{
     expect(databaseFailure(new Error(`Authentication failed: ${privateDetails}`))).toBeNull();
     expect(databaseFailure(new Prisma.PrismaClientKnownRequestError('Unique constraint failed',{clientVersion:'6.19.0',code:'P2002'}))).toBeNull();
