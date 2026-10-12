@@ -1,7 +1,7 @@
 import { db } from './db';
 import { appUrl } from './config';
 import { AppError } from './security';
-import type { Prisma } from '@/generated/postgres';
+import type { Prisma } from '@/generated/mongo';
 
 function publicOrigin(value:string){
   try{

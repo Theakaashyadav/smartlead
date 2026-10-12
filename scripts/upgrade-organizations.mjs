@@ -4,7 +4,7 @@ import path from 'node:path';
 
 // SQLite's additive upgrade retains lead history and browser/session IDs.
 if(existsSync('.env'))process.loadEnvFile('.env');
-if(process.env.DEMO_MODE!=='true')throw new Error('Use prisma migrate deploy for PostgreSQL installations.');
+if(process.env.DATABASE_PROVIDER!=='sqlite'||process.env.DEMO_MODE!=='true')throw new Error('This upgrade is for legacy SQLite demos only. Use npm run db:setup for MongoDB.');
 const url=process.env.DEMO_DATABASE_URL||'file:../data/demo.db';
 if(!url.startsWith('file:'))throw new Error('Expected a SQLite file URL.');
 const file=path.resolve('prisma',url.slice(5));

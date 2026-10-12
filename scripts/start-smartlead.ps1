@@ -23,10 +23,10 @@ try {
         $node = (Get-Command node.exe -ErrorAction Stop).Source
         $nextCli = Join-Path $workspace 'node_modules\next\dist\bin\next'
         if (-not (Test-Path -LiteralPath $nextCli)) {
-            throw 'Dependencies are missing. Run npm ci and npm run demo:setup in this folder first.'
+            throw 'Dependencies are missing. Run npm ci and npm run db:setup in this folder first.'
         }
         if (-not (Test-Path -LiteralPath (Join-Path $workspace '.env'))) {
-            throw 'Configuration is missing. Run npm run demo:setup in this folder first.'
+            throw 'Configuration is missing. Copy .env.example to .env, configure MongoDB and secrets, then run npm run db:setup.'
         }
         if (-not (Test-Path -LiteralPath (Join-Path $workspace '.next\BUILD_ID'))) {
             Write-Host 'Preparing SmartLead for its first start...'

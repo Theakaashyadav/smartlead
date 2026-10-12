@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Browser, Page } from 'puppeteer';
-import type { Sender } from '@/generated/postgres';
+import type { Sender } from '@/generated/mongo';
 import { db } from './db';
 import { AppError } from './security';
 import { registerWebClient, WebWhatsAppProvider, type SendInput, type WhatsAppProvider } from './whatsapp';

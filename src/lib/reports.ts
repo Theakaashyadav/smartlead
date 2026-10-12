@@ -1,7 +1,7 @@
 import { db } from './db';
 import { leadScope } from './permissions';
 import { leadFilters } from './analytics';
-import type { User } from '@/generated/postgres';
+import type { User } from '@/generated/mongo';
 export async function reportRows(user:User,params:URLSearchParams) {
   const where={AND:[leadScope(user),leadFilters(params)]};
   const kind=params.get('type')||'leads';

@@ -1,3 +1,4 @@
+import { clearTestModels } from './database-fixture';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '@/lib/db';
 import { AppError, checkOrigin, decrypt, encrypt, hash, passwordHash, signedFeedbackToken, verifyFeedbackSignature, verifyPassword } from '@/lib/security';
@@ -38,10 +39,10 @@ vi.mock('whatsapp-web.js',async()=>{
 vi.mock('google-auth-library',()=>({GoogleAuth:class{async getAccessToken(){return 'test-google-token';}},OAuth2Client:class{}}));
 async function fixture(mode='ROUND_ROBIN'){
   await db.setting.create({data:{key:'feedback:remoteRequired',value:false}});
-  const admin=await db.user.create({data:{id:'admin',name:'Admin',email:'admin@test.invalid',passwordHash:passwordHash('ValidPassword!12'),role:'SUPER_ADMIN'}});
-  for(let i=0;i<3;i++)await db.employee.create({data:{id:`e${i}`,name:`Employee ${i}`,phone:`+91987654321${i}`,projects:[],dailyLimit:50,capacity:100,user:{create:{id:`u${i}`,name:`Employee ${i}`,email:`e${i}@test.invalid`,passwordHash:passwordHash('ValidPassword!12'),role:'EXECUTIVE'}}}});
-  const sender=await db.sender.create({data:{id:'sender',name:'Demo sender',provider:'DEMO',status:'CONNECTED'}});
-  const sheet=await db.sheet.create({data:{id:'sheet',name:'Test source',project:'Noida',spreadsheetId:'test-spreadsheet',connectionType:'DEMO',managedColumnsApproved:true,columnMapping:{leadId:'ID',customerName:'Name',mobile:'Phone',...MANAGED},rule:{create:{mode,senderId:sender.id,template:DEFAULT_TEMPLATE,recipients:{create:[0,1,2].map(i=>({employeeId:`e${i}`,position:i,weight:[50,30,20][i]}))}}}}});
+  const admin=await db.user.create({data:{organizationId:'legacy',id:'admin',name:'Admin',email:'admin@test.invalid',passwordHash:passwordHash('ValidPassword!12'),role:'SUPER_ADMIN'}});
+  for(let i=0;i<3;i++)await db.employee.create({data:{organization:{connect:{id:'legacy'}},id:`e${i}`,name:`Employee ${i}`,phone:`+91987654321${i}`,projects:[],dailyLimit:50,capacity:100,user:{create:{organizationId:'legacy',id:`u${i}`,name:`Employee ${i}`,email:`e${i}@test.invalid`,passwordHash:passwordHash('ValidPassword!12'),role:'EXECUTIVE'}}}});
+  const sender=await db.sender.create({data:{organizationId:'legacy',id:'sender',name:'Demo sender',provider:'DEMO',status:'CONNECTED'}});
+  const sheet=await db.sheet.create({data:{organizationId:'legacy',id:'sheet',name:'Test source',project:'Noida',spreadsheetId:'test-spreadsheet',connectionType:'DEMO',managedColumnsApproved:true,columnMapping:{leadId:'ID',customerName:'Name',mobile:'Phone',...MANAGED},rule:{create:{mode,senderId:sender.id,template:DEFAULT_TEMPLATE,recipients:{create:[0,1,2].map(i=>({employeeId:`e${i}`,position:i,weight:[50,30,20][i]}))}}}}});
   const rows:SourceRow[]=Array.from({length:4},(_,i)=>({stableId:`source-${i}`,row:i+2,metadataId:100+i,values:{leadId:`source-${i}`,customerName:`Customer ${i}`,mobile:`+91980000000${i}`,project:'Noida',source:'Test'}}));
   await db.setting.create({data:{key:'demo-source:sheet',value:JSON.parse(JSON.stringify(rows))}});
   return {admin,sender,sheet,rows};
@@ -49,7 +50,7 @@ async function fixture(mode='ROUND_ROBIN'){
 beforeEach(async()=>{
   await detachNativeWhatsApp();nativeMocks.instances.length=0;
   vi.restoreAllMocks();vi.unstubAllGlobals();vi.unstubAllEnvs();vi.stubEnv('WHATSAPP_LOGIN_MODE','native');
-  for(const name of ['FeedbackToken','Feedback','Followup','Message','Assignment','Lead','RuleRecipient','DistributionRule','SheetAccess','SyncLog','Sheet','Employee','AuthSession','ResetToken','User','Sender','GoogleCredential','Job','AuditLog','Setting','RateLimit'])await db.$executeRawUnsafe(`DELETE FROM "${name}"`);
+  await clearTestModels(['FeedbackToken','Feedback','Followup','Message','Assignment','Lead','RuleRecipient','DistributionRule','SheetAccess','SyncLog','Sheet','Employee','AuthSession','ResetToken','User','Sender','GoogleCredential','Job','AuditLog','Setting','RateLimit']);
 });
 afterAll(()=>db.$disconnect());
 describe('public Google Sheets links',()=>{
@@ -113,7 +114,7 @@ describe('original WhatsApp Web login',()=>{
     const page={url:()=> 'https://web.whatsapp.com/',isClosed:()=>false,evaluate:vi.fn(async fn=>String(fn).includes('querySelector')?signedIn:undefined),$:vi.fn(async()=>canvas),createCDPSession:vi.fn(),bringToFront:vi.fn(),reload:vi.fn()};
     const duplicate={url:()=> 'https://web.whatsapp.com/',close:vi.fn(async()=>{})};
     const browser={connected:true,pages:async()=>[page,duplicate],newPage:vi.fn(),once:vi.fn(),disconnect:vi.fn(async()=>{}),close:vi.fn()};nativeMocks.connect.mockResolvedValue(browser);
-    const sender=await db.sender.create({data:{id,name:'WhatsApp',provider:'WEB'}});const provider=new NativeWhatsAppProvider(sender);await provider.connect();
+    const sender=await db.sender.create({data:{organizationId:'legacy',id,name:'WhatsApp',provider:'WEB'}});const provider=new NativeWhatsAppProvider(sender);await provider.connect();
     await vi.waitFor(async()=>expect((await db.sender.findUniqueOrThrow({where:{id}})).status).toBe('WAITING_QR'));
     expect(await provider.getQRCode()).toBe(qr);expect(nativeMocks.instances).toHaveLength(0);expect(duplicate.close).toHaveBeenCalled();
     await provider.connect();expect(await provider.getQRCode()).toBe(qr);
@@ -124,7 +125,7 @@ describe('original WhatsApp Web login',()=>{
     await detachNativeWhatsApp();expect(browser.close).not.toHaveBeenCalled();
   });
   it('loads valid contacts without serializing messages and tolerates an unresolved private ID',async()=>{
-    const sender=await db.sender.create({data:{id:'contacts',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
+    const sender=await db.sender.create({data:{organizationId:'legacy',id:'contacts',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const client={getState:async()=> 'CONNECTED',info:{wid:{user:'919876543210'}},getContacts:async()=>[
       {id:{_serialized:'919876543211@c.us'},number:'919876543211',name:'Saved contact'},
       {id:{_serialized:'broken@lid'},name:'Unresolved'},
@@ -138,7 +139,7 @@ describe('original WhatsApp Web login',()=>{
     }finally{registerWebClient(sender.id,null);}
   });
   it('keeps saved contacts when chat metadata is temporarily unavailable',async()=>{
-    const sender=await db.sender.create({data:{id:'contacts-fallback',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
+    const sender=await db.sender.create({data:{organizationId:'legacy',id:'contacts-fallback',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const client={getState:async()=> 'CONNECTED',info:{wid:{user:'919876543210'}},getContacts:async()=>[{id:{_serialized:'919876543211@c.us'},number:'919876543211',name:'Saved contact'}],pupPage:{evaluate:vi.fn().mockRejectedValue(new Error('Chats still syncing'))}};
     registerWebClient(sender.id,client as unknown as import('whatsapp-web.js').Client);
     try{expect(await new WebWhatsAppProvider(sender).refreshContacts()).toEqual([{phone:'+919876543211',name:'Saved contact'}]);}
@@ -150,7 +151,7 @@ describe('original WhatsApp Web login',()=>{
     let signedIn=false;const bounds:unknown[]=[];
     const page={url:()=> 'https://web.whatsapp.com/',isClosed:()=>false,evaluate:vi.fn(async fn=>String(fn).includes('querySelector')?signedIn:undefined),createCDPSession:async()=>({send:async(method:string,args:unknown)=>{if(method==='Browser.setWindowBounds')bounds.push(args);return {windowId:7};},detach:async()=>{}}),bringToFront:vi.fn(),reload:vi.fn()};
     const browser={connected:true,pages:async()=>[page],newPage:vi.fn(),once:vi.fn(),disconnect:vi.fn(async()=>{}),close:vi.fn()};nativeMocks.connect.mockResolvedValue(browser);
-    const sender=await db.sender.create({data:{id,name:'WhatsApp',provider:'WEB'}});const provider=new NativeWhatsAppProvider(sender);await provider.connect();
+    const sender=await db.sender.create({data:{organizationId:'legacy',id,name:'WhatsApp',provider:'WEB'}});const provider=new NativeWhatsAppProvider(sender);await provider.connect();
     expect(nativeMocks.instances).toHaveLength(0);expect((await db.sender.findUniqueOrThrow({where:{id}})).status).toBe('WAITING_LOGIN');expect(await provider.getQRCode()).toBeNull();
     signedIn=true;
     await vi.waitFor(async()=>expect((await db.sender.findUniqueOrThrow({where:{id}})).status).toBe('CONNECTED'),{timeout:5000});
@@ -252,7 +253,7 @@ describe('durable end-to-end workflow',()=>{
   });
   it('starts a sheet with selected contacts and a new number, then pauses queued sends',async()=>{
     const {admin}=await fixture();await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
-    await db.sender.create({data:{id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
+    await db.sender.create({data:{organizationId:'legacy',id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const selected=[{name:'Selected contact',phone:'+919876543210'},{name:'New conversation',phone:'+919876543219'}];
     await simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000/api/simple/sheets/sheet/recipients',{method:'PUT',body:JSON.stringify({recipients:selected})}),admin);
     const rule=await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'},include:{recipients:{orderBy:{position:'asc'},include:{employee:true}}}});
@@ -272,7 +273,7 @@ describe('durable end-to-end workflow',()=>{
     rows.push({stableId:'source-4',row:6,values:{customerName:'Fifth customer',mobile:'+919800000004'}});
     await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(rows))}});
     await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
-    await db.sender.create({data:{id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
+    await db.sender.create({data:{organizationId:'legacy',id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const people=[0,1,2].map(i=>({name:`Employee ${i}`,phone:`+91987654321${i}`}));
     const select=(recipients:typeof people)=>simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients})}),admin);
     await select([people[0]]);await synchronizeSheet('sheet',new DemoSheetsProvider());
@@ -334,7 +335,7 @@ describe('durable end-to-end workflow',()=>{
   it('rejects simultaneous stale feedback and preserves the accepted history',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const a=await db.assignment.findFirstOrThrow({where:{isPrimary:true},include:{lead:true}});const data={status:'Interested',remarks:'Customer called back',version:a.lead.version};const result=await Promise.allSettled([saveFeedback(a.id,data),saveFeedback(a.id,data)]);expect(result.filter(r=>r.status==='fulfilled')).toHaveLength(1);expect(await db.feedback.count()).toBe(1);});
   it('reassigns manually and revokes the former owner’s feedback link',async()=>{await fixture('MANUAL');await synchronizeSheet('sheet');const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id,'e0','admin');const message=await db.message.findFirstOrThrow();const token=decrypt(message.encryptedBody).match(/\/feedback\/([^\s]+)/)![1];await assignLead(lead.id,'e1','admin',true);await expect(getFeedbackAccess(token)).rejects.toThrow(/expired|revoked/);expect(await db.assignment.count({where:{leadId:lead.id,isPrimary:true,active:true}})).toBe(1);});
   it('does not inflate unique leads when notifying everyone',async()=>{const {admin}=await fixture('ALL');await synchronizeSheet('sheet');await drainJobs(100);const data=await workspace(admin,new URLSearchParams());expect(data.stats.total).toBe(4);expect(data.stats.assigned).toBe(4);expect(data.stats.notifications).toBe(12);expect(await db.feedbackToken.count()).toBe(4);});
-  it('restricts executive and manager access to their assigned records',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const executive=await db.user.findUniqueOrThrow({where:{id:'u1'}});expect(await db.lead.count({where:leadScope(executive)})).toBe(1);const manager=await db.user.create({data:{name:'Manager',email:'manager@test.invalid',passwordHash:'unused',role:'MANAGER'}});expect(await db.lead.count({where:leadScope(manager)})).toBe(0);await db.sheetAccess.create({data:{userId:manager.id,sheetId:'sheet'}});expect(await db.lead.count({where:leadScope(manager)})).toBe(4);});
+  it('restricts executive and manager access to their assigned records',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const executive=await db.user.findUniqueOrThrow({where:{id:'u1'}});expect(await db.lead.count({where:leadScope(executive)})).toBe(1);const manager=await db.user.create({data:{organizationId:'legacy',name:'Manager',email:'manager@test.invalid',passwordHash:'unused',role:'MANAGER'}});expect(await db.lead.count({where:leadScope(manager)})).toBe(0);await db.sheetAccess.create({data:{userId:manager.id,sheetId:'sheet'}});expect(await db.lead.count({where:leadScope(manager)})).toBe(4);});
   it('updates a moved row by stable identity and refuses a deleted row',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const lead=await db.lead.findFirstOrThrow();const provider=new DemoSheetsProvider();const sheet=await db.sheet.findUniqueOrThrow({where:{id:'sheet'}});let rows=(await provider.read(sheet)).reverse().map((r,i)=>({...r,row:i+2}));await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(rows))}});await synchronizeSheet('sheet');await writebackLead(lead.id);rows=rows.filter(r=>r.stableId!==lead.stableSourceId);await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(rows))}});await expect(writebackLead(lead.id)).rejects.toThrow(/deleted/);});
   it('preserves feedback when Google is unavailable and retries writeback independently',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const a=await db.assignment.findFirstOrThrow({where:{isPrimary:true},include:{lead:true}});await saveFeedback(a.id,{status:'Interested',remarks:'Feedback survives outage',version:a.lead.version});await expect(writebackLead(a.leadId,{read:vi.fn(),write:vi.fn().mockRejectedValue(new AppError(502,'Google unavailable'))})).rejects.toThrow();expect((await db.lead.findUniqueOrThrow({where:{id:a.leadId}})).lastFeedback).toBe('Feedback survives outage');await writebackLead(a.leadId);expect((await db.lead.findUniqueOrThrow({where:{id:a.leadId}})).writebackStatus).toBe('SYNCED');});
   it('holds uncertain provider timeouts without automatic resend',async()=>{await fixture();await synchronizeSheet('sheet');const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);const m=await db.message.findFirstOrThrow();const provider=new DemoWhatsAppProvider(await db.sender.findUniqueOrThrow({where:{id:'sender'}}));vi.spyOn(provider,'sendMessage').mockRejectedValue(new UncertainDelivery('timeout'));await dispatchMessage(m.id,provider);const failed=await db.message.findUniqueOrThrow({where:{id:m.id}});expect(failed.status).toBe('FAILED');expect(failed.uncertain).toBe(true);await dispatchMessage(m.id,provider);expect(provider.sendMessage).toHaveBeenCalledTimes(1);});

@@ -5,7 +5,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { TOTP, Secret } from 'otpauth';
 import QRCode from 'qrcode';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { db } from '@/lib/db';
+import { db, databaseHealth, usingSQLite } from '@/lib/db';
 import { isDemo, appUrl } from '@/lib/config';
 import { AppError, audit, checkOrigin, encrypt, hash, loginSession, logoutSession, opaqueToken, passwordHash, rateLimit, requireUser, safeUser, verifyPassword, verifyTotp, signedFeedbackToken } from '@/lib/security';
 import { accessibleLead, accessibleSheet, employeeScope, leadScope, sheetScope } from '@/lib/permissions';
@@ -31,9 +31,9 @@ async function handler(request:Request,context:Context):Promise<Response> {
     const {path}=await context.params;
     const route=path.join('/');const method=request.method;const url=new URL(request.url);const p=url.searchParams;
     if(route==='health'){
-      await db.$queryRaw`SELECT 1`;
+      await databaseHealth();
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
-      return ok({status:'ok',mode:isDemo()?'demo':'production',workerRunning:!!worker&&Date.now()-Number((worker.value as {at:number}).at)<30000});
+      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',workerRunning:!!worker&&Date.now()-Number((worker.value as {at:number}).at)<30000});
     }
     if(route==='webhooks/whatsapp'){
       if(method==='GET'){
@@ -81,7 +81,7 @@ async function handler(request:Request,context:Context):Promise<Response> {
       const {token,password}=z.object({token:z.string().min(30),password:z.string().min(12).max(128)}).parse(await body(request));
       const reset=await db.resetToken.findUnique({where:{id:hash(token)}});
       if(!reset||reset.usedAt||reset.expiresAt<new Date())throw new AppError(410,'Reset link expired or already used');
-      await transaction(async tx=>{const claimed=await tx.resetToken.updateMany({where:{id:reset.id,usedAt:null,expiresAt:{gt:new Date()}},data:{usedAt:new Date()}});if(!claimed.count)throw new AppError(410,'Reset link already used');await tx.user.update({where:{id:reset.userId},data:{passwordHash:passwordHash(password)}});await tx.authSession.deleteMany({where:{userId:reset.userId}});});return ok({message:'Password updated. Sign in with your new password.'});
+      await transaction(async tx=>{const claimed=await tx.resetToken.updateMany({where:{id:reset.id,OR:[{usedAt:null},...(!usingSQLite?[{usedAt:{isSet:false}}]:[])],expiresAt:{gt:new Date()}},data:{usedAt:new Date()}});if(!claimed.count)throw new AppError(410,'Reset link already used');await tx.user.update({where:{id:reset.userId},data:{passwordHash:passwordHash(password)}});await tx.authSession.deleteMany({where:{userId:reset.userId}});});return ok({message:'Password updated. Sign in with your new password.'});
     }
     if(path[0]==='feedback'&&path[1]){
       await rateLimit(`feedback:${hash(path[1])}`,60,60);

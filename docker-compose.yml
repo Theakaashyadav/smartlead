@@ -1,46 +1,21 @@
 services:
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: smartlead
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
-      POSTGRES_DB: smartlead
-    volumes: [postgres-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: [CMD-SHELL, "pg_isready -U smartlead"]
-      interval: 5s
-      retries: 20
-    restart: unless-stopped
-  redis:
-    image: redis:7-alpine
-    command: [redis-server, --appendonly, "yes"]
-    volumes: [redis-data:/data]
-    healthcheck:
-      test: [CMD, redis-cli, ping]
-      interval: 5s
-      retries: 20
-    restart: unless-stopped
-  migrate:
+  setup:
     build: .
     env_file: .env
     environment:
+      DATABASE_PROVIDER: mongodb
       DEMO_MODE: "false"
-      DATABASE_URL: postgresql://smartlead:${POSTGRES_PASSWORD}@postgres:5432/smartlead
-    command: [npm, run, db:migrate]
-    depends_on:
-      postgres: {condition: service_healthy}
+    command: [npm, run, db:setup]
   web:
     build: .
     env_file: .env
     environment:
+      DATABASE_PROVIDER: mongodb
       DEMO_MODE: "false"
-      DATABASE_URL: postgresql://smartlead:${POSTGRES_PASSWORD}@postgres:5432/smartlead
-      REDIS_URL: redis://redis:6379
       WHATSAPP_LOGIN_MODE: background
     ports: ["127.0.0.1:3000:3000"]
     depends_on:
-      migrate: {condition: service_completed_successfully}
-      redis: {condition: service_healthy}
+      setup: {condition: service_completed_successfully}
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -51,21 +26,19 @@ services:
     build: .
     env_file: .env
     environment:
+      DATABASE_PROVIDER: mongodb
       DEMO_MODE: "false"
-      DATABASE_URL: postgresql://smartlead:${POSTGRES_PASSWORD}@postgres:5432/smartlead
-      REDIS_URL: redis://redis:6379
       WHATSAPP_LOGIN_MODE: background
       WHATSAPP_PROFILE_DIR: /app/data/whatsapp-web
+      WHATSAPP_SESSION_DIR: /app/runtime-sessions
+      CHROME_PATH: /usr/bin/chromium
     command: [npm, run, worker]
-    volumes: [sender-archives:/app/data]
+    volumes: [browser-runtime:/app/data]
     tmpfs: [/app/runtime-sessions:uid=1000,gid=1000,mode=0700]
     shm_size: 256mb
     depends_on:
-      migrate: {condition: service_completed_successfully}
-      redis: {condition: service_healthy}
+      setup: {condition: service_completed_successfully}
     init: true
     restart: unless-stopped
 volumes:
-  postgres-data:
-  redis-data:
-  sender-archives:
+  browser-runtime:

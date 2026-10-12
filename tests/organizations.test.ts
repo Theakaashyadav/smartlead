@@ -1,3 +1,4 @@
+import { clearTestModels } from './database-fixture';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const cookieStore=vi.hoisted(()=>new Map<string,string>());
 vi.mock('next/headers',()=>({cookies:async()=>({
@@ -36,7 +37,7 @@ async function fixture(){
 }
 beforeEach(async()=>{
   vi.restoreAllMocks();vi.unstubAllGlobals();vi.unstubAllEnvs();vi.stubEnv('WHATSAPP_LOGIN_MODE','qr');cookieStore.clear();
-  for(const name of ['FeedbackToken','Feedback','Followup','Message','Assignment','Lead','RuleRecipient','DistributionRule','SheetAccess','SyncLog','Sheet','Employee','AuthSession','ResetToken','User','Sender','GoogleCredential','Job','AuditLog','Setting','RateLimit'])await db.$executeRawUnsafe(`DELETE FROM "${name}"`);
+  await clearTestModels(['FeedbackToken','Feedback','Followup','Message','Assignment','Lead','RuleRecipient','DistributionRule','SheetAccess','SyncLog','Sheet','Employee','AuthSession','ResetToken','User','Sender','GoogleCredential','Job','AuditLog','Setting','RateLimit']);
   await db.organization.deleteMany({where:{id:{not:'legacy'}}});
   await db.setting.create({data:{key:'feedback:remoteRequired',value:false}});
 });

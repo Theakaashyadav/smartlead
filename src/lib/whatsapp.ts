@@ -1,10 +1,9 @@
 import { db } from './db';
-import { AppError, decrypt, encrypt } from './security';
+import { AppError, decrypt } from './security';
 import { isDemo } from './config';
-import type { Sender } from '@/generated/postgres';
+import type { Sender } from '@/generated/mongo';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
-import path from 'node:path';
+import { EncryptedAuthStore } from './whatsapp-archives';
 import QRCode from 'qrcode';
 import { phoneSchema } from './validation';
 import type { WhatsAppContact } from './simple-shared';
@@ -69,15 +68,6 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
   }
 }
 
-// Only the worker owns browser sessions. Encrypted RemoteAuth archives survive restarts.
-class EncryptedAuthStore {
-  private root=path.resolve(process.env.WHATSAPP_REMOTE_AUTH_DIR||'data/auth-archives');
-  private file(session:string){if(!/^[\w-]+$/.test(session))throw new Error('Invalid session identifier');return path.join(this.root,`${session}.enc`);}
-  async sessionExists({session}:{session:string}){return existsSync(this.file(session));}
-  async save({session}:{session:string}){await mkdir(this.root,{recursive:true,mode:0o700});const zip=await readFile(path.resolve(process.env.WHATSAPP_SESSION_DIR||'data/sessions',`${session}.zip`));await writeFile(this.file(session),encrypt(zip.toString('base64')),{mode:0o600});}
-  async extract({session,path:destination}:{session:string;path:string}){const value=decrypt(await readFile(this.file(session),'utf8'));await writeFile(destination,Buffer.from(value,'base64'),{mode:0o600});}
-  async delete({session}:{session:string}){await unlink(this.file(session)).catch(()=>{});}
-}
 type WClient=import('whatsapp-web.js').Client;
 const clients=new Map<string,WClient>();
 export function registerWebClient(id:string,client:WClient|null){if(client)clients.set(id,client);else clients.delete(id);}

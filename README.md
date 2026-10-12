@@ -6,22 +6,22 @@ A simple Google Sheets → WhatsApp lead sender. Log in, connect multiple sheets
 
 Use **Create an account** on the login page (or `/register`) for each organisation. Enter your name, organisation name, email, and a password of at least 12 characters. Your email is your login ID. Each registration opens an empty workspace with its own WhatsApp connection, Google Sheets, contacts, recipients, leads, credentials, settings, and job history. Administrators can access only their own organisation. Users added through the team API belong to the inviting administrator's organisation; use registration for an independent organisation.
 
-Your existing account, sheets, WhatsApp session, and lead history stay in the original organisation. To upgrade an existing SQLite installation, run `npm run db:upgrade-organizations`, `npm run db:generate`, then `npm run build` and restart SmartLead. The upgrade saves a database backup in `data/backups/` before making changes. For PostgreSQL, run `npm run db:migrate` and `npm run db:generate` before rebuilding and restarting the application and worker.
+SmartLead now uses MongoDB by default. This installation starts with an empty `smartlead` database; previous SQLite files remain untouched and are not imported. Create new organisation accounts and connect their sheets and WhatsApp separately. The old SQLite organisation upgrade is available only for explicitly configured legacy demo installations.
 
 You and your friend sign in with different email addresses and connect your own WhatsApp and sheets. On one browser, sign out before changing accounts; separate browser profiles can stay signed in simultaneously. For access from another computer, both users need a reachable hosted installation (see Production installation); `127.0.0.1` only works on the computer running SmartLead.
 
 The server-level Google service account remains available to the original organisation only. Other organisations must connect their own Google credentials for authenticated sheets; public sheet links continue to work without Google authentication.
 
-## Run the local demo
+## Run locally with MongoDB
 
-Node.js **22.18 or newer** is required. Dependencies and demo data are already installed in this workspace.
+Node.js **22.18 or newer** is required. Configure MongoDB using the steps below before the first start. Use Create an account to register your organisation; the empty database has no pre-created demo login.
 
 Double-click **Start SmartLead.cmd**. It starts both the built application and automatic sending in the background, waits until they are ready, and opens **http://127.0.0.1:3000/login**. They keep running after the launcher closes. Run the launcher again after restarting Windows; opening it again while the app is running reuses the existing processes. Logs are in `data/smartlead-server.log`, `data/smartlead-server.error.log`, `data/smartlead-worker.log`, and `data/smartlead-worker.error.log`.
 
 1. Log in. The dashboard has only **Connect Sheets** and **Connect WhatsApp** cards.
 2. Open **Connect WhatsApp** → **Connect WhatsApp**. SmartLead loads the original `https://web.whatsapp.com/` in a background browser with no visible window. If linking is needed, scan the original website's live QR shown in SmartLead. Its existing saved login is reused when available. After linking, you can close the dashboard and all visible browser windows; the background worker keeps sending.
 3. In Google Sheets, set **Share → General access → Anyone with the link → Editor**, then open **Connect Sheets** and paste the link. No Google login, service-account key, or API setup is needed.
-4. Choose the tab and check the automatically detected customer-name and phone columns. SmartLead reads the public sheet directly and stores sending progress in its local database.
+4. Choose the tab and check the automatically detected customer-name and phone columns. SmartLead reads the public sheet directly and stores sending progress in its MongoDB database.
 5. Select recipients from your linked WhatsApp account. If someone is missing, add their phone number. **Save & start sending** starts the queue. A new conversation starts on the first message to a registered WhatsApp number.
 
 Existing rows are sent when you start. Each sheet checks for new rows every minute. Sending runs sequentially in the background; the round-robin cursor and source IDs persist across restarts. You can edit recipients or pause a sheet from its card. It displays real connections rather than the fictional seed sources.
@@ -76,47 +76,45 @@ For source development, use `npm run dev` and keep that terminal open. Rebuild w
 
 Run `npm run worker` in a second terminal when developing; the Windows launcher starts it automatically. The WhatsApp browser saves its login in a dedicated profile under `data/whatsapp-web/`, separate from your everyday browsing profile. Background mode is the default (`WHATSAPP_LOGIN_MODE=background`); it creates no desktop window. Restarting the worker reconnects to that browser and profile instead of creating another linked device. The sending SDK attaches only after you sign in on the original site. The phone must approve device linking; SmartLead cannot override a WhatsApp account restriction.
 
-Local sending still needs the computer, internet, and background worker running. Closing browser windows is supported; shutting down the computer stops local sending. A later Hostinger VPS deployment can run the same worker and background browser without your local computer, using the persistent `sender-archives` volume for its profile. Link the account once on the server; Windows browser profiles are not copied to Linux. Set `WHATSAPP_LOGIN_MODE=native` only if you explicitly want the earlier visible desktop login mode.
+Local sending still needs the computer, internet, and background worker running. Closing browser windows is supported; shutting down the computer stops local sending. A later Hostinger VPS deployment can run the same worker and background browser without your local computer, using the persistent `browser-runtime` volume for its profile. Link the account once on the server; Windows browser profiles are not copied to Linux. Set `WHATSAPP_LOGIN_MODE=native` only if you explicitly want the earlier visible desktop login mode.
 
-| Role | Email | Demo password |
-| --- | --- | --- |
-| Super Admin | admin@smartlead.demo | SmartLead!2026 |
-| Sales Executive | akash@smartlead.demo | SmartLead!2026 |
-| Sales Executive | aman@smartlead.demo | SmartLead!2026 |
-| Sales Executive | kunal@smartlead.demo | SmartLead!2026 |
-| Sales Executive | sahil@smartlead.demo | SmartLead!2026 |
+## Database setup
 
-For a fresh checkout:
+MongoDB uses databases and collections rather than folders. SmartLead creates its own **smartlead** database on your existing server, containing collections such as `organizations`, `users`, `sheets`, `senders`, `leads`, `feedback`, `jobs`, and `settings`. Other databases are not accessed or changed. A URI that names another database is still redirected to `MONGODB_DATABASE=smartlead`; its authentication database is preserved. Alternative project database names must start with `smartlead_`.
+
+1. Copy `.env.example` to `.env`. Set `MONGODB_URI` to your existing connection string, `MONGODB_DATABASE=smartlead`, `DATABASE_PROVIDER=mongodb`, and `DEMO_MODE=false`. Keep `.env` private and ignored by Git.
+2. Set random secrets. Generate `SESSION_SECRET` with `node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"` and `ENCRYPTION_KEY` with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Preserve your existing secrets when upgrading.
+3. Allow the application server's IP in Atlas Network Access and give the database user read/write access to `smartlead`. MongoDB must support transactions through a replica set; Atlas supplies this.
+4. Run:
 
 ```powershell
 $env:PUPPETEER_SKIP_DOWNLOAD = 'true'
 npm ci
-npm run demo:setup
-npm run dev
+npm run db:setup
+npm run build
 ```
 
-`demo:setup` creates random local secrets, an SQLite database, a local administrator and legacy fictional fixtures. Re-running it preserves existing records. The simplified interface hides those fixtures and uses real Google Sheets and WhatsApp Web connections. `DEMO_MODE=true` selects local SQLite; it does not simulate the connections created by the simplified interface. A publicly shared sheet link and a linked WhatsApp account are required for live use.
+Then open **Start SmartLead.cmd**, choose **Create an account**, and connect your organisation's WhatsApp and sheets. Setup creates collections, indexes, and a project marker; it does not seed users or import old data. Re-running setup preserves SmartLead records and restores required indexes. It refuses an occupied database without the SmartLead project marker. Do not use `prisma db push` or `prisma migrate` for MongoDB: `db:setup` maintains partial unique indexes that allow multiple unlinked employees and messages without provider IDs.
 
+All application records, login sessions, Google/Meta credentials, contacts, feedback, audit history, and durable automation jobs use MongoDB. Credentials and SDK RemoteAuth backups are encrypted with `ENCRYPTION_KEY`; backups use the `whatsapp_archives.files` and `whatsapp_archives.chunks` GridFS collections. Background/native Chromium profiles, temporary SDK files, build output, and runtime logs still need worker filesystem storage. Keep the browser profile volume and encryption key when restoring or moving the server.
+
+For the optional fictional SQLite demo in a separate checkout, set `DATABASE_PROVIDER=sqlite` and `DEMO_MODE=true`, then run `npm run demo:setup`. This legacy mode uses `DEMO_DATABASE_URL` and demo-only credentials `admin@smartlead.demo` / `SmartLead!2026`. `DEMO_MODE` controls demo providers and fixtures; it does not select the database. Do not run demo setup on the MongoDB installation.
 
 ## Production installation
 
-Production requires a Linux/Docker host with persistent Node processes. The WhatsApp browser session and Redis/PostgreSQL connections cannot run on a static host or a Cloudflare Worker. No external site was published.
+Use a Hostinger VPS or another host supporting persistent Node processes and Chromium. Static website hosting cannot run the worker. Point your domain to the server, enable HTTPS, and set `APP_URL=https://your-domain` in `.env`; feedback then uses your domain directly. Cloudflare is not required. Keep `PUBLIC_FEEDBACK_URL` empty when feedback shares the app's domain.
 
-1. Copy `.env.example` to `.env`. Set `DEMO_MODE=false`, the public HTTPS `APP_URL`, a strong `POSTGRES_PASSWORD`, `ADMIN_EMAIL`, and a unique `ADMIN_PASSWORD` of at least 12 characters. Do not use demo passwords.
-2. Generate `SESSION_SECRET` with `node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"` and `ENCRYPTION_KEY` with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Keep the encryption key stable and backed up separately from the database.
-3. Configure Google, WhatsApp, and SMTP as described below.
-4. Run:
+Configure the same MongoDB settings and secrets above, allow the hosting server's IP in Atlas, then run:
 
 ```sh
 docker compose up -d --build
-docker compose run --rm web npm run seed
 ```
 
-The one-time migration service applies the committed PostgreSQL migration before the web and worker services start. `seed` creates only a production administrator when `DEMO_MODE=false`. It does not insert fictional records in production.
+The setup service initializes only SmartLead's database before the application and worker start. No PostgreSQL or Redis service is required. Register accounts at `/register`; `npm run seed` is optional and requires explicit `ADMIN_EMAIL` and `ADMIN_PASSWORD` values when `DEMO_MODE=false`.
 
-Put an HTTPS reverse proxy in front of `127.0.0.1:3000`; `deploy/Caddyfile` is supplied. Set `SMARTLEAD_DOMAIN` to your domain when using Caddy. Configure the public `APP_URL` before issuing feedback links. Do not expose PostgreSQL or Redis publicly. Use a single dedicated worker instance; it serializes browser sends and owns all Web sessions. Scale web instances independently.
+Put an HTTPS reverse proxy in front of `127.0.0.1:3000`; `deploy/Caddyfile` is supplied. Set `SMARTLEAD_DOMAIN` when using Caddy. Use one dedicated worker; it owns browser sessions, polls the MongoDB outbox, atomically claims jobs, and serializes sends with a delay. Web instances may run independently. The browser runtime volume is separate from durable MongoDB records.
 
-Without Docker, provision PostgreSQL and Redis, set their URLs, then run `npm ci`, `npm run db:migrate`, `npm run seed`, `npm run build`, `npm start`, and `npm run worker` under a process supervisor. Install Chromium and set `CHROME_PATH` for Web senders.
+Without Docker, configure `.env`, run `npm ci`, `npm run db:setup`, and `npm run build`, then supervise `npm start` and `npm run worker`. Install Chromium and set `CHROME_PATH` on Linux. Back up the `smartlead` database, encryption key, and worker browser profiles.
 
 ## Google Sheets
 
@@ -153,8 +151,8 @@ Submission timeouts and worker crashes during a possible send are flagged **unce
 - Salted scrypt password hashing; signed, revocable server sessions in HttpOnly cookies; optional TOTP; SMTP password resets; role checks on every protected API.
 - Super administrators manage integrations and users. Managers access assigned sheets and their configured employees. Executives access only active primary assignments. New managers can be created in Settings → Roles & access; create executive logins when adding a team member.
 - Feedback links contain a signed random token, store only its hash, expire, and are revoked on reassignment. A link grants access to one assignment; treat it as a password. Feedback submissions use optimistic versions to prevent concurrent overwrites. Never place feedback URLs in analytics or access logs; reverse proxies should suppress/redact `/feedback/` and `/api/feedback/` paths.
-- Durable database outbox, atomic claims, exponential backoff, eight-attempt dead-letter handling, BullMQ rate limiting, stale-lock recovery, and privacy-safe application logs. Settings → Automation health exposes pending/dead-letter work.
-- Back up PostgreSQL, encryption keys, and encrypted sender archives; test restores. Health: `GET /api/health`. Observe worker errors and dead-letter counts. Configure SMTP for real reset email delivery; unconfigured resets return a generic response without pretending to send mail.
+- Durable database outbox, atomic claims, exponential backoff, eight-attempt dead-letter handling, sequential worker send pacing, stale-lock recovery, and privacy-safe application logs. Settings → Automation health exposes pending/dead-letter work.
+- Back up the SmartLead MongoDB database, encryption keys, and browser profiles; test restores. Health: `GET /api/health`. Observe worker errors and dead-letter counts. Configure SMTP for real reset email delivery; unconfigured resets return a generic response without pretending to send mail.
 - Data retention is deliberate: set `RETENTION_DAYS` (minimum 30), run `npm run retention` to preview, then `npm run retention -- --apply` to redact eligible closed application records. This removes customer/contact text from leads, feedback and message bodies, revokes access, and retains pseudonymous source-identity tombstones to prevent re-import. It does not modify the original spreadsheet; handle its retention separately.
 - Use this system only for an authorized sales workflow and authorized internal recipients. There is no customer broadcast, contact scraping, or automatic customer-facing marketing flow.
 
@@ -163,11 +161,12 @@ Submission timeouts and worker crashes during a possible send are flagged **unce
 ```sh
 npm run typecheck
 npm test
+npm run test:mongodb
 npm run build
 # With npm run dev running; Windows uses installed Edge by default:
 npm run test:e2e
 ```
 
-The integration suite creates its own SQLite database and mocks external providers. Browser tests use the fictional demo workspace and submit explicitly labeled fictional feedback. Browser screenshots are generated in `data/`. For Linux browser QA, change Playwright's `channel` or install the appropriate supported browser. The PostgreSQL/Redis Docker runtime and live Google/Meta/phone authentication must also be tested in your deployment environment; those external services are not available in this workspace.
+The regular suite uses an isolated SQLite fixture for legacy compatibility. `npm run test:mongodb` runs the workflow, organisation-isolation, transaction, uniqueness, and encrypted-archive tests against an isolated local MongoDB replica set; it never uses your Atlas database. Its first run downloads a MongoDB test binary into ignored `data/mongodb-test-binaries/`. Browser tests use the separate fictional demo workspace. Live Google/Meta/phone authentication and Docker deployment still require checks in the target environment.
 
 API details: [docs/API.md](docs/API.md). The schema, migrations, worker and providers are in `prisma/`, `src/worker.ts`, and `src/lib/`. The UI is in `src/components/`.

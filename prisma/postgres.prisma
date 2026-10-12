@@ -1,0 +1,343 @@
+generator client {
+  provider = "prisma-client-js"
+  output = "../src/generated/postgres"
+}
+
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+
+model Organization {
+  id String @id @default(cuid())
+  name String
+  createdAt DateTime @default(now())
+  users User[]
+  sheets Sheet[]
+  senders Sender[]
+  employees Employee[]
+  credentials GoogleCredential[]
+  jobs Job[]
+}
+
+model User {
+  id String @id @default(cuid())
+  organizationId String @default("legacy")
+  organization Organization @relation(fields:[organizationId], references:[id])
+  name String
+  email String @unique
+  passwordHash String
+  role String @default("EXECUTIVE")
+  active Boolean @default(true)
+  totpSecret String?
+  createdAt DateTime @default(now())
+  employee Employee?
+  sessions AuthSession[]
+  sheetAccess SheetAccess[]
+  resetTokens ResetToken[]
+}
+
+model AuthSession {
+  id String @id
+  userId String
+  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([userId])
+}
+
+model ResetToken {
+  id String @id
+  userId String
+  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+  expiresAt DateTime
+  usedAt DateTime?
+}
+
+model SheetAccess {
+  userId String
+  sheetId String
+  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:Cascade)
+  @@id([userId,sheetId])
+}
+
+model GoogleCredential {
+  id String @id @default(cuid())
+  organizationId String @default("legacy")
+  organization Organization @relation(fields:[organizationId], references:[id])
+  label String
+  type String
+  encryptedValue String
+  createdAt DateTime @default(now())
+  sheets Sheet[]
+}
+
+model Sheet {
+  id String @id @default(cuid())
+  organizationId String @default("legacy")
+  organization Organization @relation(fields:[organizationId], references:[id])
+  name String
+  project String
+  spreadsheetId String
+  worksheetId Int @default(0)
+  worksheetName String @default("Sheet1")
+  connectionType String @default("SERVICE_ACCOUNT")
+  credentialId String?
+  credential GoogleCredential? @relation(fields:[credentialId], references:[id])
+  columnMapping Json
+  managedColumnsApproved Boolean @default(false)
+  syncInterval Int @default(180)
+  lastSyncAt DateTime?
+  syncStatus String @default("PENDING")
+  lastSyncError String?
+  lastImported Int @default(0)
+  createdAt DateTime @default(now())
+  leads Lead[]
+  rule DistributionRule?
+  access SheetAccess[]
+  syncLogs SyncLog[]
+  @@unique([organizationId, spreadsheetId, worksheetId])
+}
+
+model Sender {
+  id String @id @default(cuid())
+  organizationId String @default("legacy")
+  organization Organization @relation(fields:[organizationId], references:[id])
+  name String
+  phone String?
+  provider String
+  status String @default("DISCONNECTED")
+  encryptedCredentials String?
+  qrCode String?
+  lastConnectedAt DateTime?
+  lastError String?
+  createdAt DateTime @default(now())
+  rules DistributionRule[]
+  messages Message[]
+}
+
+model Employee {
+  id String @id @default(cuid())
+  organizationId String @default("legacy")
+  organization Organization @relation(fields:[organizationId], references:[id])
+  userId String? @unique
+  user User? @relation(fields:[userId], references:[id])
+  name String
+  phone String
+  department String @default("Sales")
+  role String @default("Sales Executive")
+  projects Json
+  active Boolean @default(true)
+  dailyLimit Int @default(50)
+  capacity Int @default(100)
+  remarks String @default("")
+  createdAt DateTime @default(now())
+  recipients RuleRecipient[]
+  assignments Assignment[]
+  followups Followup[]
+  @@unique([organizationId, phone])
+}
+
+model DistributionRule {
+  id String @id @default(cuid())
+  sheetId String @unique
+  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:Cascade)
+  mode String @default("ROUND_ROBIN")
+  senderId String?
+  sender Sender? @relation(fields:[senderId], references:[id])
+  cursor Int @default(0)
+  enabled Boolean @default(true)
+  template String
+  metaTemplate String?
+  metaLanguage String @default("en")
+  recipients RuleRecipient[]
+}
+
+model RuleRecipient {
+  ruleId String
+  employeeId String
+  weight Int @default(0)
+  position Int @default(0)
+  rule DistributionRule @relation(fields:[ruleId], references:[id], onDelete:Cascade)
+  employee Employee @relation(fields:[employeeId], references:[id], onDelete:Cascade)
+  @@id([ruleId,employeeId])
+}
+
+model Lead {
+  id String @id @default(cuid())
+  sheetId String
+  sheet Sheet @relation(fields:[sheetId], references:[id])
+  stableSourceId String
+  metadataId Int?
+  sourceRow Int
+  sourceFingerprint String
+  sourceData Json?
+  sourceDeleted Boolean @default(false)
+  customerName String
+  mobile String
+  email String?
+  project String
+  location String?
+  budget String?
+  source String?
+  requirement String?
+  leadDate DateTime @default(now())
+  status String @default("New")
+  interest String?
+  lastFeedback String?
+  nextFollowupAt DateTime?
+  lastContactAt DateTime?
+  version Int @default(0)
+  writebackStatus String @default("SYNCED")
+  managedSnapshot Json?
+  redactedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  assignments Assignment[]
+  feedback Feedback[]
+  followups Followup[]
+  messages Message[]
+  @@unique([sheetId,stableSourceId])
+  @@index([sheetId,status,createdAt])
+  @@index([mobile])
+  @@index([nextFollowupAt])
+}
+
+model Assignment {
+  id String @id @default(cuid())
+  leadId String
+  employeeId String
+  lead Lead @relation(fields:[leadId], references:[id])
+  employee Employee @relation(fields:[employeeId], references:[id])
+  assignedBy String?
+  isPrimary Boolean @default(true)
+  active Boolean @default(true)
+  generation Int @default(1)
+  assignedAt DateTime @default(now())
+  feedback Feedback[]
+  tokens FeedbackToken[]
+  messages Message[]
+  @@unique([leadId,employeeId,generation])
+  @@index([employeeId,active])
+}
+
+model FeedbackToken {
+  id String @id @default(cuid())
+  assignmentId String
+  assignment Assignment @relation(fields:[assignmentId], references:[id])
+  tokenHash String @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+}
+
+model Message {
+  id String @id @default(cuid())
+  idempotencyKey String @unique
+  leadId String
+  assignmentId String
+  senderId String
+  lead Lead @relation(fields:[leadId], references:[id])
+  assignment Assignment @relation(fields:[assignmentId], references:[id])
+  sender Sender @relation(fields:[senderId], references:[id])
+  recipient String
+  encryptedBody String
+  providerMessageId String? @unique
+  status String @default("QUEUED")
+  uncertain Boolean @default(false)
+  attemptCount Int @default(0)
+  queuedAt DateTime @default(now())
+  submittedAt DateTime?
+  sentAt DateTime?
+  deliveredAt DateTime?
+  readAt DateTime?
+  failedAt DateTime?
+  lastAttemptAt DateTime?
+  failureReason String?
+  @@index([status,queuedAt])
+}
+
+model Feedback {
+  id String @id @default(cuid())
+  leadId String
+  assignmentId String
+  lead Lead @relation(fields:[leadId], references:[id])
+  assignment Assignment @relation(fields:[assignmentId], references:[id])
+  employeeId String
+  status String
+  remarks String
+  interest String?
+  callOutcome String?
+  contactMethod String?
+  siteVisitAt DateTime?
+  expectedBudget String?
+  nextFollowupAt DateTime?
+  submittedAt DateTime @default(now())
+  @@index([leadId,submittedAt])
+}
+
+model Followup {
+  id String @id @default(cuid())
+  leadId String
+  employeeId String
+  lead Lead @relation(fields:[leadId], references:[id])
+  employee Employee @relation(fields:[employeeId], references:[id])
+  scheduledAt DateTime
+  status String @default("PENDING")
+  notes String?
+  completedAt DateTime?
+  remindedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([status,scheduledAt])
+}
+
+model Job {
+  id String @id @default(cuid())
+  organizationId String @default("legacy")
+  organization Organization @relation(fields:[organizationId], references:[id])
+  key String @unique
+  type String
+  entityId String
+  status String @default("PENDING")
+  attempts Int @default(0)
+  runAt DateTime @default(now())
+  lockedAt DateTime?
+  lockToken String?
+  error String?
+  createdAt DateTime @default(now())
+  @@index([status,runAt])
+}
+
+model SyncLog {
+  id String @id @default(cuid())
+  sheetId String
+  sheet Sheet @relation(fields:[sheetId], references:[id])
+  operation String
+  status String
+  details String
+  createdAt DateTime @default(now())
+  @@index([sheetId,createdAt])
+}
+
+model AuditLog {
+  id String @id @default(cuid())
+  userId String?
+  action String
+  entityType String
+  entityId String?
+  metadata Json?
+  createdAt DateTime @default(now())
+  @@index([entityType,entityId])
+}
+
+model Setting {
+  key String @id
+  value Json
+}
+
+model RateLimit {
+  key String @id
+  count Int @default(1)
+  expiresAt DateTime
+}

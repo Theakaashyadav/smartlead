@@ -1,5 +1,5 @@
-import type { Prisma, Sheet } from '@/generated/postgres';
-import { db } from './db';
+import type { Prisma, Sheet } from '@/generated/mongo';
+import { db, databaseTransaction } from './db';
 import { appUrl } from './config';
 import { AppError, audit, decrypt, encrypt, hash, opaqueToken, signedFeedbackToken, verifyFeedbackSignature } from './security';
 import { sheetProvider, sourceFingerprint, type SheetProvider } from './google';
@@ -22,7 +22,7 @@ export async function enqueue(tx:Prisma.TransactionClient, type:string, entityId
 }
 export async function transaction<T>(fn:(tx:Prisma.TransactionClient)=>Promise<T>):Promise<T> {
   for(let attempt=0;attempt<5;attempt++) {
-    try{return await db.$transaction(fn,{isolationLevel:'Serializable',maxWait:10000,timeout:20000});}
+    try{return await databaseTransaction(fn);}
     catch(error){const code=(error as {code?:string}).code;if(!['P2034','P1008','P2028'].includes(code||'')||attempt===4)throw error;await new Promise(r=>setTimeout(r,50*(attempt+1)));}
   }
   throw new Error('Transaction retry exhausted');

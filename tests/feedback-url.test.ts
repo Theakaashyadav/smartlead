@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Prisma } from '@/generated/postgres';
+import type { Prisma } from '@/generated/mongo';
 import { feedbackBaseURL } from '@/lib/feedback-url';
 import { simpleLeadMessage } from '@/lib/simple-shared';
 

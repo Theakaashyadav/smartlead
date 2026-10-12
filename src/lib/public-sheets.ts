@@ -1,4 +1,4 @@
-import type { Sheet } from '@/generated/postgres';
+import type { Sheet } from '@/generated/mongo';
 import type { SheetProvider, SourceRow } from './google';
 import { AppError, hash } from './security';
 import { phoneSchema } from './validation';

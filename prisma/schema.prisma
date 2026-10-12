@@ -1,15 +1,15 @@
 generator client {
   provider = "prisma-client-js"
-  output = "../src/generated/postgres"
+  output = "../src/generated/mongo"
 }
 
 datasource db {
-  provider = "postgresql"
-  url = env("DATABASE_URL")
+  provider = "mongodb"
+  url = env("MONGODB_URL")
 }
 
 model Organization {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   name String
   createdAt DateTime @default(now())
   users User[]
@@ -18,12 +18,13 @@ model Organization {
   employees Employee[]
   credentials GoogleCredential[]
   jobs Job[]
+  @@map("organizations")
 }
 
 model User {
-  id String @id @default(cuid())
-  organizationId String @default("legacy")
-  organization Organization @relation(fields:[organizationId], references:[id])
+  id String @id @map("_id") @default(cuid())
+  organizationId String
+  organization Organization @relation(fields:[organizationId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   name String
   email String @unique
   passwordHash String
@@ -35,48 +36,54 @@ model User {
   sessions AuthSession[]
   sheetAccess SheetAccess[]
   resetTokens ResetToken[]
+  @@map("users")
 }
 
 model AuthSession {
-  id String @id
+  id String @id @map("_id")
   userId String
-  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+  user User @relation(fields:[userId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   expiresAt DateTime
   createdAt DateTime @default(now())
   @@index([userId])
+  @@map("auth_sessions")
 }
 
 model ResetToken {
-  id String @id
+  id String @id @map("_id")
   userId String
-  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
+  user User @relation(fields:[userId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   expiresAt DateTime
   usedAt DateTime?
+  @@map("reset_tokens")
 }
 
 model SheetAccess {
+  id String @id @default(cuid()) @map("_id")
   userId String
   sheetId String
-  user User @relation(fields:[userId], references:[id], onDelete:Cascade)
-  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:Cascade)
-  @@id([userId,sheetId])
+  user User @relation(fields:[userId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  @@unique([userId,sheetId])
+  @@map("sheet_access")
 }
 
 model GoogleCredential {
-  id String @id @default(cuid())
-  organizationId String @default("legacy")
-  organization Organization @relation(fields:[organizationId], references:[id])
+  id String @id @map("_id") @default(cuid())
+  organizationId String
+  organization Organization @relation(fields:[organizationId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   label String
   type String
   encryptedValue String
   createdAt DateTime @default(now())
   sheets Sheet[]
+  @@map("google_credentials")
 }
 
 model Sheet {
-  id String @id @default(cuid())
-  organizationId String @default("legacy")
-  organization Organization @relation(fields:[organizationId], references:[id])
+  id String @id @map("_id") @default(cuid())
+  organizationId String
+  organization Organization @relation(fields:[organizationId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   name String
   project String
   spreadsheetId String
@@ -84,7 +91,7 @@ model Sheet {
   worksheetName String @default("Sheet1")
   connectionType String @default("SERVICE_ACCOUNT")
   credentialId String?
-  credential GoogleCredential? @relation(fields:[credentialId], references:[id])
+  credential GoogleCredential? @relation(fields:[credentialId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   columnMapping Json
   managedColumnsApproved Boolean @default(false)
   syncInterval Int @default(180)
@@ -98,12 +105,13 @@ model Sheet {
   access SheetAccess[]
   syncLogs SyncLog[]
   @@unique([organizationId, spreadsheetId, worksheetId])
+  @@map("sheets")
 }
 
 model Sender {
-  id String @id @default(cuid())
-  organizationId String @default("legacy")
-  organization Organization @relation(fields:[organizationId], references:[id])
+  id String @id @map("_id") @default(cuid())
+  organizationId String
+  organization Organization @relation(fields:[organizationId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   name String
   phone String?
   provider String
@@ -115,14 +123,15 @@ model Sender {
   createdAt DateTime @default(now())
   rules DistributionRule[]
   messages Message[]
+  @@map("senders")
 }
 
 model Employee {
-  id String @id @default(cuid())
-  organizationId String @default("legacy")
-  organization Organization @relation(fields:[organizationId], references:[id])
+  id String @id @map("_id") @default(cuid())
+  organizationId String
+  organization Organization @relation(fields:[organizationId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   userId String? @unique
-  user User? @relation(fields:[userId], references:[id])
+  user User? @relation(fields:[userId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   name String
   phone String
   department String @default("Sales")
@@ -137,37 +146,41 @@ model Employee {
   assignments Assignment[]
   followups Followup[]
   @@unique([organizationId, phone])
+  @@map("employees")
 }
 
 model DistributionRule {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   sheetId String @unique
-  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:Cascade)
+  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   mode String @default("ROUND_ROBIN")
   senderId String?
-  sender Sender? @relation(fields:[senderId], references:[id])
+  sender Sender? @relation(fields:[senderId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   cursor Int @default(0)
   enabled Boolean @default(true)
   template String
   metaTemplate String?
   metaLanguage String @default("en")
   recipients RuleRecipient[]
+  @@map("distribution_rules")
 }
 
 model RuleRecipient {
+  id String @id @default(cuid()) @map("_id")
   ruleId String
   employeeId String
   weight Int @default(0)
   position Int @default(0)
-  rule DistributionRule @relation(fields:[ruleId], references:[id], onDelete:Cascade)
-  employee Employee @relation(fields:[employeeId], references:[id], onDelete:Cascade)
-  @@id([ruleId,employeeId])
+  rule DistributionRule @relation(fields:[ruleId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  employee Employee @relation(fields:[employeeId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  @@unique([ruleId,employeeId])
+  @@map("rule_recipients")
 }
 
 model Lead {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   sheetId String
-  sheet Sheet @relation(fields:[sheetId], references:[id])
+  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   stableSourceId String
   metadataId Int?
   sourceRow Int
@@ -202,14 +215,15 @@ model Lead {
   @@index([sheetId,status,createdAt])
   @@index([mobile])
   @@index([nextFollowupAt])
+  @@map("leads")
 }
 
 model Assignment {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   leadId String
   employeeId String
-  lead Lead @relation(fields:[leadId], references:[id])
-  employee Employee @relation(fields:[employeeId], references:[id])
+  lead Lead @relation(fields:[leadId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  employee Employee @relation(fields:[employeeId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   assignedBy String?
   isPrimary Boolean @default(true)
   active Boolean @default(true)
@@ -220,27 +234,29 @@ model Assignment {
   messages Message[]
   @@unique([leadId,employeeId,generation])
   @@index([employeeId,active])
+  @@map("assignments")
 }
 
 model FeedbackToken {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   assignmentId String
-  assignment Assignment @relation(fields:[assignmentId], references:[id])
+  assignment Assignment @relation(fields:[assignmentId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   tokenHash String @unique
   expiresAt DateTime
   revokedAt DateTime?
   createdAt DateTime @default(now())
+  @@map("feedback_tokens")
 }
 
 model Message {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   idempotencyKey String @unique
   leadId String
   assignmentId String
   senderId String
-  lead Lead @relation(fields:[leadId], references:[id])
-  assignment Assignment @relation(fields:[assignmentId], references:[id])
-  sender Sender @relation(fields:[senderId], references:[id])
+  lead Lead @relation(fields:[leadId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  assignment Assignment @relation(fields:[assignmentId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  sender Sender @relation(fields:[senderId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   recipient String
   encryptedBody String
   providerMessageId String? @unique
@@ -256,14 +272,15 @@ model Message {
   lastAttemptAt DateTime?
   failureReason String?
   @@index([status,queuedAt])
+  @@map("messages")
 }
 
 model Feedback {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   leadId String
   assignmentId String
-  lead Lead @relation(fields:[leadId], references:[id])
-  assignment Assignment @relation(fields:[assignmentId], references:[id])
+  lead Lead @relation(fields:[leadId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  assignment Assignment @relation(fields:[assignmentId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   employeeId String
   status String
   remarks String
@@ -275,14 +292,15 @@ model Feedback {
   nextFollowupAt DateTime?
   submittedAt DateTime @default(now())
   @@index([leadId,submittedAt])
+  @@map("feedback")
 }
 
 model Followup {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   leadId String
   employeeId String
-  lead Lead @relation(fields:[leadId], references:[id])
-  employee Employee @relation(fields:[employeeId], references:[id])
+  lead Lead @relation(fields:[leadId], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  employee Employee @relation(fields:[employeeId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   scheduledAt DateTime
   status String @default("PENDING")
   notes String?
@@ -290,12 +308,13 @@ model Followup {
   remindedAt DateTime?
   createdAt DateTime @default(now())
   @@index([status,scheduledAt])
+  @@map("followups")
 }
 
 model Job {
-  id String @id @default(cuid())
-  organizationId String @default("legacy")
-  organization Organization @relation(fields:[organizationId], references:[id])
+  id String @id @map("_id") @default(cuid())
+  organizationId String
+  organization Organization @relation(fields:[organizationId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   key String @unique
   type String
   entityId String
@@ -307,21 +326,23 @@ model Job {
   error String?
   createdAt DateTime @default(now())
   @@index([status,runAt])
+  @@map("jobs")
 }
 
 model SyncLog {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   sheetId String
-  sheet Sheet @relation(fields:[sheetId], references:[id])
+  sheet Sheet @relation(fields:[sheetId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   operation String
   status String
   details String
   createdAt DateTime @default(now())
   @@index([sheetId,createdAt])
+  @@map("sync_logs")
 }
 
 model AuditLog {
-  id String @id @default(cuid())
+  id String @id @map("_id") @default(cuid())
   userId String?
   action String
   entityType String
@@ -329,15 +350,18 @@ model AuditLog {
   metadata Json?
   createdAt DateTime @default(now())
   @@index([entityType,entityId])
+  @@map("audit_logs")
 }
 
 model Setting {
-  key String @id
+  key String @id @map("_id")
   value Json
+  @@map("settings")
 }
 
 model RateLimit {
-  key String @id
+  key String @id @map("_id")
   count Int @default(1)
   expiresAt DateTime
+  @@map("rate_limits")
 }

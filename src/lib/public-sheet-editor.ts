@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Browser, Page } from 'puppeteer';
-import type { Sheet } from '@/generated/postgres';
+import type { Sheet } from '@/generated/mongo';
 import { db } from './db';
 import { AppError } from './security';
 import { publicCSV, PublicSheetsProvider } from './public-sheets';

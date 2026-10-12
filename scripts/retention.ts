@@ -1,12 +1,12 @@
 import '../src/lib/config';
-import { db } from '../src/lib/db';
+import { db, usingSQLite } from '../src/lib/db';
 import { CLOSED } from '../src/lib/validation';
 import { encrypt } from '../src/lib/security';
 import { transaction } from '../src/lib/engine';
 async function run(){
   const days=Number(process.env.RETENTION_DAYS||365);
   if(!Number.isInteger(days)||days<30)throw new Error('RETENTION_DAYS must be an integer of at least 30');
-  const where={redactedAt:null,status:{in:CLOSED},updatedAt:{lt:new Date(Date.now()-days*86400000)}};
+  const where={...(usingSQLite?{redactedAt:null}:{OR:[{redactedAt:null},{redactedAt:{isSet:false}}]}),status:{in:CLOSED},updatedAt:{lt:new Date(Date.now()-days*86400000)}};
   const count=await db.lead.count({where});
   console.log(`${count} closed leads are eligible for application-data redaction after ${days} days.`);
   if(!process.argv.includes('--apply')){console.log('Preview only. Run npm run retention -- --apply to redact eligible application records. Source spreadsheets are unchanged.');return;}

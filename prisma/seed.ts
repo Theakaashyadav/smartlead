@@ -11,20 +11,20 @@ async function seed(){
   if(!isDemo()){
     const email=process.env.ADMIN_EMAIL,password=process.env.ADMIN_PASSWORD;
     if(!email||!password||password.length<12)throw new Error('Set ADMIN_EMAIL and ADMIN_PASSWORD (at least 12 characters)');
-    await db.user.upsert({where:{email},create:{name:process.env.ADMIN_NAME||'Workspace Admin',email,passwordHash:passwordHash(password),role:'SUPER_ADMIN'},update:{}});
+    await db.user.upsert({where:{email},create:{organizationId:'legacy',name:process.env.ADMIN_NAME||'Workspace Admin',email,passwordHash:passwordHash(password),role:'SUPER_ADMIN'},update:{}});
     console.log('Production administrator initialized.');return;
   }
   if(await db.user.findUnique({where:{email:'admin@smartlead.demo'}})){console.log('Demo data already exists; no records changed.');return;}
-  await db.user.create({data:{id:'admin-demo',name:'Akash Yadav',email:'admin@smartlead.demo',passwordHash:passwordHash('SmartLead!2026'),role:'SUPER_ADMIN'}});
+  await db.user.create({data:{organizationId:'legacy',id:'admin-demo',name:'Akash Yadav',email:'admin@smartlead.demo',passwordHash:passwordHash('SmartLead!2026'),role:'SUPER_ADMIN'}});
   const names=['Akash Yadav','Aman Sharma','Kunal Verma','Sahil Singh'];
-  for(const [i,name] of names.entries())await db.employee.create({data:{id:`employee-${i}`,name,phone:`+9198765400${10+i}`,department:i===3?'Digital Solutions':'Property Sales',projects:i===3?['Website Development']:['Noida Studio','Uttarakhand','Yamuna Expressway'],dailyLimit:1000,capacity:500,role:i===0?'Team Lead':'Sales Executive',user:{create:{name,email:`${name.split(' ')[0].toLowerCase()}@smartlead.demo`,passwordHash:passwordHash('SmartLead!2026'),role:'EXECUTIVE'}}}});
-  await db.sender.create({data:{id:'sender-demo',name:'SmartLead · Operations',provider:'DEMO',phone:'+919876543210',status:'CONNECTED',lastConnectedAt:new Date()}});
+  for(const [i,name] of names.entries())await db.employee.create({data:{organization:{connect:{id:'legacy'}},id:`employee-${i}`,name,phone:`+9198765400${10+i}`,department:i===3?'Digital Solutions':'Property Sales',projects:i===3?['Website Development']:['Noida Studio','Uttarakhand','Yamuna Expressway'],dailyLimit:1000,capacity:500,role:i===0?'Team Lead':'Sales Executive',user:{create:{organizationId:'legacy',name,email:`${name.split(' ')[0].toLowerCase()}@smartlead.demo`,passwordHash:passwordHash('SmartLead!2026'),role:'EXECUTIVE'}}}});
+  await db.sender.create({data:{organizationId:'legacy',id:'sender-demo',name:'SmartLead · Operations',provider:'DEMO',phone:'+919876543210',status:'CONNECTED',lastConnectedAt:new Date()}});
   const sources=[['Noida Studio Apartments','Noida Studio','ROUND_ROBIN'],['Uttarakhand Properties','Uttarakhand','WEIGHTED'],['Yamuna Expressway Plots','Yamuna Expressway','SINGLE'],['Website Development','Website Development','CAPACITY'],['Shubh Kadam Residences','Shubh Kadam','ALL']];
   const customerNames=['Rahul Sharma','Priya Mehta','Vikram Singh','Neha Gupta','Arjun Patel','Ananya Verma','Rohit Kapoor','Sneha Joshi','Aditya Rao','Pooja Malhotra','Karan Sethi','Divya Nair','Nitin Bansal','Ishita Jain','Manish Kumar','Riya Khanna','Varun Das','Aditi Shah','Amit Chawla','Simran Kaur','Deepak Mishra','Kavya Reddy','Sanjay Arora','Meera Iyer','Harsh Goel','Tanya Sinha','Rajiv Saxena','Sakshi Tiwari','Yash Agarwal','Nisha Sood'];
   for(const [i,[name,project,mode]]of sources.entries()){
     const recipients=i===2?[0]:i===3?[1,3]:i===1?[2,3]:[0,1];
     const sheet=await db.sheet.create({data:{
-      id:`sheet-${i}`,name,project,spreadsheetId:`demo-spreadsheet-${i}`,worksheetId:0,worksheetName:'Leads',connectionType:'DEMO',
+      organizationId:'legacy',id:`sheet-${i}`,name,project,spreadsheetId:`demo-spreadsheet-${i}`,worksheetId:0,worksheetName:'Leads',connectionType:'DEMO',
       columnMapping:{leadId:'Lead ID',customerName:'Full Name',mobile:'Phone',project:'Project',budget:'Budget',source:'Source',...Object.fromEntries(Object.entries(MANAGED).map(([key,value])=>[key,value]))},
       managedColumnsApproved:true,syncInterval:180,
       rule:{create:{mode,senderId:'sender-demo',template:DEFAULT_TEMPLATE,recipients:{create:recipients.map((r,position)=>({employeeId:`employee-${r}`,position,weight:mode==='WEIGHTED'?(position===0?60:40):0}))}}}

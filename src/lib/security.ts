@@ -4,7 +4,7 @@ import { cookies } from 'next/headers';
 import { TOTP } from 'otpauth';
 import { db } from './db';
 import { appUrl, secret } from './config';
-import type { User } from '@/generated/postgres';
+import type { User } from '@/generated/mongo';
 
 export class AppError extends Error {
   constructor(public status: number, message: string, public code = 'REQUEST_ERROR') { super(message); }

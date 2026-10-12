@@ -1,4 +1,4 @@
-import type { Prisma, User } from '@/generated/postgres';
+import type { Prisma, User } from '@/generated/mongo';
 import { db } from './db';
 import { AppError } from './security';
 export function sheetScope(user: User): Prisma.SheetWhereInput {

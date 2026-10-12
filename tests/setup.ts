@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 process.env.DEMO_MODE='true';
+process.env.DATABASE_PROVIDER='sqlite';
 process.env.SESSION_SECRET='test-session-secret-32-characters-minimum';
 process.env.ENCRYPTION_KEY='ab'.repeat(32);
 process.env.GOOGLE_SERVICE_ACCOUNT_BASE64=Buffer.from('{}').toString('base64');

@@ -5,7 +5,7 @@ import { enqueue, transaction } from './engine';
 import { inspectPublicSpreadsheet } from './public-sheets';
 import { phoneSchema } from './validation';
 import { SIMPLE_TEMPLATE, spreadsheetIdentity } from './simple-shared';
-import type { User } from '@/generated/postgres';
+import type { User } from '@/generated/mongo';
 import { backgroundWhatsApp, nativeWhatsAppLogin } from './whatsapp-native';
 import { feedbackBaseURL } from './feedback-url';
 import { LEGACY_ORGANIZATION } from './organizations';

@@ -1,7 +1,7 @@
 import type { NextConfig } from 'next';
 const config: NextConfig = {
   logging: { incomingRequests: false, browserToTerminal: false },
-  serverExternalPackages: ['whatsapp-web.js', 'puppeteer', 'pdfkit', 'exceljs', 'bullmq', 'ioredis'],
+  serverExternalPackages: ['whatsapp-web.js', 'puppeteer', 'pdfkit', 'exceljs', 'mongodb'],
   async headers() { return [{source:'/(.*)', headers:[
     {key:'X-Content-Type-Options',value:'nosniff'},
     {key:'Referrer-Policy',value:'no-referrer'},

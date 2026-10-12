@@ -1,13 +1,14 @@
+import { clearTestModels } from './database-fixture';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '@/lib/db';
 import { closePublicSheetEditor, columnName, nextOutputMove, outputColumns, sheetPasteText, writePublicSheet } from '@/lib/public-sheet-editor';
 
 const mocks=vi.hoisted(()=>({launch:vi.fn()}));vi.mock('puppeteer',()=>({launch:mocks.launch}));
-beforeEach(async()=>{for(const name of ['Lead','Sheet'])await db.$executeRawUnsafe(`DELETE FROM "${name}"`);});
+beforeEach(async()=>{await clearTestModels(['Lead','Sheet']);});
 afterEach(async()=>{await closePublicSheetEditor();vi.restoreAllMocks();vi.unstubAllGlobals();});
 afterAll(()=>db.$disconnect());
 async function fixture(existing=false){
-  const sheet=await db.sheet.create({data:{id:'editor-sheet',name:'Public source',project:'Plots',spreadsheetId:'public-editor-test-sheet-12345',worksheetId:0,connectionType:'SIMPLE_PUBLIC',columnMapping:{leadId:'ID',customerName:'Name',mobile:'Phone'}}});
+  const sheet=await db.sheet.create({data:{organizationId:'legacy',id:'editor-sheet',name:'Public source',project:'Plots',spreadsheetId:'public-editor-test-sheet-12345',worksheetId:0,connectionType:'SIMPLE_PUBLIC',columnMapping:{leadId:'ID',customerName:'Name',mobile:'Phone'}}});
   await db.lead.create({data:{sheetId:sheet.id,stableSourceId:'public-id:source-a',sourceRow:2,sourceFingerprint:'test',customerName:'Original',mobile:'+919876543210',project:'Plots',managedSnapshot:{status:existing?'New':'',assignedEmployee:existing?'Person':'',feedback:''}}});
   const rows=[['ID','Name','Phone','Unrelated',...(existing?['lead_status','shared to','Feedback']:[])],['source-b','Other','9876543211','keep-b'],['source-a','Original','9876543210','keep-a',...(existing?['Converted','Person','External feedback']:[])]];
   let range='';let clipboard='';

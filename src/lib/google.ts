@@ -1,5 +1,5 @@
 import { GoogleAuth, OAuth2Client } from 'google-auth-library';
-import type { Sheet } from '@/generated/postgres';
+import type { Sheet } from '@/generated/mongo';
 import { db } from './db';
 import { AppError, decrypt, hash, opaqueToken } from './security';
 import { MANAGED } from './validation';
