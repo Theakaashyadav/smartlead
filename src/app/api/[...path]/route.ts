@@ -31,9 +31,15 @@ async function handler(request:Request,context:Context):Promise<Response> {
     const {path}=await context.params;
     const route=path.join('/');const method=request.method;const url=new URL(request.url);const p=url.searchParams;
     if(route==='health'){
-      await databaseHealth();
+      let appOrigin:string|null=null;
+      try{const app=new URL(appUrl());if(['http:','https:'].includes(app.protocol)&&!app.username&&!app.password)appOrigin=app.origin;}catch{}
+      const configuration={appOrigin,database:usingSQLite?'sqlite':'mongodb',missing:['APP_URL','SESSION_SECRET','ENCRYPTION_KEY',...(!usingSQLite?['MONGODB_URI']:[])].filter(key=>!process.env[key])};
+      try{await databaseHealth();}catch(error){
+        console.error(JSON.stringify({event:'database_health_error',code:(error as {code?:string}).code||'UNKNOWN',type:error instanceof Error?error.name:'Error'}));
+        return NextResponse.json({error:{code:'DATABASE_UNAVAILABLE',message:'Database connection failed. Check the hosting environment variables, database network access, and server logs.'},configuration},{status:503,headers:{'Cache-Control':'no-store'}});
+      }
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
-      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',workerRunning:!!worker&&Date.now()-Number((worker.value as {at:number}).at)<30000});
+      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning:!!worker&&Date.now()-Number((worker.value as {at:number}).at)<30000});
     }
     if(route==='webhooks/whatsapp'){
       if(method==='GET'){

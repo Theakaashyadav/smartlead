@@ -89,10 +89,16 @@ export function verifyTotp(user: User, code?: string) {
 }
 export function checkOrigin(request: Request, feedbackOrigin?:string) {
   if (['GET','HEAD','OPTIONS'].includes(request.method)) return;
-  const origin = request.headers.get('origin');
-  const loopback = (value:string) => ['localhost','127.0.0.1','[::1]'].includes(new URL(value).hostname);
-  const localAlias = origin && loopback(appUrl()) && loopback(origin) && new URL(origin).port===new URL(appUrl()).port && new URL(origin).protocol===new URL(appUrl()).protocol;
-  if (origin && origin !== new URL(appUrl()).origin && origin !== feedbackOrigin && !localAlias) throw new AppError(403,'Invalid request origin');
+  const configured=new URL(appUrl());
+  const value=request.headers.get('origin');
+  if(value){
+    let origin:URL;
+    try{origin=new URL(value);if(!['http:','https:'].includes(origin.protocol)||origin.username||origin.password||origin.origin!==value)throw new Error('Invalid origin');}
+    catch{throw new AppError(403,'Invalid request origin');}
+    const loopback=(url:URL)=>['localhost','127.0.0.1','[::1]'].includes(url.hostname);
+    const localAlias=loopback(configured)&&loopback(origin)&&origin.port===configured.port&&origin.protocol===configured.protocol;
+    if(origin.origin!==configured.origin&&origin.origin!==feedbackOrigin&&!localAlias)throw new AppError(403,'Invalid request origin. Set APP_URL in the hosting environment to the website\'s public HTTPS address, then apply changes and restart the app.','ORIGIN_MISMATCH');
+  }
   if (request.headers.get('sec-fetch-site') === 'cross-site') throw new AppError(403,'Cross-site request rejected');
 }
 export async function rateLimit(key: string, max = 15, windowSeconds = 60) {

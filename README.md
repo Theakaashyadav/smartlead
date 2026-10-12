@@ -116,6 +116,14 @@ Put an HTTPS reverse proxy in front of `127.0.0.1:3000`; `deploy/Caddyfile` is s
 
 Without Docker, configure `.env`, run `npm ci`, `npm run db:setup`, and `npm run build`, then supervise `npm start` and `npm run worker`. Install Chromium and set `CHROME_PATH` on Linux. Back up the `smartlead` database, encryption key, and worker browser profiles.
 
+### Hostinger registration says Invalid request origin
+
+In the website's Hostinger dashboard, open **Environment variables**, set `APP_URL` to that website's exact public HTTPS address (for example `https://your-site.hostingersite.com`, without `/register`), and click **Apply changes**. Restart or redeploy that same website and wait for the deployment to finish. Changing the local PC's `.env` does not change Hostinger's runtime environment. `APP_URL` also controls secure login cookies and feedback links, so keep it configured even behind a reverse proxy. Never remove origin validation or trust arbitrary forwarded-host headers to bypass a mismatched setting.
+
+Also configure `DATABASE_PROVIDER=mongodb`, `MONGODB_URI`, `MONGODB_DATABASE=smartlead`, `DEMO_MODE=false`, `SESSION_SECRET`, and `ENCRYPTION_KEY` in Hostinger. Keep secret values private; the repository deliberately excludes `.env`. Allow the hosting server's IP in Atlas and run `npm run db:setup` on the host before the first registration.
+
+Run `npm run config:check` on the hosting server, or inspect the `smartlead_configuration` entry printed by `npm start`. It lists missing/invalid variable names and the application origin without printing database credentials or keys. Then check `/api/health`: it should return `status: ok` and `database: mongodb`. A database health error must be fixed separately from an origin mismatch. See [Hostinger environment-variable instructions](https://www.hostinger.com/support/how-to-edit-or-add-environment-variables-after-deployment/) and [redeployment instructions](https://www.hostinger.com/support/how-to-redeploy-a-node-js-application/).
+
 ## Google Sheets
 
 Enable the Google Sheets API in your Google Cloud project.

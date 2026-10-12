@@ -1,12 +1,23 @@
-import { afterAll,describe,expect,it } from 'vitest';
+import { afterAll,afterEach,describe,expect,it,vi } from 'vitest';
 import { MongoClient } from 'mongodb';
 import { db,databaseHealth } from '@/lib/db';
 import { mongoSettings } from '@/lib/mongo-config';
 import { initializeMongoDatabase, mongoDatabase, closeMongoStorage } from '@/lib/mongo-storage';
 import { transaction } from '@/lib/engine';
+import { GET } from '@/app/api/[...path]/route';
 
 afterAll(async()=>{await db.$disconnect();await closeMongoStorage();});
+afterEach(()=>vi.unstubAllEnvs());
 describe('MongoDB storage constraints',()=>{
+  it('reports missing hosting configuration without exposing credentials',async()=>{
+    vi.stubEnv('MONGODB_URI','');vi.stubEnv('APP_URL','https://hosted.example.com');
+    const response=await GET(new Request('https://hosted.example.com/api/health'),{params:Promise.resolve({path:['health']})});
+    expect(response.status).toBe(503);
+    const result=await response.json();
+    expect(result).toMatchObject({error:{code:'DATABASE_UNAVAILABLE'},configuration:{appOrigin:'https://hosted.example.com',database:'mongodb',missing:['MONGODB_URI']}});
+    expect(JSON.stringify(result)).not.toContain(process.env.SESSION_SECRET);
+    expect(JSON.stringify(result)).not.toContain(process.env.ENCRYPTION_KEY);
+  });
   it('persists organisation ownership for both reads and database filters',async()=>{
     const user=await db.user.create({data:{organizationId:'legacy',name:'Owner',email:'mongo-owner@test.invalid',passwordHash:'fixture'}});
     const database=await mongoDatabase();

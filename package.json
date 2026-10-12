@@ -6,6 +6,8 @@
     "dev": "next dev --hostname 127.0.0.1",
     "build": "next build --webpack",
     "start": "next start --hostname 0.0.0.0",
+    "prestart": "node scripts/check-config.mjs --production",
+    "config:check": "node scripts/check-config.mjs --production",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate && prisma generate --schema prisma/demo.prisma",
     "db:migrate": "tsx scripts/setup-mongodb.ts",
