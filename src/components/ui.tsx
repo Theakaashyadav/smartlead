@@ -1,0 +1,22 @@
+'use client';
+import { type ReactNode, useEffect, useRef } from 'react';
+import { X, LoaderCircle, Search, Inbox, ArrowUpRight, ChevronDown } from 'lucide-react';
+import { clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+export const cn=(...args:Parameters<typeof clsx>)=>twMerge(clsx(...args));
+export function Button({children,variant='secondary',busy=false,...props}:React.ButtonHTMLAttributes<HTMLButtonElement>&{variant?:'primary'|'secondary'|'ghost'|'danger';busy?:boolean}){return <button {...props} disabled={busy||props.disabled} className={cn('btn',variant,props.className)}>{busy?<LoaderCircle size={16} className="spin"/>:null}{children}</button>;}
+export function Badge({children,tone}:{children:ReactNode;tone?:string}){const text=String(children);const color=tone||(text==='CONNECTED'||text==='SYNCED'||text.includes('Converted')||text==='READ'?'green':text.includes('FAILED')||text==='ERROR'||text.includes('Lost')?'red':text.includes('Interested')||text.includes('Negotiation')?'purple':text.includes('Follow-up')||text==='QUEUED'||text==='PENDING'||text==='WAITING_QR'?'amber':'blue');return <span className={cn('badge',color)}><span className="badge-dot"/>{text.replaceAll('_',' ')}</span>;}
+export function Avatar({name,small=false,index=0}:{name:string;small?:boolean;index?:number}){return <span className={cn('avatar',small&&'small',`avatar-${index%5}`)}>{name.split(' ').slice(0,2).map(s=>s[0]).join('')}</span>;}
+export function Empty({title='Nothing here yet',description='Your records will appear here as your workspace gets going.',action}:{title?:string;description?:string;action?:ReactNode}){return <div className="empty"><div className="empty-icon"><Inbox size={26}/></div><h3>{title}</h3><p>{description}</p>{action}</div>;}
+export function Modal({title,description,children,onClose,wide=false}:{title:string;description?:string;children:ReactNode;onClose:()=>void;wide?:boolean}){
+  const ref=useRef<HTMLDialogElement>(null);
+  useEffect(()=>{const d=ref.current;d?.showModal();const escape=(e:Event)=>{e.preventDefault();onClose();};d?.addEventListener('cancel',escape);return()=>{d?.removeEventListener('cancel',escape);d?.close();};},[onClose]);
+  return <dialog ref={ref} className={cn('modal',wide&&'wide')} onClick={e=>{if(e.target===e.currentTarget)onClose();}}><div className="modal-header"><div><h2>{title}</h2>{description&&<p>{description}</p>}</div><Button variant="ghost" onClick={onClose} aria-label="Close dialog"><X size={19}/></Button></div><div className="modal-body">{children}</div></dialog>;
+}
+export function Field({label,children,hint}:{label:string;children:ReactNode;hint?:string}){return <label className="field"><span>{label}</span>{children}{hint&&<small>{hint}</small>}</label>;}
+export function Select(props:React.SelectHTMLAttributes<HTMLSelectElement>){return <div className="select-wrap"><select {...props}/><ChevronDown size={14}/></div>;}
+export function SearchInput({value,onChange,placeholder='Search leads, names or phone numbers…'}:{value:string;onChange:(value:string)=>void;placeholder?:string}){return <div className="search-input"><Search size={17}/><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={e=>onChange(e.target.value)}/>{value&&<button aria-label="Clear search" onClick={()=>onChange('')}><X size={14}/></button>}</div>;}
+export function Stat({label,value,icon,caption,tone='blue'}:{label:string;value:string|number;icon:ReactNode;caption?:ReactNode;tone?:string}){return <div className="stat"><div className="stat-top"><span>{label}</span><div className={cn('stat-icon',tone)}>{icon}</div></div><strong>{typeof value==='number'?value.toLocaleString('en-IN'):value}</strong><div className="stat-caption">{caption||'Across your selected lead sources'}<ArrowUpRight size={13}/></div></div>;}
+export async function api<T=any>(path:string,method='GET',body?:unknown):Promise<T>{const r=await fetch(`/api/${path}`,{method,headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined,cache:'no-store'});const json=await r.json();if(!r.ok)throw new Error(json.error?.message||'Request failed');return json.data;}
+export const dateTime=(value:string|Date|null|undefined)=>value?new Date(value).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kolkata'}):'—';
+export const dateOnly=(value:string|Date)=>new Date(value).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric',timeZone:'Asia/Kolkata'});

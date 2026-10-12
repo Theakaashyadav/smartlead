@@ -1,0 +1,15 @@
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
+process.env.DEMO_MODE='true';
+process.env.SESSION_SECRET='test-session-secret-32-characters-minimum';
+process.env.ENCRYPTION_KEY='ab'.repeat(32);
+process.env.GOOGLE_SERVICE_ACCOUNT_BASE64=Buffer.from('{}').toString('base64');
+process.env.APP_URL='http://localhost:3000';
+const file=path.resolve(`data/test-${process.pid}.db`).replaceAll('\\','/');
+process.env.DEMO_DATABASE_URL=`file:${file}`;
+mkdirSync('data',{recursive:true});
+const sqlite=new DatabaseSync(file);
+sqlite.exec(readFileSync('prisma/demo-schema.sql','utf8'));
+sqlite.exec('CREATE UNIQUE INDEX "Assignment_one_active_primary_owner" ON "Assignment" ("leadId") WHERE "active" = true AND "isPrimary" = true');
+sqlite.close();
