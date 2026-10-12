@@ -18,6 +18,7 @@ import { csv, reportRows, safeCell } from '@/lib/reports';
 import { simpleAction } from '@/lib/simple';
 import { organizationSettingKey, registerOrganization } from '@/lib/organizations';
 import { feedbackBaseURL } from '@/lib/feedback-url';
+import { databaseFailure, safeDatabaseErrorCode } from '@/lib/database-errors';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -35,8 +36,9 @@ async function handler(request:Request,context:Context):Promise<Response> {
       try{const app=new URL(appUrl());if(['http:','https:'].includes(app.protocol)&&!app.username&&!app.password)appOrigin=app.origin;}catch{}
       const configuration={appOrigin,database:usingSQLite?'sqlite':'mongodb',missing:['APP_URL','SESSION_SECRET','ENCRYPTION_KEY',...(!usingSQLite?['MONGODB_URI']:[])].filter(key=>!process.env[key])};
       try{await databaseHealth();}catch(error){
-        console.error(JSON.stringify({event:'database_health_error',code:(error as {code?:string}).code||'UNKNOWN',type:error instanceof Error?error.name:'Error'}));
-        return NextResponse.json({error:{code:'DATABASE_UNAVAILABLE',message:'Database connection failed. Check the hosting environment variables, database network access, and server logs.'},configuration},{status:503,headers:{'Cache-Control':'no-store'}});
+        const diagnostic=databaseFailure(error);
+        console.error(JSON.stringify({event:'database_health_error',code:safeDatabaseErrorCode(error),type:error instanceof Error?error.name:'Error',...diagnostic}));
+        return NextResponse.json({error:{code:'DATABASE_UNAVAILABLE',message:diagnostic?.message||'Database connection failed. Check the hosting environment variables, database network access, and server logs.'},configuration,...(diagnostic?{diagnostic}:{})},{status:503,headers:{'Cache-Control':'no-store'}});
       }
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
       return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning:!!worker&&Date.now()-Number((worker.value as {at:number}).at)<30000});
@@ -239,7 +241,9 @@ async function handler(request:Request,context:Context):Promise<Response> {
     const code=(error as {code?:string}).code;
     if(code==='P2002')return NextResponse.json({error:{code:'CONFLICT',message:'This record already exists. Check the email, phone number, or spreadsheet connection.'}},{status:409});
     if(code==='P2025')return NextResponse.json({error:{code:'NOT_FOUND',message:'Record not found'}},{status:404});
-    console.error(JSON.stringify({event:'api_error',code:code||'UNKNOWN',type:error instanceof Error?error.name:'Error'}));
+    const diagnostic=databaseFailure(error);
+    console.error(JSON.stringify({event:'api_error',code:safeDatabaseErrorCode(error),type:error instanceof Error?error.name:'Error',...diagnostic}));
+    if(diagnostic)return NextResponse.json({error:{code:'DATABASE_UNAVAILABLE',message:diagnostic.message},diagnostic},{status:503,headers:{'Cache-Control':'no-store'}});
     return NextResponse.json({error:{code:'INTERNAL_ERROR',message:'The operation could not be completed. Check the server configuration and try again.'}},{status:500});
   }
 }

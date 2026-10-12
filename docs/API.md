@@ -4,7 +4,7 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 
 | Method | Endpoint | Access / behavior |
 | --- | --- | --- |
-| GET | /api/health | Database health and configured application origin; failures return 503 with missing variable names, never secret values |
+| GET | /api/health | Database health and configured application origin; failures return 503 with missing variable names and a safe diagnostic reason/code, never credentials, raw errors, or filesystem paths |
 | GET | /api/simple/state | Administrator; connected sheets, recipients, sending counts and feedback-link readiness |
 | POST | /api/simple/sheets/inspect | Administrator; `{url}` for a publicly shared Google Sheet; no Google credentials |
 | POST | /api/simple/sheets | Administrator; `{spreadsheetId,worksheetId,columnMapping:{customerName,mobile}}` |

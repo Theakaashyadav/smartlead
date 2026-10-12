@@ -5,9 +5,11 @@ import { mongoSettings } from '@/lib/mongo-config';
 import { initializeMongoDatabase, mongoDatabase, closeMongoStorage } from '@/lib/mongo-storage';
 import { transaction } from '@/lib/engine';
 import { GET } from '@/app/api/[...path]/route';
+import { POST } from '@/app/api/[...path]/route';
+import { Prisma } from '@/generated/mongo';
 
 afterAll(async()=>{await db.$disconnect();await closeMongoStorage();});
-afterEach(()=>vi.unstubAllEnvs());
+afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
 describe('MongoDB storage constraints',()=>{
   it('reports missing hosting configuration without exposing credentials',async()=>{
     vi.stubEnv('MONGODB_URI','');vi.stubEnv('APP_URL','https://hosted.example.com');
@@ -17,6 +19,25 @@ describe('MongoDB storage constraints',()=>{
     expect(result).toMatchObject({error:{code:'DATABASE_UNAVAILABLE'},configuration:{appOrigin:'https://hosted.example.com',database:'mongodb',missing:['MONGODB_URI']}});
     expect(JSON.stringify(result)).not.toContain(process.env.SESSION_SECRET);
     expect(JSON.stringify(result)).not.toContain(process.env.ENCRYPTION_KEY);
+    expect(result.diagnostic.reason).toBe('DATABASE_CONFIGURATION');
+  });
+  it('identifies missing deployment engines through health without exposing private paths',async()=>{
+    vi.spyOn(db,'$runCommandRaw').mockRejectedValueOnce(new Prisma.PrismaClientInitializationError('Prisma Client could not locate the Query Engine for runtime "rhel-openssl-3.0.x". Searched /home/private-account/project','6.19.0'));
+    const response=await GET(new Request('http://localhost:3000/api/health'),{params:Promise.resolve({path:['health']})});
+    const result=await response.json();
+    expect(response.status).toBe(503);
+    expect(result.diagnostic).toMatchObject({reason:'DATABASE_ENGINE_MISSING',engineTarget:'rhel-openssl-3.0.x'});
+    expect(JSON.stringify(result)).not.toContain('private-account');
+  });
+  it('returns an actionable registration failure when MongoDB rejects credentials',async()=>{
+    const privateURI='mongodb+srv://private-user:private-password@cluster.invalid';
+    vi.spyOn(db.rateLimit,'upsert').mockRejectedValueOnce(new Prisma.PrismaClientInitializationError(`Authentication failed: ${privateURI}`,'6.19.0','P1000'));
+    const response=await POST(new Request('http://localhost:3000/api/auth/register',{method:'POST',headers:{origin:process.env.APP_URL!,'content-type':'application/json'},body:'{}'}),{params:Promise.resolve({path:['auth','register']})});
+    const result=await response.json();
+    expect(response.status).toBe(503);
+    expect(result).toMatchObject({error:{code:'DATABASE_UNAVAILABLE'},diagnostic:{reason:'DATABASE_AUTHENTICATION',prismaCode:'P1000'}});
+    expect(result.error.message).toContain('MongoDB authentication failed');
+    expect(JSON.stringify(result)).not.toContain('private-');
   });
   it('persists organisation ownership for both reads and database filters',async()=>{
     const user=await db.user.create({data:{organizationId:'legacy',name:'Owner',email:'mongo-owner@test.invalid',passwordHash:'fixture'}});

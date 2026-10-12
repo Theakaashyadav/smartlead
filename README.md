@@ -124,6 +124,8 @@ Also configure `DATABASE_PROVIDER=mongodb`, `MONGODB_URI`, `MONGODB_DATABASE=sma
 
 Run `npm run config:check` on the hosting server, or inspect the `smartlead_configuration` entry printed by `npm start`. It lists missing/invalid variable names and the application origin without printing database credentials or keys. Then check `/api/health`: it should return `status: ok` and `database: mongodb`. A database health error must be fixed separately from an origin mismatch. See [Hostinger environment-variable instructions](https://www.hostinger.com/support/how-to-edit-or-add-environment-variables-after-deployment/) and [redeployment instructions](https://www.hostinger.com/support/how-to-redeploy-a-node-js-application/).
 
+If compilation succeeds but registration fails, open the website's **Runtime logs**, rather than deployment/build logs. Refresh `/api/health` to generate a `database_health_error` entry. The health response and runtime log identify common failures with a safe `diagnostic.reason`, including authentication, database permissions, network/DNS/TLS, and a missing or incompatible Prisma engine. Missing-engine diagnostics include the required `engineTarget`; generate that target and include the engine in the runtime package. Prisma initialization errors use `errorCode`, which the diagnostic preserves as `prismaCode`. Raw error messages, database credentials, and filesystem paths are never returned. See [Hostinger runtime-log instructions](https://www.hostinger.com/support/how-to-use-node-js-runtime-logs-at-hostinger/).
+
 ## Google Sheets
 
 Enable the Google Sheets API in your Google Cloud project.
