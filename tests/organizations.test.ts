@@ -100,7 +100,9 @@ describe('separate organisation accounts',()=>{
       expect(await db.employee.count({where:employeeScope(user)})).toBe(1);
     }
   });
-  it('starts an empty WhatsApp connection for each new organisation and scopes connection jobs',async()=>{
+  it.each(['background','qr','native'])('starts a visible %s connection for each organisation and scopes connection jobs',async mode=>{
+    vi.stubEnv('WHATSAPP_LOGIN_MODE',mode);
+    await db.setting.create({data:{key:'simple:worker',value:{at:Date.now()}}});
     const a=await registerOrganization({name:'Owner One',organizationName:'Agency One',email:'one@example.test',password});
     const b=await registerOrganization({name:'Owner Two',organizationName:'Agency Two',email:'two@example.test',password});
     await simpleAction(['whatsapp','connect'],'POST',new Request('http://localhost'),a);
@@ -108,10 +110,34 @@ describe('separate organisation accounts',()=>{
     const senders=await db.sender.findMany();expect(senders).toHaveLength(2);expect(new Set(senders.map(s=>s.id)).size).toBe(2);
     for(const user of [a,b]){
       const sender=senders.find(s=>s.organizationId===user.organizationId)!;
+      expect(sender.status).toBe('CONNECTING');
       expect(await db.job.findFirstOrThrow({where:{organizationId:user.organizationId}})).toMatchObject({entityId:sender.id,type:'CONNECT'});
       await simpleAction(['whatsapp','disconnect'],'POST',new Request('http://localhost'),user);
       expect(await db.job.findFirstOrThrow({where:{organizationId:user.organizationId,type:'DISCONNECT'}})).toMatchObject({entityId:sender.id});
     }
+  });
+  it('reports a missing or stale worker without creating an account or queuing a connection',async()=>{
+    const owner=await registerOrganization({name:'Owner One',organizationName:'Agency One',email:'one@example.test',password});
+    await request('auth/login','POST',{email:owner.email,password});
+    for(const stale of [false,true]){
+      if(stale)await db.setting.create({data:{key:'simple:worker',value:{at:Date.now()-60000}}});
+      const response=await request('simple/whatsapp/connect','POST');
+      expect(response.status).toBe(503);
+      expect((await response.json()).error).toMatchObject({code:'WHATSAPP_WORKER_OFFLINE',message:expect.stringContaining('Start SmartLead.cmd')});
+      expect(await db.sender.count()).toBe(0);expect(await db.job.count()).toBe(0);
+    }
+    const state=await (await request('simple/state')).json();
+    expect(state.data).toMatchObject({workerRunning:false,workerMessage:expect.stringContaining('Start SmartLead.cmd')});
+  });
+  it('gives hosted users server instructions and blocks the management connection API when offline',async()=>{
+    const f=await fixture();await request('auth/login','POST',{email:f.a.email,password});
+    const response=await request(`whatsapp/${f.senderA.id}/connect`,'POST');
+    expect(response.status).toBe(503);expect((await response.json()).error.code).toBe('WHATSAPP_WORKER_OFFLINE');
+    expect(await db.job.count()).toBe(0);
+    vi.stubEnv('APP_URL','https://smartlead.example.com');
+    await expect(simpleAction(['whatsapp','connect'],'POST',new Request('https://smartlead.example.com'),f.a)).rejects.toMatchObject({status:503,message:expect.stringContaining('hosting server')});
+    const state=await simpleAction(['state'],'GET',new Request('https://smartlead.example.com'),f.a) as {workerMessage:string};
+    expect(state.workerMessage).not.toContain('.cmd');
   });
   it('isolates custom statuses, settings, and job lists',async()=>{
     const f=await fixture();

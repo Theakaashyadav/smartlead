@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Browser, Page } from 'puppeteer';
@@ -7,6 +6,7 @@ import type { Sender } from '@/generated/mongo';
 import { db } from './db';
 import { AppError } from './security';
 import { registerWebClient, WebWhatsAppProvider, type SendInput, type WhatsAppProvider } from './whatsapp';
+import { browserExecutablePath } from './browser-executable';
 
 type Client=import('whatsapp-web.js').Client;
 type Session={browser:Browser;page:Page;controller:AbortController;client?:Client;attempted:boolean;ready:boolean;background:boolean;lastQR?:string};
@@ -57,14 +57,14 @@ async function openBrowser(id:string,interactive:boolean):Promise<Session>{
     await previous.close();endpoint=null;await pause(500);
   }
   if(!endpoint){
-    const executable=[process.env.CHROME_PATH,'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].find(p=>p&&existsSync(p));
-    if(!executable)throw new AppError(400,'Install Microsoft Edge or Google Chrome to open WhatsApp Web.');
+    const executable=await browserExecutablePath(()=>puppeteer.executablePath());
+    if(!executable)throw new AppError(503,'WhatsApp needs Chromium on the worker server. Install a Puppeteer browser or set CHROME_PATH to an installed browser.');
     // A normal installed browser loads the live original site. No automation user agent,
     // cached WhatsApp HTML, browser extensions, or messaging SDK runs during login.
     const child=spawn(executable,whatsappBrowserArguments(profile,background,interactive),{detached:true,stdio:'ignore',windowsHide:background});
-    let launchError:Error|undefined;child.once('error',e=>{launchError=e;});child.unref();
-    for(let i=0;i<75&&!endpoint;i++){if(launchError)throw launchError;await pause(400);endpoint=await nativeBrowserEndpoint(profile);}
-    if(!endpoint)throw new AppError(503,'Could not connect to the WhatsApp browser. Close its window and try again.');
+    let launchFailed=false;child.once('error',()=>{launchFailed=true;});child.once('exit',()=>{launchFailed=true;});child.unref();
+    for(let i=0;i<75&&!endpoint;i++){if(launchFailed)throw new AppError(503,'The WhatsApp browser could not start on this server. Check Chromium permissions and hosting resource limits.');await pause(400);endpoint=await nativeBrowserEndpoint(profile);}
+    if(!endpoint)throw new AppError(503,'Could not connect to the WhatsApp browser. Check the worker server and try again.');
     await writeFile(path.join(profile,'SmartLeadBrowserMode'),background?'background':'native');
   }
   const browser=await puppeteer.connect({browserWSEndpoint:endpoint,defaultViewport:null});

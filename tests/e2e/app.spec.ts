@@ -15,7 +15,7 @@ test('two organisation owners create separate accounts and keep their connection
   const connectionOne=(await (await page.request.get('/api/simple/state')).json()).data.account;
   const context=await browser.newContext();const other=await context.newPage();
   try{
-    await other.goto('http://127.0.0.1:3000/register');
+    await other.goto(new URL('/register',page.url()).href);
     await other.getByLabel('Your name',{exact:true}).fill('Manager Two');await other.getByLabel('Organisation name',{exact:true}).fill('Agency Two');
     await other.getByLabel('Email',{exact:false}).fill(otherEmail);await other.getByLabel('Password',{exact:false}).first().fill(password);await other.getByLabel('Confirm password',{exact:true}).fill(password);
     await other.getByRole('button',{name:'Create organisation account'}).click();await expect(other).toHaveURL(/dashboard/);
@@ -51,7 +51,7 @@ test('login opens two connection cards and the real local connection pages',asyn
   await expect(page.getByText('One account for all your connected sheets.')).toBeVisible();
   await expect(page.getByRole('heading',{name:/Link WhatsApp Web|WhatsApp connected/})).toBeVisible();
   const connection=await (await page.request.get('/api/simple/state')).json();
-  if(connection.data.whatsappLoginMode==='background'){
+  if(connection.data.whatsappLoginMode==='background'||connection.data.whatsappLoginMode==='qr'){
     await expect(page.getByRole('button',{name:'Open WhatsApp Web',exact:true})).toHaveCount(0);
     await expect(page.getByRole('button',{name:/^(Connect WhatsApp|Disconnect account|Waiting for scan|Try again)$/})).toBeVisible();
     await expect(page.getByText('Keep it open.',{exact:false})).toHaveCount(0);
@@ -76,6 +76,36 @@ test('a public link detects columns and opens recipient selection without Google
   await expect(page.getByLabel('Sheet tab')).toHaveValue('42');await expect(page.getByLabel('Customer name column')).toHaveValue('Name');await expect(page.getByLabel('Phone number column')).toHaveValue('Phone');
   await page.getByRole('dialog').getByRole('button',{name:'Connect sheet',exact:true}).click();await expect(page.getByRole('heading',{name:'Who should receive these leads?'})).toBeVisible();
   expect(inspected).toEqual({url});expect(saved).toEqual({spreadsheetId:'public-test-spreadsheet-123456789',worksheetId:42,columnMapping:{customerName:'Name',mobile:'Phone'}});
+});
+
+test('offline WhatsApp connections show an error and keep the retry button usable',async({page})=>{
+  const workerMessage='WhatsApp connection service is offline. Start the SmartLead worker on your hosting server, then try again.';
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:false,workerMessage,whatsappLoginMode:'background',account:{id:'web',status:'CONNECTING',phone:null,qrCode:'data:image/png;base64,expired',lastError:null},sheets:[]};
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
+  let connections=0;
+  await page.route('**/api/simple/whatsapp/connect',route=>{connections++;return route.fulfill({status:503,json:{error:{code:'WHATSAPP_WORKER_OFFLINE',message:workerMessage}}});});
+  await login(page);await page.goto('/whatsapp');
+  await expect(page.getByText('WhatsApp connection service is offline.',{exact:true})).toBeVisible();
+  await expect(page.getByRole('status')).toHaveText(workerMessage);
+  await expect(page.getByRole('img',{name:/Scan this QR code/})).toHaveCount(0);
+  const connect=page.getByRole('button',{name:'Connect WhatsApp',exact:true});await expect(connect).toBeEnabled();await connect.click();
+  await expect(page.locator('.simple-main').getByRole('alert')).toContainText(workerMessage);await expect(connect).toBeEnabled();expect(connections).toBe(1);
+});
+
+test('WhatsApp connect shows progress then the worker QR code without opening another window',async({page})=>{
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,whatsappLoginMode:'qr',account:null as null|{id:string;status:string;phone:null;qrCode:string|null;lastError:null},sheets:[]};
+  let connections=0;let connectionReads=0;let windows=0;page.on('popup',()=>{windows++;});
+  await page.route('**/api/simple/state',route=>{
+    if(state.account&&++connectionReads>1)state.account={...state.account,status:'WAITING_QR',qrCode:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQYQAAAAASUVORK5CYII='};
+    return route.fulfill({json:{data:state}});
+  });
+  await page.route('**/api/simple/whatsapp/connect',route=>{connections++;state.account={id:'web',status:'CONNECTING',phone:null,qrCode:null,lastError:null};return route.fulfill({json:{data:{connecting:true}}});});
+  await login(page);await page.goto('/whatsapp');await page.getByRole('button',{name:'Connect WhatsApp',exact:true}).click();
+  await expect(page.getByText('Connecting to WhatsApp…',{exact:true})).toBeVisible();
+  await expect(page.getByRole('img',{name:/Scan this QR code/})).toBeVisible({timeout:10000});
+  await expect(page.getByRole('button',{name:'Waiting for scan',exact:true})).toBeDisabled();
+  await expect(page.getByText('On your phone, open WhatsApp → Linked devices → Link a device.',{exact:true})).toBeVisible();
+  expect(connections).toBe(1);expect(windows).toBe(0);
 });
 
 test('contact picker preserves selection order and accepts a new-conversation number',async({page})=>{

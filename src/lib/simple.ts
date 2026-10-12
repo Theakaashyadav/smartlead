@@ -9,6 +9,7 @@ import type { User } from '@/generated/mongo';
 import { backgroundWhatsApp, nativeWhatsAppLogin } from './whatsapp-native';
 import { feedbackBaseURL } from './feedback-url';
 import { LEGACY_ORGANIZATION } from './organizations';
+import { requireWhatsAppWorker, workerHeartbeatFresh, workerOfflineMessage } from './worker-status';
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
 const sheetWhere={connectionType:{startsWith:'SIMPLE_'}};
@@ -30,7 +31,8 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       return {id:s.id,name:s.name,worksheetName:s.worksheetName,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
-    return {user:safeUser(user),organization,feedbackError,whatsappLoginMode:backgroundWhatsApp()?'background':nativeWhatsAppLogin()?'browser':'qr',account:account?{id:account.id,phone:account.phone,status:account.status,qrCode:nativeWhatsAppLogin()&&!backgroundWhatsApp()?null:account.qrCode,lastError:account.lastError}:null,sheets:summaries,workerRunning:!!worker&&Date.now()-Number((worker.value as {at:number}).at)<30000};
+    const workerRunning=workerHeartbeatFresh(worker?.value);
+    return {user:safeUser(user),organization,feedbackError,whatsappLoginMode:backgroundWhatsApp()?'background':nativeWhatsAppLogin()?'browser':'qr',account:account?{id:account.id,phone:account.phone,status:account.status,qrCode:nativeWhatsAppLogin()&&!backgroundWhatsApp()?null:account.qrCode,lastError:account.lastError}:null,sheets:summaries,workerRunning,workerMessage:workerRunning?null:workerOfflineMessage()};
   }
   if(route==='google'&&method==='GET'){
     const credentials=await db.googleCredential.findMany({where:{organizationId},select:{id:true,label:true,type:true},orderBy:{createdAt:'desc'}});
@@ -44,12 +46,16 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     await audit(user.id,'CONNECT_GOOGLE','integration');return {id:credential.id,label:credential.label,type:credential.type};
   }
   if(route==='whatsapp/connect'&&method==='POST'){
+    await requireWhatsAppWorker();
     const id=`smartlead-web-${organizationId}`;
-    const account=await simpleSender(organizationId)||await db.sender.upsert({where:{id},create:{id,organizationId,name:'My WhatsApp',provider:'WEB'},update:{}});
-    if(!nativeWhatsAppLogin()&&account.status==='CONNECTED')return {connecting:false};
-    if(!nativeWhatsAppLogin()&&account.status==='WAITING_QR'&&account.qrCode)return {connecting:true};
-    if(!nativeWhatsAppLogin()&&account.status!=='CONNECTED')await db.sender.update({where:{id:account.id},data:{status:'CONNECTING',lastError:null,qrCode:null}});
-    await enqueue(db,'CONNECT',account.id,`simple:connect:${account.id}:${Math.floor(Date.now()/10000)}`);return {connecting:true};
+    const account=await simpleSender(organizationId);
+    if(!nativeWhatsAppLogin()&&account?.status==='CONNECTED')return {connecting:false};
+    if(account?.status==='WAITING_QR'&&account.qrCode)return {connecting:true};
+    await transaction(async tx=>{
+      const sender=account||await tx.sender.upsert({where:{id},create:{id,organizationId,name:'My WhatsApp',provider:'WEB'},update:{}});
+      if(sender.status!=='CONNECTED')await tx.sender.update({where:{id:sender.id},data:{status:'CONNECTING',lastError:null,qrCode:null}});
+      await enqueue(tx,'CONNECT',sender.id,`simple:connect:${sender.id}:${Math.floor(Date.now()/10000)}`);
+    });return {connecting:true};
   }
   if(route==='whatsapp/disconnect'&&method==='POST'){
     const account=await simpleSender(organizationId);if(!account)return {disconnected:true};

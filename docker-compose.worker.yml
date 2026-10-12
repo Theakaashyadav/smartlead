@@ -1,0 +1,22 @@
+name: smartlead-whatsapp
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env.worker
+    environment:
+      DATABASE_PROVIDER: mongodb
+      DEMO_MODE: "false"
+      WHATSAPP_LOGIN_MODE: background
+      WHATSAPP_PROFILE_DIR: /app/data/whatsapp-web
+      WHATSAPP_SESSION_DIR: /app/runtime-sessions
+      WHATSAPP_REMOTE_AUTH_DIR: /app/data/auth-archives
+      CHROME_PATH: /usr/bin/chromium
+    volumes: [browser-runtime:/app/data]
+    tmpfs: [/app/runtime-sessions:uid=1000,gid=1000,mode=0700]
+    shm_size: 256mb
+    init: true
+    restart: unless-stopped
+volumes:
+  browser-runtime:

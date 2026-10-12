@@ -19,6 +19,7 @@ import { simpleAction } from '@/lib/simple';
 import { organizationSettingKey, registerOrganization } from '@/lib/organizations';
 import { feedbackBaseURL } from '@/lib/feedback-url';
 import { databaseFailure, safeDatabaseErrorCode } from '@/lib/database-errors';
+import { requireWhatsAppWorker, workerHeartbeatFresh } from '@/lib/worker-status';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -41,7 +42,7 @@ async function handler(request:Request,context:Context):Promise<Response> {
         return NextResponse.json({error:{code:'DATABASE_UNAVAILABLE',message:diagnostic?.message||'Database connection failed. Check the hosting environment variables, database network access, and server logs.'},configuration,...(diagnostic?{diagnostic}:{})},{status:503,headers:{'Cache-Control':'no-store'}});
       }
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
-      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning:!!worker&&Date.now()-Number((worker.value as {at:number}).at)<30000});
+      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning:workerHeartbeatFresh(worker?.value)});
     }
     if(route==='webhooks/whatsapp'){
       if(method==='GET'){
@@ -191,7 +192,11 @@ async function handler(request:Request,context:Context):Promise<Response> {
         const sender=await db.sender.create({data:{organizationId:user.organizationId,name:data.name,provider:data.provider,phone:data.phone,encryptedCredentials:data.provider==='META'?encrypt(JSON.stringify({phoneNumberId:data.phoneNumberId,accessToken:data.accessToken})):null}});await audit(user.id,'CREATE_SENDER','sender',sender.id);return ok({id:sender.id},201);
       }
       const id=path[1]||p.get('id');if(!id)throw new AppError(400,'Select a sender account');const sender=await db.sender.findFirst({where:{id,organizationId:user.organizationId}});if(!sender)throw new AppError(404,'Sender not found');
-      if(path[2]==='connect'&&method==='POST'){await enqueue(db,'CONNECT',id,`connect:${id}:${Math.floor(Date.now()/10000)}`);await demoDrain(user.organizationId);await audit(user.id,'CONNECT_SENDER','sender',id);return ok({connecting:true});}
+      if(path[2]==='connect'&&method==='POST'){
+        if(sender.provider!=='DEMO')await requireWhatsAppWorker();
+        await transaction(async tx=>{if(sender.status!=='CONNECTED')await tx.sender.update({where:{id},data:{status:'CONNECTING',lastError:null,qrCode:null}});await enqueue(tx,'CONNECT',id,`connect:${id}:${Math.floor(Date.now()/10000)}`);});
+        await demoDrain(user.organizationId);await audit(user.id,'CONNECT_SENDER','sender',id);return ok({connecting:true});
+      }
       if(path[2]==='disconnect'&&method==='POST'){await enqueue(db,'DISCONNECT',id,`disconnect:${id}:${opaqueToken()}`);await demoDrain(user.organizationId);await audit(user.id,'DISCONNECT_SENDER','sender',id);return ok({disconnected:true});}
       if(path[2]==='qr'||path[2]==='status')return ok({id:sender.id,status:sender.status,qrCode:sender.qrCode,phone:sender.phone,lastError:sender.lastError});
     }
