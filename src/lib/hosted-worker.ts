@@ -34,7 +34,7 @@ export async function startHostedWorker(){
       void state.service.done.then(result=>{
         if(state.stopping)return;
         if(Date.now()-started>60000)attempts=0;
-        const delay=result.reason==='BROWSER_HOST_CAPACITY'?300000:Math.min(1000*2**Math.min(attempts++,5),30000);
+        const delay=result.reason?.startsWith('BROWSER_')?300000:Math.min(1000*2**Math.min(attempts++,5),30000);
         console.log(JSON.stringify({event:'hosted_worker_restarting',delayMs:delay}));
         state.retry=setTimeout(launch,delay);state.retry.unref();
       });

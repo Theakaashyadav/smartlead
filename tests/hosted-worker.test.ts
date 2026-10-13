@@ -9,8 +9,8 @@ beforeEach(()=>{
   for(const key of ['SMARTLEAD_DATA_DIR','WHATSAPP_PROFILE_DIR','WHATSAPP_SESSION_DIR','WHATSAPP_REMOTE_AUTH_DIR','PUPPETEER_CACHE_DIR'])vi.stubEnv(key,'');
   mocks.mkdir.mockReset().mockResolvedValue(undefined);mocks.start.mockReset();
   mocks.start.mockImplementation(()=>{
-    let finish!:(value:{failed:boolean})=>void;const done=new Promise<{failed:boolean}>(resolve=>{finish=resolve;});
-    return {stop:vi.fn(()=>finish({failed:false})),done,fail:()=>finish({failed:true})};
+    let finish!:(value:{failed:boolean;reason?:string})=>void;const done=new Promise<{failed:boolean;reason?:string}>(resolve=>{finish=resolve;});
+    return {stop:vi.fn(()=>finish({failed:false})),done,fail:(reason?:string)=>finish({failed:true,reason})};
   });
 });
 afterEach(async()=>{await stopHostedWorker();vi.useRealTimers();vi.unstubAllEnvs();});
@@ -29,5 +29,10 @@ describe('embedded hosted worker',()=>{
     expect(hostedDataDirectory(path.join(domain,'hbuilds','versions','release-id','nodejs'))).toBe(path.join(domain,'data'));
     vi.stubEnv('SMARTLEAD_DATA_DIR',path.join(domain,'custom-data'));
     expect(hostedDataDirectory(path.join(domain,'hbuilds','current','nodejs'))).toBe(path.join(domain,'custom-data'));
+  });
+  it('waits five minutes before retrying browser failures on a constrained hosting account',async()=>{
+    vi.useFakeTimers();await startHostedWorker();mocks.start.mock.results[0].value.fail('BROWSER_START_FAILED');
+    await vi.advanceTimersByTimeAsync(299999);expect(mocks.start).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);expect(mocks.start).toHaveBeenCalledTimes(2);
   });
 });
