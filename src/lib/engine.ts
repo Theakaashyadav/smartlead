@@ -240,12 +240,12 @@ export async function processJob(id:string) {
     await db.job.updateMany({where:{id,lockToken:token},data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});
   }
 }
-export async function drainJobs(limit=50,sendDelay=0,organizationId?:string) {
-  for(let i=0;i<limit;i++) {
+export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shouldContinue=()=>true) {
+  for(let i=0;i<limit&&shouldContinue();i++) {
     const due={status:'PENDING',runAt:{lte:new Date()},...(organizationId?{organizationId}:{})};
     const orderBy=[{createdAt:'asc' as const},{id:'asc' as const}];
     const job=await db.job.findFirst({where:{...due,OR:[{type:{in:['CONNECT','DISCONNECT','CONTACTS']}},{type:'WRITEBACK',key:{startsWith:'writeback:feedback:'}}]},orderBy})||await db.job.findFirst({where:due,orderBy});
-    if(!job)break;
+    if(!job||!shouldContinue())break;
     await processJob(job.id);
     if(job.type==='SEND'&&sendDelay&&(await db.message.findUnique({where:{id:job.entityId},select:{status:true}}))?.status!=='QUEUED')await new Promise(r=>setTimeout(r,sendDelay));
   }

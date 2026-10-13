@@ -76,7 +76,7 @@ For source development, use `npm run dev` and keep that terminal open. Rebuild w
 
 Run `npm run worker` in a second terminal when developing; the Windows launcher starts it automatically. The WhatsApp browser saves its login in a dedicated profile under `data/whatsapp-web/`, separate from your everyday browsing profile. Background mode is the default (`WHATSAPP_LOGIN_MODE=background`); it creates no desktop window. Restarting the worker reconnects to that browser and profile instead of creating another linked device. The sending SDK attaches only after you sign in on the original site. The phone must approve device linking; SmartLead cannot override a WhatsApp account restriction.
 
-If **Connect WhatsApp** reports that the connection service is offline, check `/api/health` for `workerRunning: true`. A website deployment runs the web app; the separate `npm run worker` process must also be running with the same MongoDB database and encryption key. Connection requests fail visibly while the worker is offline, rather than silently accumulating jobs. The worker can use installed Edge/Chrome, `CHROME_PATH`, or Puppeteer's downloaded Chromium. If Chromium fails with `pthread_create: Resource temporarily unavailable` or cannot fork its processes, the hosting account needs more process/thread capacity. Run the worker on a Hostinger VPS with Chromium support, or on an always-on computer; changing the website's domain or repeatedly clicking Connect does not fix that host limitation. Keep browser profiles in a persistent directory outside disposable deployment versions.
+If **Connect WhatsApp** reports that the connection service is offline, check `/api/health` for `workerRunning: true`. Production `npm start` now starts and supervises both the website and WhatsApp worker with the same environment. A host that starts Next directly must use `scripts/start-production.mjs` as its runtime entry instead. Connection requests fail visibly while the worker is offline. Worker logs identify database failures, missing Chromium, missing browser libraries, and hosting process limits without printing credentials. Keep browser profiles in persistent server storage outside disposable deployment versions.
 
 Local sending still needs the computer, internet, and background worker running. Closing browser windows is supported; shutting down the computer stops local sending. A later Hostinger VPS deployment can run the same worker and background browser without your local computer, using the persistent `browser-runtime` volume for its profile. Link the account once on the server; Windows browser profiles are not copied to Linux. Set `WHATSAPP_LOGIN_MODE=native` only if you explicitly want the earlier visible desktop login mode.
 
@@ -104,21 +104,46 @@ For the optional fictional SQLite demo in a separate checkout, set `DATABASE_PRO
 
 ## Production installation
 
-Use a Hostinger VPS or another host supporting persistent Node processes and Chromium. Static website hosting cannot run the worker. Point your domain to the server, enable HTTPS, and set `APP_URL=https://your-domain` in `.env`; feedback then uses your domain directly. Cloudflare is not required. Keep `PUBLIC_FEEDBACK_URL` empty when feedback shares the app's domain.
+The complete hosted installation runs the website, WhatsApp browser, sheet polling, automatic sending, and feedback writeback on Hostinger. It needs no running local PC, local browser, tunnel, or Windows launcher. Your phone is needed to approve the initial WhatsApp linking QR. MongoDB can remain on your existing Atlas cluster.
 
-Configure the same MongoDB settings and secrets above, allow the hosting server's IP in Atlas, then run:
+### Managed Hostinger Node.js deployment
+
+1. Deploy this source with Node.js **22.18 or newer**, build command **`npm run build`**, and runtime command **`npm start`**. If Hostinger asks for an entry file, use **`scripts/start-production.mjs`**. Keep `src/`, `scripts/`, generated Prisma clients, `node_modules/`, and `.next/` in the runtime package; a static export or only the `.next` directory is insufficient. When selecting an `Other` framework to supply the entry file, use the project root (`.`) as the output directory.
+2. In the website's Environment variables, keep its existing `MONGODB_URI`, `MONGODB_DATABASE=smartlead`, `SESSION_SECRET`, and `ENCRYPTION_KEY`. Set `DATABASE_PROVIDER=mongodb`, `DEMO_MODE=false`, `APP_URL` to the exact public HTTPS origin, and `WHATSAPP_LOGIN_MODE=background`. Keep `PUBLIC_FEEDBACK_URL` empty for feedback on the same domain. Local `.env` and `.env.worker` files are not uploaded and do not change the host's configuration.
+3. Set `SMARTLEAD_DATA_DIR` to a writable **persistent directory on the server**, outside versioned deployment directories. Leave the individual WhatsApp directory overrides empty unless explicitly using persistent locations. Retain this directory and the same encryption key when redeploying.
+4. Allow the hosting server's outgoing IP in Atlas. On an existing installation, keep its database and keys. On a new installation, run `npm run db:setup` once to initialize SmartLead collections and indexes; this does not seed users or import local data.
+5. Chromium must run on the hosting account. `npm run build` ensures Puppeteer's Chrome is installed on Linux when no system browser is available, including when the host reuses cached dependencies. The browser is stored in `node_modules/.cache/puppeteer` so it travels with the installed dependencies. Leave `PUPPETEER_SKIP_DOWNLOAD` unset, or set `CHROME_PATH` to an installed browser. The host must also provide Chromium's Linux libraries and sufficient process/thread capacity. A successful Next build alone cannot prove browser support.
+6. Apply the environment settings and redeploy. Runtime logs should show `smartlead_process_started` for `web` and `worker`, followed by `SmartLead worker started`. Check `https://your-domain/api/health` for `status: ok`, `database: mongodb`, and **`workerRunning: true`**. Then connect WhatsApp and scan the live QR on the hosted page.
+
+`npm start` automatically restarts a crashed worker with a bounded retry delay. It forwards shutdown signals to both processes and closes hosted background browsers without logging out. A database lease allows one active worker; overlapping deployments wait for the previous worker to release ownership. Browser readiness is checked before the worker advertises its heartbeat. The parent hosting service must keep the production process running and restart it after server reboots.
+
+If managed hosting cannot start Chromium, the runtime log reports `BROWSER_MISSING`, `BROWSER_SYSTEM_LIBRARIES`, or `BROWSER_HOST_CAPACITY`. Code cannot install missing system libraries without server permissions or bypass account process limits. Use the full Hostinger VPS deployment below for an environment that installs these dependencies and supervises all services. [Hostinger Node.js hosting options](https://www.hostinger.com/support/node-js-hosting-options-at-hostinger/).
+
+### Complete Hostinger VPS deployment
+
+Use a Linux VPS with Docker Engine and the Compose plugin installed. Upload the source, copy `.env.example` to a private server `.env`, and set the production values above. **For an existing website, preserve its database and encryption/session keys** so accounts and encrypted credentials remain usable. Set `SMARTLEAD_DOMAIN=your-domain` and `APP_URL=https://your-domain`, point the domain to the VPS, allow inbound ports 80/443, and allow the VPS outgoing IP in Atlas. Keep `PUBLIC_FEEDBACK_URL` empty.
+
+In the project directory on the VPS, run:
 
 ```sh
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.hostinger.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.hostinger.yml ps
+docker compose -f docker-compose.yml -f docker-compose.hostinger.yml logs --tail=80 web worker proxy
 ```
 
-The setup service initializes only SmartLead's database before the application and worker start. No PostgreSQL or Redis service is required. Register accounts at `/register`; `npm run seed` is optional and requires explicit `ADMIN_EMAIL` and `ADMIN_PASSWORD` values when `DEMO_MODE=false`.
+This starts database setup, the website, one worker with system Chromium, and Caddy for automatic HTTPS. Containers restart after crashes or server reboots while Docker is running. The worker's `browser-runtime` volume preserves WhatsApp login profiles across updates, and Caddy's volumes preserve HTTPS certificates. MongoDB remains the durable application database. The website starts with `npm run start:web` because Compose already supervises a separate worker.
 
-Put an HTTPS reverse proxy in front of `127.0.0.1:3000`; `deploy/Caddyfile` is supplied. Set `SMARTLEAD_DOMAIN` when using Caddy. Use one dedicated worker; it owns browser sessions, polls the MongoDB outbox, atomically claims jobs, and serializes sends with a delay. Web instances may run independently. The browser runtime volume is separate from durable MongoDB records.
+Check the public `/api/health` for `workerRunning: true`, then register or sign in and scan WhatsApp's live QR on the hosted page. Linux server profiles are created on the server; Windows profiles are not copied. Updating the source and repeating `up -d --build` preserves volumes. Do not run `down -v` during an update. Back up MongoDB, encryption keys, and the browser volume. No PostgreSQL, Redis, local PC, or Cloudflare tunnel is required.
 
-Without Docker, configure `.env`, run `npm ci`, `npm run db:setup`, and `npm run build`, then supervise `npm start` and `npm run worker`. Install Chromium and set `CHROME_PATH` on Linux. Back up the `smartlead` database, encryption key, and worker browser profiles.
+If an HTTPS reverse proxy already exists, use just `docker compose up -d --build` and forward it to `127.0.0.1:3000`; `deploy/Caddyfile` also works with a host-installed Caddy. Do not bind a second proxy to ports already used by another service.
 
-If the website stays on Hostinger managed Node.js hosting, run only the WhatsApp worker on the VPS. Create a private `.env.worker` with the website's `MONGODB_URI`, `MONGODB_DATABASE`, `SESSION_SECRET`, `ENCRYPTION_KEY`, and public `APP_URL`. Allow the VPS outgoing IP in MongoDB Atlas. In the project directory, run `docker compose -f docker-compose.worker.yml up -d --build`. This separate Compose project exposes no network ports and preserves WhatsApp logins in its own volume. Check `docker compose -f docker-compose.worker.yml logs --tail=50 worker` and the website's `/api/health`; `workerRunning` should become `true`. Run one SmartLead worker against the database, then click **Connect WhatsApp** on the website and scan the QR code on your phone. To update it, pull the new source and repeat the Compose command. Do not remove the browser volume when updating.
+Without Docker, install Chromium and its system libraries, set `CHROME_PATH` and persistent storage, then run `npm ci`, `npm run db:setup`, `npm run build`, and supervise **`npm start`** as one service. It launches both processes; do not separately start another worker.
+
+For a split deployment that keeps the website on managed Hostinger and the worker on a Hostinger VPS, start the website with **`npm run start:web`**. On the VPS, create a private `.env.worker` with the website's MongoDB settings, secrets, and public `APP_URL`, then run `docker compose -f docker-compose.worker.yml up -d --build`. Its browser volume is persistent and no local PC is involved.
+
+### Upload package
+
+Run `npm run package:hostinger` in this checkout to create `data/smartlead-hostinger.zip`. The archive contains deployment source and the example environment file. It excludes private `.env` files, local databases, session profiles, generated clients, build output, and installed dependencies. Hostinger builds and generates platform-specific clients from source. Configure production secrets in Hostinger or in the VPS's private `.env`; do not upload the local development `.env`.
 
 ### Hostinger registration says Invalid request origin
 

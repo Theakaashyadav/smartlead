@@ -187,7 +187,7 @@ export class NativeWhatsAppProvider implements WhatsAppProvider {
   async handleIncomingEvents(){}
 }
 
-export async function detachNativeWhatsApp(){
-  for(const [id,session] of sessions){session.controller.abort();session.client?.removeAllListeners();registerWebClient(id,null);await session.browser.disconnect().catch(()=>{});}
+export async function detachNativeWhatsApp({closeBackground=false}={}){
+  for(const [id,session] of sessions){session.controller.abort();session.client?.removeAllListeners();registerWebClient(id,null);if(closeBackground&&session.background)await session.browser.close().catch(()=>{});else await session.browser.disconnect().catch(()=>{});}
   sessions.clear();
 }

@@ -1,0 +1,21 @@
+# Use together with docker-compose.yml on a Hostinger VPS.
+services:
+  proxy:
+    image: caddy:2-alpine
+    environment:
+      SMARTLEAD_DOMAIN: ${SMARTLEAD_DOMAIN:?Set SMARTLEAD_DOMAIN to your domain in .env}
+      SMARTLEAD_UPSTREAM: web:3000
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:
