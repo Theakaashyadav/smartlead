@@ -42,7 +42,9 @@ async function handler(request:Request,context:Context):Promise<Response> {
         return NextResponse.json({error:{code:'DATABASE_UNAVAILABLE',message:diagnostic?.message||'Database connection failed. Check the hosting environment variables, database network access, and server logs.'},configuration,...(diagnostic?{diagnostic}:{})},{status:503,headers:{'Cache-Control':'no-store'}});
       }
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
-      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning:workerHeartbeatFresh(worker?.value)});
+      const workerRunning=workerHeartbeatFresh(worker?.value);
+      const failure=!workerRunning?await db.setting.findUnique({where:{key:'simple:worker-error'}}):null;
+      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning,workerManager:process.env.SMARTLEAD_EXTERNAL_WORKER==='true'?'external':'nextjs',workerDiagnostic:failure?.value||null});
     }
     if(route==='webhooks/whatsapp'){
       if(method==='GET'){

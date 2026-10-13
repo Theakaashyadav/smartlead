@@ -8,8 +8,11 @@ afterAll(() => db.$disconnect());
 describe('hosted worker ownership', () => {
   it('allows only one of two simultaneous workers to acquire an empty database', async () => {
     const now = Date.now();
-    const results = await Promise.all([new WorkerLease('one').acquire(now), new WorkerLease('two').acquire(now)]);
+    const workers=[new WorkerLease('one'),new WorkerLease('two')];
+    const results = await Promise.all(workers.map(worker=>worker.acquire(now)));
     expect(results.filter(Boolean)).toHaveLength(1);
+    expect(workerHeartbeatFresh((await db.setting.findUniqueOrThrow({ where: { key: WORKER_KEY } })).value, now)).toBe(false);
+    expect(await workers[results.indexOf(true)].markReady(now)).toBe(true);
     expect(workerHeartbeatFresh((await db.setting.findUniqueOrThrow({ where: { key: WORKER_KEY } })).value, now)).toBe(true);
   });
 
@@ -22,7 +25,7 @@ describe('hosted worker ownership', () => {
     expect(await replacement.acquire(now + 31000)).toBe(true);
     expect(await old.renew(now + 32000)).toBe(false);
     await old.release();
-    expect((await db.setting.findUniqueOrThrow({ where: { key: WORKER_KEY } })).value).toEqual({ owner: 'replacement', at: now + 31000 });
+    expect((await db.setting.findUniqueOrThrow({ where: { key: WORKER_KEY } })).value).toEqual({ owner: 'replacement', at: now + 31000, ready:false });
     expect(await replacement.renew(now + 33000)).toBe(true);
   });
 

@@ -1,5 +1,9 @@
 import type { NextConfig } from 'next';
 const config: NextConfig = {
+  output: 'standalone',
+  outputFileTracingIncludes: {
+    '/*': ['.puppeteerrc.cjs', 'node_modules/.cache/puppeteer/**/*', 'src/generated/mongo/**/*', 'src/generated/demo/**/*'],
+  },
   logging: { incomingRequests: false, browserToTerminal: false },
   serverExternalPackages: ['whatsapp-web.js', 'puppeteer', 'pdfkit', 'exceljs', 'mongodb'],
   async headers() { return [{source:'/(.*)', headers:[

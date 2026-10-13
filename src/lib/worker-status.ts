@@ -2,9 +2,13 @@ import { db } from './db';
 import { appUrl } from './config';
 import { AppError } from './security';
 
-export function workerHeartbeatFresh(value:unknown,now=Date.now()){
+export function workerLeaseFresh(value:unknown,now=Date.now()){
   const at=value&&typeof value==='object'&&'at' in value?value.at:undefined;
   return typeof at==='number'&&Number.isFinite(at)&&at<=now+5000&&now-at<30000;
+}
+
+export function workerHeartbeatFresh(value:unknown,now=Date.now()){
+  return workerLeaseFresh(value,now)&&!(value&&typeof value==='object'&&'ready' in value&&value.ready===false);
 }
 
 export function workerOfflineMessage(){

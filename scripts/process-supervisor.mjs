@@ -66,6 +66,6 @@ export function superviseProduction({ web, worker, env, spawnProcess = spawn, lo
   }
 
   launch('web', web);
-  launch('worker', worker);
+  if (worker) launch('worker', worker);
   return { stop, done };
 }

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { mkdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import nextEnv from '@next/env';
@@ -13,6 +14,8 @@ export async function startProduction(args = process.argv.slice(2)) {
   const dataDirectory = path.resolve(process.env.SMARTLEAD_DATA_DIR || 'data');
   const env = {
     ...process.env,
+    SMARTLEAD_EXTERNAL_WORKER: 'true',
+    HOSTNAME: '0.0.0.0',
     WHATSAPP_LOGIN_MODE: process.env.WHATSAPP_LOGIN_MODE || 'background',
     WHATSAPP_PROFILE_DIR: process.env.WHATSAPP_PROFILE_DIR || path.join(dataDirectory, 'whatsapp-web'),
     WHATSAPP_SESSION_DIR: process.env.WHATSAPP_SESSION_DIR || path.join(dataDirectory, 'sessions'),
@@ -23,9 +26,12 @@ export async function startProduction(args = process.argv.slice(2)) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
     }
     const require = createRequire(import.meta.url);
+    const webOnly=args.includes('--web-only');
+    const webArgs=args.filter(arg=>arg!=='--web-only');
+    const standalone=path.resolve('.next','standalone','server.js');
     const supervisor = superviseProduction({
-      web: [require.resolve('next/dist/bin/next'), 'start', '--hostname', '0.0.0.0', ...args],
-      worker: ['--import', 'tsx', path.resolve('src/worker.ts')],
+      web: existsSync(standalone)&&!webArgs.length?[standalone]:[require.resolve('next/dist/bin/next'), 'start', '--hostname', '0.0.0.0', ...webArgs],
+      worker: webOnly?null:['--import', 'tsx', path.resolve('src/worker.ts')],
       env,
     });
     const stop = () => supervisor.stop();

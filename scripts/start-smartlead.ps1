@@ -1,6 +1,7 @@
 param([switch]$NoBrowser, [switch]$EnableRemoteFeedback)
 
 $ErrorActionPreference = 'Stop'
+$env:SMARTLEAD_EXTERNAL_WORKER = 'true'
 $workspace = Split-Path -Parent $PSScriptRoot
 $loginUrl = 'http://127.0.0.1:3000/login'
 $healthUrl = 'http://127.0.0.1:3000/api/health'
