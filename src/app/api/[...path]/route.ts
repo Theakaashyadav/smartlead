@@ -21,6 +21,7 @@ import { feedbackBaseURL } from '@/lib/feedback-url';
 import { databaseFailure, safeDatabaseErrorCode } from '@/lib/database-errors';
 import { requireWhatsAppWorker, workerHeartbeatFresh } from '@/lib/worker-status';
 import { socketWhatsApp } from '@/lib/whatsapp-mode';
+import { SIMPLE_POLL_SECONDS, SEND_INTERVAL_MS } from '@/lib/automation-policy';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -45,7 +46,7 @@ async function handler(request:Request,context:Context):Promise<Response> {
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
       const workerRunning=workerHeartbeatFresh(worker?.value);
       const failure=!workerRunning?await db.setting.findUnique({where:{key:'simple:worker-error'}}):null;
-      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning,workerManager:process.env.SMARTLEAD_EXTERNAL_WORKER==='true'?'external':'nextjs',workerDiagnostic:failure?.value||null});
+      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning,workerManager:process.env.SMARTLEAD_EXTERNAL_WORKER==='true'?'external':'nextjs',workerDiagnostic:failure?.value||null,automation:{publicSheetPollSeconds:SIMPLE_POLL_SECONDS,minimumSendIntervalMs:SEND_INTERVAL_MS}});
     }
     if(route==='webhooks/whatsapp'){
       if(method==='GET'){

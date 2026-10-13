@@ -1,4 +1,4 @@
-import type { Prisma, Sheet } from '@/generated/mongo';
+import type { Prisma, Sheet, Job } from '@/generated/mongo';
 import { db, databaseTransaction } from './db';
 import { appUrl } from './config';
 import { AppError, audit, decrypt, encrypt, hash, opaqueToken, signedFeedbackToken, verifyFeedbackSignature } from './security';
@@ -9,6 +9,10 @@ import { UncertainDelivery, whatsappProvider, type WhatsAppProvider } from './wh
 import { simpleLeadMessage } from './simple-shared';
 import { feedbackBaseURL } from './feedback-url';
 import { organizationSettingKey } from './organizations';
+import { sheetPollSeconds } from './automation-policy';
+
+const sourceChecks = new Map<string, string>();
+let nextSendAt = 0;
 
 export async function enqueue(tx:Prisma.TransactionClient, type:string, entityId:string, key:string) {
   const entity=['CONNECT','DISCONNECT','CONTACTS'].includes(type)
@@ -27,11 +31,25 @@ export async function transaction<T>(fn:(tx:Prisma.TransactionClient)=>Promise<T
   }
   throw new Error('Transaction retry exhausted');
 }
-export async function synchronizeSheet(id:string, provider?:SheetProvider) {
+export async function synchronizeSheet(id:string, provider?:SheetProvider, options:{skipUnchanged?:boolean;refreshQueued?:boolean}={}) {
   const sheet=await db.sheet.findUniqueOrThrow({where:{id}});
-  await db.sheet.update({where:{id},data:{syncStatus:'SYNCING',lastSyncError:null}});
+  if(!options.skipUnchanged)await db.sheet.update({where:{id},data:{syncStatus:'SYNCING',lastSyncError:null}});
   try {
     const rows=await (provider||sheetProvider(sheet)).read(sheet);
+    const contentHash=options.skipUnchanged?hash(JSON.stringify([sheet.createdAt,sheet.columnMapping,sheet.project,rows])):undefined;
+    if(contentHash&&sourceChecks.get(id)===contentHash){
+      await db.sheet.update({where:{id},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:0,lastSyncError:null}});
+      return {imported:0,checked:rows.length};
+    }
+    if(options.skipUnchanged)await db.sheet.update({where:{id},data:{syncStatus:'SYNCING',lastSyncError:null}});
+    // Fetch source identities in bounded batches rather than one round trip per row.
+    const identities=rows.map(row=>row.stableId);
+    const existingRows=[];
+    for(let offset=0;offset<identities.length;offset+=500)existingRows.push(...await db.lead.findMany({
+      where:{sheetId:id,stableSourceId:{in:identities.slice(offset,offset+500)}},
+      select:{id:true,stableSourceId:true,redactedAt:true,sourceFingerprint:true,sourceRow:true,metadataId:true,sourceDeleted:true,managedSnapshot:true,status:true,lastFeedback:true,mobile:true},
+    }));
+    const existingById=new Map(existingRows.map(lead=>[lead.stableSourceId,lead]));
     const seen=new Set<string>();let imported=0;
     for(const row of rows) {
       if(seen.has(row.stableId))throw new AppError(409,'Duplicate source Lead IDs detected');
@@ -39,7 +57,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider) {
       const parsed=phoneSchema.safeParse(row.values.mobile);
       const mobile=parsed.success?parsed.data:row.values.mobile;
       const fingerprint=hash(JSON.stringify([sourceFingerprint(row.values),row.questions||[]]));
-      const existing=await db.lead.findUnique({where:{sheetId_stableSourceId:{sheetId:id,stableSourceId:row.stableId}}});
+      const existing=existingById.get(row.stableId);
       if(existing?.redactedAt)continue;
       const date=row.values.leadDate?new Date(row.values.leadDate):new Date();
       const data={customerName:row.values.customerName||'Unnamed lead',mobile,email:row.values.email||null,project:row.values.project||sheet.project,location:row.values.location||null,budget:row.values.budget||null,source:row.values.source||null,requirement:row.values.requirement||null,sourceRow:row.row,metadataId:row.metadataId||null,sourceFingerprint:fingerprint,sourceData:{questions:row.questions||[]},sourceDeleted:false};
@@ -59,15 +77,28 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider) {
         const initialize=sheet.connectionType==='SIMPLE_PUBLIC'&&!snapshot.__publicFeedbackInitialized;
         const hasFeedback=initialize?await db.feedback.count({where:{leadId:existing.id}}):0;
         const baseline=initialize?{managedSnapshot:{...snapshot,status:row.values.status||'',assignedEmployee:row.values.assignedEmployee||'',feedback:row.values.feedback||'',__publicFeedbackInitialized:'1'},...(!hasFeedback?{status:row.values.status||existing.status,lastFeedback:row.values.feedback||existing.lastFeedback}:{}),version:{increment:1}}:{};
-        await db.lead.update({where:{id:existing.id},data:{...(existing.sourceFingerprint!==fingerprint?data:{sourceRow:row.row,metadataId:row.metadataId||null,sourceDeleted:false}),...baseline}});
+        // A connector can fill a row in stages. Queue it when its phone first
+        // becomes valid, retaining the stable Meta lead ID and job deduplication.
+        if(parsed.success&&!phoneSchema.safeParse(existing.mobile).success){
+          await transaction(async tx=>{
+            await tx.lead.update({where:{id:existing.id},data:{...data,...baseline}});
+            await enqueue(tx,'ASSIGN',existing.id,`assign:${existing.id}`);
+          });
+        }else if(initialize||existing.sourceFingerprint!==fingerprint||existing.sourceRow!==row.row||existing.metadataId!==(row.metadataId||null)||existing.sourceDeleted){
+          await db.lead.update({where:{id:existing.id},data:{...(existing.sourceFingerprint!==fingerprint?data:{sourceRow:row.row,metadataId:row.metadataId||null,sourceDeleted:false}),...baseline}});
+        }
       }
     }
-    await db.lead.updateMany({where:{sheetId:id,stableSourceId:{notIn:[...seen]}},data:{sourceDeleted:true}});
-    if(sheet.connectionType.startsWith('SIMPLE_'))await refreshSimpleQueuedMessages(id);
+    await db.lead.updateMany({where:{sheetId:id,sourceDeleted:false,stableSourceId:{notIn:[...seen]}},data:{sourceDeleted:true}});
+    // The send path refreshes each queued body just before submission. Rebuilding
+    // the whole outbox on every poll delays the first new lead and repeats work.
+    if(options.refreshQueued!==false&&sheet.connectionType.startsWith('SIMPLE_'))await refreshSimpleQueuedMessages(id);
     await db.sheet.update({where:{id},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:imported,lastSyncError:null}});
     await db.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'SUCCESS',details:`Imported ${imported} new leads; checked ${rows.length} source rows.`}});
+    if(contentHash)sourceChecks.set(id,contentHash);
     return {imported,checked:rows.length};
   } catch(error) {
+    sourceChecks.delete(id);
     const message=error instanceof AppError?error.message:'Synchronization failed. Check credentials, source permissions, and API availability.';
     await db.sheet.update({where:{id},data:{syncStatus:'ERROR',lastSyncError:message}});
     await db.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'ERROR',details:message}});
@@ -91,8 +122,7 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
     phoneSchema.parse(lead.mobile);
     const istDay=new Date(Date.now()+330*60000);istDay.setUTCHours(0,0,0,0);
     const day=new Date(istDay.getTime()-330*60000);
-    const candidates=await Promise.all(rule.recipients.map(async r=>({id:r.employeeId,weight:r.weight,active:r.employee.active,capacity:r.employee.capacity,dailyLimit:r.employee.dailyLimit,daily:await tx.assignment.count({where:{employeeId:r.employeeId,isPrimary:true,assignedAt:{gte:day}}}),pending:await tx.assignment.count({where:{employeeId:r.employeeId,isPrimary:true,active:true,lead:{status:{notIn:CLOSED}}}})})));
-    if(simple)for(const candidate of candidates){candidate.capacity=Number.MAX_SAFE_INTEGER;candidate.dailyLimit=Number.MAX_SAFE_INTEGER;}
+    const candidates=await Promise.all(rule.recipients.map(async r=>({id:r.employeeId,weight:r.weight,active:r.employee.active,capacity:simple?Number.MAX_SAFE_INTEGER:r.employee.capacity,dailyLimit:simple?Number.MAX_SAFE_INTEGER:r.employee.dailyLimit,daily:simple?0:await tx.assignment.count({where:{employeeId:r.employeeId,isPrimary:true,assignedAt:{gte:day}}}),pending:simple?0:await tx.assignment.count({where:{employeeId:r.employeeId,isPrimary:true,active:true,lead:{status:{notIn:CLOSED}}}})})));
     const chosen=employeeId?{owner:employeeId,notify:[employeeId],cursor:rule.cursor}:chooseRecipients(rule.mode,candidates,rule.cursor);
     if(!chosen)return {assigned:false,reason:'No employee has available capacity'};
     const owner=candidates.find(c=>c.id===chosen.owner);
@@ -137,7 +167,7 @@ export async function refreshSimpleQueuedMessages(sheetId:string,messageId?:stri
       token=signedFeedbackToken();await tx.feedbackToken.create({data:{assignmentId:current.assignmentId,tokenHash:hash(token),expiresAt:new Date(Date.now()+30*86400000)}});
     }
     const body=simpleLeadMessage(current.lead,current.lead.sheet.name,`${await feedbackBaseURL(tx,requireOnline)}/feedback/${token}`);
-    await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(body)}});
+    if(body!==decrypt(current.encryptedBody))await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(body)}});
   });
 }
 export async function getFeedbackAccess(token:string) {
@@ -215,13 +245,13 @@ export async function retryMessage(id:string,userId:string) {
   if(message.status!=='FAILED'||message.uncertain)throw new AppError(409,'Only confirmed failures are eligible for retry. Uncertain outcomes require provider reconciliation.');
   await transaction(async tx=>{await tx.message.update({where:{id},data:{status:'QUEUED',failureReason:null,failedAt:null}});await enqueue(tx,'SEND',id,`send:${id}:retry:${message.attemptCount}`);await tx.auditLog.create({data:{userId,action:'RETRY_NOTIFICATION',entityType:'message',entityId:id}});});
 }
-export async function processJob(id:string) {
+export async function processJob(id:string, candidate?:Job) {
   const token=opaqueToken();
   const claimed=await db.job.updateMany({where:{id,status:'PENDING',runAt:{lte:new Date()}},data:{status:'PROCESSING',lockedAt:new Date(),lockToken:token}});
-  if(!claimed.count)return;
-  const job=await db.job.findUniqueOrThrow({where:{id}});
+  if(!claimed.count)return false;
+  const job=candidate||await db.job.findUniqueOrThrow({where:{id}});
   try {
-    if(job.type==='SYNC')await synchronizeSheet(job.entityId);
+    if(job.type==='SYNC')await synchronizeSheet(job.entityId,undefined,{skipUnchanged:true,refreshQueued:false});
     else if(job.type==='ASSIGN'){
       const result=await assignLead(job.entityId);
       if(!result.assigned && result.reason==='No employee has available capacity')throw new AppError(409,result.reason,'CAPACITY');
@@ -239,23 +269,42 @@ export async function processJob(id:string) {
     const attempts=job.attempts+(paused?0:1);
     await db.job.updateMany({where:{id,lockToken:token},data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});
   }
+  return true;
 }
-export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shouldContinue=()=>true) {
+export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shouldContinue=()=>true,types?:string[]) {
+  let processed=0;
   for(let i=0;i<limit&&shouldContinue();i++) {
-    const due={status:'PENDING',runAt:{lte:new Date()},...(organizationId?{organizationId}:{})};
+    const due={status:'PENDING',runAt:{lte:new Date()},...(organizationId?{organizationId}:{}),...(types?{type:{in:types}}:{})};
     const orderBy=[{createdAt:'asc' as const},{id:'asc' as const}];
-    const job=await db.job.findFirst({where:{...due,OR:[{type:{in:['CONNECT','DISCONNECT','CONTACTS']}},{type:'WRITEBACK',key:{startsWith:'writeback:feedback:'}}]},orderBy})||await db.job.findFirst({where:due,orderBy});
+    const controls=['CONNECT','DISCONNECT'].filter(type=>!types||types.includes(type));
+    // Read independent priorities together so selection costs one network wait.
+    // A newly created SEND overtakes remaining ASSIGN work in the same batch.
+    const candidates=await Promise.all([
+      controls.length?db.job.findFirst({where:{...due,type:{in:controls}},orderBy}):null,
+      !types||types.includes('SEND')?db.job.findFirst({where:{...due,type:'SEND'},orderBy}):null,
+      db.job.findFirst({where:due,orderBy}),
+    ]);
+    const job=candidates.find(candidate=>candidate!==null);
     if(!job||!shouldContinue())break;
-    await processJob(job.id);
-    if(job.type==='SEND'&&sendDelay&&(await db.message.findUnique({where:{id:job.entityId},select:{status:true}}))?.status!=='QUEUED')await new Promise(r=>setTimeout(r,sendDelay));
+    if(job.type==='SEND'&&sendDelay){
+      const delay=nextSendAt-Date.now();if(delay>0)await new Promise(resolve=>setTimeout(resolve,delay));
+      if(!shouldContinue())break;
+      nextSendAt=Date.now()+sendDelay;
+    }
+    if(await processJob(job.id,job))processed++;
   }
+  return processed;
 }
-export async function scheduleJobs(simpleOnly=false) {
+export async function scheduleJobs(simpleOnly=false,maintenance=true) {
   const sheets=await db.sheet.findMany({where:simpleOnly?{connectionType:{startsWith:'SIMPLE_'},rule:{enabled:true}}:undefined});
-  for(const sheet of sheets)if(!sheet.lastSyncAt||Date.now()-sheet.lastSyncAt.getTime()>=sheet.syncInterval*1000){
-    const slot=Math.floor(Date.now()/(sheet.syncInterval*1000));
+  const due=sheets.filter(sheet=>!sheet.lastSyncAt||Date.now()-sheet.lastSyncAt.getTime()>=sheetPollSeconds(sheet)*1000);
+  const active=due.length?await db.job.findMany({where:{type:'SYNC',status:{in:['PENDING','PROCESSING']},entityId:{in:due.map(sheet=>sheet.id)}},select:{entityId:true}}):[];
+  const activeIds=new Set(active.map(job=>job.entityId));
+  for(const sheet of due)if(!activeIds.has(sheet.id)){
+    const slot=Math.floor(Date.now()/(sheetPollSeconds(sheet)*1000));
     await enqueue(db,'SYNC',sheet.id,`sync:${sheet.id}:${slot}`);
   }
+  if(!maintenance)return;
   // Jobs interrupted after possible submission are flagged, never automatically resent.
   const stale=new Date(Date.now()-5*60000);
   await db.message.updateMany({where:{status:'PROCESSING',lastAttemptAt:{lt:stale}},data:{status:'FAILED',uncertain:true,failureReason:'Worker stopped during submission; verify provider acceptance before resending.',failedAt:new Date()}});

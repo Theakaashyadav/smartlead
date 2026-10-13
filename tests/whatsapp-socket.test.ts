@@ -52,6 +52,37 @@ async function source(senderId:string){
 }
 
 describe('WhatsApp QR login without Chromium',()=>{
+  it('reuses verified recipient numbers and sends the clickable URL without waiting for a preview',async()=>{
+    const f=await linked();
+    for(let i=0;i<3;i++)await f.provider.sendMessage({to:'+919876543211',body:'Lead https://example.com/feedback/private-token',parameters:[]});
+    expect(f.socket.onWhatsApp).toHaveBeenCalledOnce();
+    expect(f.socket.sendMessage).toHaveBeenCalledTimes(3);
+    expect(f.socket.sendMessage.mock.calls[0][1]).toEqual({text:'Lead https://example.com/feedback/private-token',linkPreview:null});
+    expect(f.socket.options.keepAliveIntervalMs).toBe(15000);
+  });
+  it('keeps connection events responsive while contact synchronization is blocked',async()=>{
+    const f=await linked();let finish!:(phone:string)=>void;
+    f.socket.signalRepository.lidMapping.getPNForLID.mockImplementation(()=>new Promise<string>(resolve=>{finish=resolve;}));
+    f.socket.ev.emit('contacts.upsert',[{id:'123@lid',name:'Pending contact'}]);
+    await vi.waitFor(()=>expect(f.socket.signalRepository.lidMapping.getPNForLID).toHaveBeenCalled());
+    try{
+      f.socket.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:{output:{statusCode:515}}}});
+      await vi.waitFor(()=>expect(mocks.make).toHaveBeenCalledTimes(2));
+      mocks.instances[1].ev.emit('connection.update',{connection:'open'});
+      await vi.waitFor(async()=>expect(await f.provider.getConnectionStatus()).toBe('CONNECTED'));
+    }finally{finish('919876543212@s.whatsapp.net');}
+  });
+  it('releases disconnected-send retry delays as soon as WhatsApp reconnects',async()=>{
+    const f=await linked();const data=await source(f.sender.id);
+    const ids=data.messages.map(message=>message.id);
+    await db.job.updateMany({where:{type:'SEND',entityId:{in:ids}},data:{runAt:new Date(Date.now()+60000)}});
+    f.socket.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:{output:{statusCode:515}}}});
+    await vi.waitFor(()=>expect(mocks.make).toHaveBeenCalledTimes(2));
+    mocks.instances[1].ev.emit('connection.update',{connection:'open'});
+    await vi.waitFor(async()=>expect(await db.job.count({where:{type:'SEND',entityId:{in:ids},runAt:{lte:new Date()}}})).toBe(2));
+    expect(await db.message.count({where:{id:{in:ids},status:'QUEUED'}})).toBe(2);
+    expect(f.socket.sendMessage).not.toHaveBeenCalled();
+  });
   it('shows the QR in the existing account state and deduplicates concurrent connect requests',async()=>{
     const f=await fixture();await Promise.all([f.provider.connect(),f.provider.connect()]);
     expect(mocks.make).toHaveBeenCalledOnce();

@@ -12,6 +12,7 @@ import { verifyWorkerBrowser, WorkerBrowserError } from './worker-browser';
 import { databaseFailure, safeDatabaseErrorCode } from './database-errors';
 import { socketWhatsApp } from './whatsapp-mode';
 import { closeSocketWhatsApp } from './whatsapp-socket';
+import { SEND_INTERVAL_MS, WORKER_IDLE_MS } from './automation-policy';
 
 export function startWorkerService({closeDatabase=false}={}){
   const controller=new AbortController();
@@ -58,18 +59,28 @@ export function startWorkerService({closeDatabase=false}={}){
       heartbeatTimer=setInterval(heartbeat,10000);
       await db.setting.deleteMany({where:{key:'simple:worker-error'}});
       console.log('SmartLead worker started. Automation jobs are stored in the application database.');
-      while(!stopping()){
-        try{
-          stage='schedule';
-          await scheduleJobs(isDemo());
-          stage='jobs';
-          await drainJobs(100,1500,undefined,()=>!stopping());
-        }catch(error){
-          if(databaseFailure(error))throw error;
-          console.error(JSON.stringify({level:'error',event:'scheduler_error'}));
+      let maintainedAt=0;
+      const loop=async(name:string,task:()=>Promise<unknown>,interval:number)=>{
+        while(!stopping()){
+          try{stage=name;await task();}
+          catch(error){
+            if(databaseFailure(error))throw error;
+            console.error(JSON.stringify({level:'error',event:'scheduler_error',stage:name}));
+          }
+          if(!stopping())await pause(interval);
         }
-        if(!stopping())await pause(3000);
-      }
+      };
+      // Sheet downloads and history/writeback work cannot hold up ready sends.
+      const loops=[
+        loop('send',()=>drainJobs(100,SEND_INTERVAL_MS,undefined,()=>!stopping(),['CONNECT','DISCONNECT','ASSIGN','SEND']),WORKER_IDLE_MS),
+        loop('sheets',async()=>{
+          const maintenance=Date.now()-maintainedAt>=60000;
+          await scheduleJobs(isDemo(),maintenance);if(maintenance)maintainedAt=Date.now();
+          await drainJobs(10,0,undefined,()=>!stopping(),['SYNC']);
+        },WORKER_IDLE_MS),
+        loop('writeback',()=>drainJobs(10,0,undefined,()=>!stopping(),['WRITEBACK','CONTACTS']),1000),
+      ];
+      try{await Promise.all(loops);}catch(error){controller.abort();await Promise.allSettled(loops);throw error;}
     }finally{clearInterval(heartbeatTimer);await renewing;}
   }
 

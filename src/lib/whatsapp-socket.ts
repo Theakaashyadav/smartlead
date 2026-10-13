@@ -13,7 +13,8 @@ type Session = {
   id: string; stopped: boolean; connected: boolean; attempts: number;
   auth?: Awaited<ReturnType<typeof socketAuthState>>; socket?: WASocket;
   opening?: Promise<void>; retry?: ReturnType<typeof setTimeout>;
-  events: Promise<void>; contacts: Map<string, WhatsAppContact>;
+  events: Promise<void>; background: Promise<void>; warming?: Promise<void>;
+  contacts: Map<string, WhatsAppContact>; recipients: Map<string, { jid: string; expiresAt: number }>;
 };
 const sessions = new Map<string, Session>();
 const logger = pino({ level: 'silent' });
@@ -50,16 +51,42 @@ async function saveContacts(session: Session, contacts: Partial<Contact>[]) {
 
 async function reconcile(session: Session, messages: WAMessage[]) {
   // Match only IDs reserved by this app before submission, never arbitrary chat history.
-  for (const item of messages) {
-    if (!item.key.fromMe || !item.key.id) continue;
-    const id = providerId(session.id, item.key.id);
-    const message = await db.message.findUnique({ where: { providerMessageId: id } });
-    if (!message || message.senderId !== session.id || message.status !== 'FAILED' || !message.uncertain) continue;
+  const own = messages.filter(item => item.key.fromMe && item.key.id);
+  const pending = [];
+  for (let offset = 0; offset < own.length; offset += 500) pending.push(...await db.message.findMany({ where: {
+    senderId: session.id, status: 'FAILED', uncertain: true,
+    providerMessageId: { in: own.slice(offset, offset + 500).map(item => providerId(session.id, item.key.id!)) },
+  } }));
+  const indexed = new Map(pending.map(message => [message.providerMessageId, message]));
+  for (const item of own) {
+    const message = indexed.get(providerId(session.id, item.key.id!));
+    if (!message) continue;
     const body = item.message?.conversation || item.message?.extendedTextMessage?.text;
     if (phoneFromJid(item.key.remoteJid) !== message.recipient || body !== decrypt(message.encryptedBody)) continue;
     await db.message.updateMany({ where: { id: message.id, status: 'FAILED', uncertain: true }, data: {
       status: 'SUBMITTED', uncertain: false, submittedAt: new Date(), failedAt: null, failureReason: null,
     } });
+  }
+}
+
+async function wakePendingSends(session: Session) {
+  const queued = await db.message.findMany({ where: { senderId: session.id, status: 'QUEUED', lead: { sheet: { rule: { enabled: true } } } }, select: { id: true } });
+  for (let offset = 0; offset < queued.length; offset += 500) await db.job.updateMany({
+    where: { type: 'SEND', status: 'PENDING', entityId: { in: queued.slice(offset, offset + 500).map(message => message.id) } },
+    data: { runAt: new Date() },
+  });
+}
+
+async function warmRecipients(session: Session, socket: WASocket) {
+  const selected = await db.ruleRecipient.findMany({ where: { rule: { senderId: session.id, enabled: true }, employee: { active: true } }, select: { employee: { select: { phone: true } } } });
+  const numbers = [...new Set(selected.map(recipient => recipient.employee.phone.replace('+', '')))];
+  for (let offset = 0; offset < numbers.length && !session.stopped; offset += 50) {
+    const registered = await socket.onWhatsApp(...numbers.slice(offset, offset + 50));
+    if (session.socket !== socket || !session.connected) return;
+    for (const recipient of registered || []) {
+      const phone = phoneFromJid(recipient.jid);
+      if (recipient.exists && phone) session.recipients.set(phone, { jid: recipient.jid, expiresAt: Date.now() + 3600000 });
+    }
   }
 }
 
@@ -71,7 +98,7 @@ async function open(session: Session) {
   if (session.stopped) return;
   const socket = makeWASocket({
     auth: session.auth.state, logger, markOnlineOnConnect: false, syncFullHistory: false,
-    connectTimeoutMs: 20000, defaultQueryTimeoutMs: 25000,
+    connectTimeoutMs: 20000, defaultQueryTimeoutMs: 25000, keepAliveIntervalMs: 15000,
     getMessage: async key => {
       if (!key.id) return;
       const message = await db.message.findUnique({ where: { providerMessageId: providerId(session.id, key.id) } });
@@ -79,21 +106,27 @@ async function open(session: Session) {
     },
   });
   session.socket = socket;
-  const handle = (task: () => Promise<void>) => {
-    session.events = session.events.then(async () => {
+  const handle = (task: () => Promise<void>, background = false) => {
+    const lane = background ? 'background' : 'events';
+    session[lane] = session[lane].then(async () => {
       if (!session.stopped && session.socket === socket) await task();
-    }).catch(() => fail(session));
+    }).catch(() => {
+      if (!background) return fail(session);
+      console.error(JSON.stringify({ event: 'whatsapp_background_sync_failed' }));
+    });
   };
   socket.ev.on('creds.update', creds => handle(async () => {
     Object.assign(session.auth!.state.creds, creds); await session.auth!.saveCreds();
   }));
-  socket.ev.on('contacts.upsert', contacts => handle(() => saveContacts(session, contacts)));
-  socket.ev.on('contacts.update', contacts => handle(() => saveContacts(session, contacts)));
+  socket.ev.on('contacts.upsert', contacts => handle(() => saveContacts(session, contacts), true));
+  socket.ev.on('contacts.update', contacts => handle(() => saveContacts(session, contacts), true));
   socket.ev.on('messaging-history.set', event => handle(async () => {
     await saveContacts(session, event.contacts); await reconcile(session, event.messages);
-  }));
-  socket.ev.on('messages.upsert', event => handle(() => reconcile(session, event.messages)));
-  socket.ev.on('connection.update', event => handle(async () => {
+  }, true));
+  socket.ev.on('messages.upsert', event => handle(() => reconcile(session, event.messages), true));
+  socket.ev.on('connection.update', event => {
+    if (session.socket === socket && event.connection === 'close') session.connected = false;
+    handle(async () => {
     if (event.qr) {
       const qrCode = await QRCode.toDataURL(event.qr, { width: 264, margin: 2 });
       await update(session.id, { status: 'WAITING_QR', qrCode, lastError: null });
@@ -101,7 +134,9 @@ async function open(session: Session) {
     if (event.connection === 'open') {
       await session.auth!.saveCreds(); session.connected = true; session.attempts = 0;
       await update(session.id, { status: 'CONNECTED', qrCode: null, phone: phoneFromJid(socket.user?.id), lastConnectedAt: new Date(), lastError: null });
-      await saveContacts(session, []);
+      await wakePendingSends(session);
+      handle(() => saveContacts(session, []), true);
+      session.warming = warmRecipients(session, socket).catch(() => {});
     } else if (event.connection === 'close') {
       session.connected = false;
       const error = event.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined;
@@ -122,14 +157,15 @@ async function open(session: Session) {
       }, delay);
       session.retry.unref();
     }
-  }));
+    });
+  });
 }
 
 async function stop(session: Session) {
   session.stopped = true; session.connected = false; clearTimeout(session.retry);
   await session.opening?.catch(() => {});
   session.socket?.end(new Error('Worker stopped'));
-  await session.events; await session.auth?.flush().catch(() => {});
+  await session.events; await Promise.all([session.background, session.warming]); await session.auth?.flush().catch(() => {});
   if (sessions.get(session.id) === session) sessions.delete(session.id);
 }
 
@@ -142,7 +178,7 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
   async connect() {
     const existing = sessions.get(this.sender.id);
     if (existing && !existing.stopped) { await existing.opening; return; }
-    const session: Session = { id: this.sender.id, stopped: false, connected: false, attempts: 0, events: Promise.resolve(), contacts: new Map() };
+    const session: Session = { id: this.sender.id, stopped: false, connected: false, attempts: 0, events: Promise.resolve(), background: Promise.resolve(), contacts: new Map(), recipients: new Map() };
     sessions.set(this.sender.id, session);
     session.opening = (async () => {
       await update(session.id, { status: 'CONNECTING', qrCode: null, lastError: null });
@@ -168,7 +204,7 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
   async refreshContacts() {
     const session = sessions.get(this.sender.id);
     if (!session?.connected) throw new AppError(409, 'WhatsApp is disconnected', 'DISCONNECTED');
-    await session.events;
+    await session.background;
     if (!session.connected) throw new AppError(409, 'WhatsApp is reconnecting; leads remain queued.', 'DISCONNECTED');
     await saveContacts(session, []);
     return [...session.contacts.values()];
@@ -177,10 +213,15 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
     const session = sessions.get(this.sender.id);
     if (!session?.connected || !session.socket) throw new AppError(409, 'WhatsApp is disconnected', 'DISCONNECTED');
     const socket = session.socket;
-    let recipient;
-    try { recipient = (await socket.onWhatsApp(input.to.replace('+', '')))?.find(item => item.exists); }
-    catch { throw new AppError(502, 'Could not check this WhatsApp number. Try again when the connection is available.'); }
-    if (!recipient) throw new AppError(400, 'This phone number is not registered on WhatsApp.');
+    let recipient = session.recipients.get(input.to);
+    if (!recipient || recipient.expiresAt <= Date.now()) {
+      let checked;
+      try { checked = (await socket.onWhatsApp(input.to.replace('+', '')))?.find(item => item.exists); }
+      catch { throw new AppError(409, 'WhatsApp is reconnecting; outgoing leads remain queued.', 'DISCONNECTED'); }
+      if (!checked) throw new AppError(400, 'This phone number is not registered on WhatsApp.');
+      recipient = { jid: checked.jid, expiresAt: Date.now() + 3600000 };
+      session.recipients.set(input.to, recipient);
+    }
     if (!session.connected) throw new AppError(409, 'WhatsApp is reconnecting; leads remain queued.', 'DISCONNECTED');
     const { generateMessageIDV2 } = await import('baileys');
     const messageId = generateMessageIDV2(socket.user?.id);
@@ -189,7 +230,7 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
       if (!claimed.count) throw new AppError(409, 'This notification is no longer pending submission.');
     }
     try {
-      const message = await socket.sendMessage(recipient.jid, { text: input.body, linkPreview: undefined }, { messageId });
+      const message = await socket.sendMessage(recipient.jid, { text: input.body, linkPreview: null }, { messageId });
       if (message?.key.id !== messageId) throw new Error('Missing submission identifier');
       return { id: providerId(this.sender.id, messageId), status: 'SUBMITTED' as const };
     } catch {

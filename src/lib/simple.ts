@@ -11,6 +11,7 @@ import { feedbackBaseURL } from './feedback-url';
 import { LEGACY_ORGANIZATION } from './organizations';
 import { requireWhatsAppWorker, workerHeartbeatFresh, workerOfflineMessage } from './worker-status';
 import { socketWhatsApp } from './whatsapp-mode';
+import { SIMPLE_POLL_SECONDS, sheetPollSeconds } from './automation-policy';
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
 const sheetWhere={connectionType:{startsWith:'SIMPLE_'}};
@@ -29,7 +30,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     const summaries=await Promise.all(sheets.map(async s=>{
       const [counts,failure]=await Promise.all([db.message.groupBy({by:['status'],where:{lead:{sheetId:s.id}},_count:true}),db.message.findFirst({where:{lead:{sheetId:s.id},status:'FAILED'},orderBy:{failedAt:'desc'},select:{failureReason:true}})]);
       const total=(statuses:string[])=>counts.filter(c=>statuses.includes(c.status)).reduce((sum,c)=>sum+c._count,0);
-      return {id:s.id,name:s.name,worksheetName:s.worksheetName,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null}};
+      return {id:s.id,name:s.name,worksheetName:s.worksheetName,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
@@ -83,7 +84,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     const mapping=Object.fromEntries(Object.entries(data.columnMapping).filter(([k,v])=>allowed.includes(k)&&v));
     if(!mapping.customerName||!mapping.mobile||Object.values(mapping).some(c=>!tab.headers.includes(c))||new Set(Object.values(mapping)).size!==Object.values(mapping).length)throw new AppError(400,'Choose different, valid columns for name and phone.');
     const account=await simpleSender(organizationId);
-    const sheet=await db.sheet.create({data:{organizationId,name:info.title,project:info.title,spreadsheetId:data.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_PUBLIC',columnMapping:mapping,managedColumnsApproved:false,syncInterval:60,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:account?.id,template:SIMPLE_TEMPLATE}}}});
+    const sheet=await db.sheet.create({data:{organizationId,name:info.title,project:info.title,spreadsheetId:data.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_PUBLIC',columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:account?.id,template:SIMPLE_TEMPLATE}}}});
     await audit(user.id,'CONNECT_SHEET','sheet',sheet.id);return {id:sheet.id};
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='recipients'&&method==='PUT'){

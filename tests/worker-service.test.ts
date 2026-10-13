@@ -20,6 +20,21 @@ beforeEach(async()=>{
 afterEach(async()=>{for(const service of services.splice(0)){service.stop();await service.done;}vi.unstubAllEnvs();});
 afterAll(()=>db.$disconnect());
 describe('worker embedded in the website process',()=>{
+  it('keeps the send lane running while a sheet download is still in progress',async()=>{
+    vi.stubEnv('WHATSAPP_LOGIN_MODE','socket');
+    let finish!:()=>void;const sheetRead=new Promise<void>(resolve=>{finish=resolve;});
+    let sends=0;let reading=false;
+    mocks.drain.mockImplementation(async(_limit,_delay,_organization,_running,types:string[])=>{
+      if(types?.includes('SYNC')){reading=true;await sheetRead;}
+      if(types?.includes('SEND'))sends++;
+      return 0;
+    });
+    const service=startWorkerService();services.push(service);
+    try{
+      await vi.waitFor(()=>expect(reading).toBe(true));
+      await vi.waitFor(()=>expect(sends).toBeGreaterThanOrEqual(2));
+    }finally{service.stop();finish();await service.done;}
+  });
   it('runs sheet polling and sending without probing Chromium in socket mode',async()=>{
     vi.stubEnv('WHATSAPP_LOGIN_MODE','socket');
     mocks.probe.mockRejectedValue(new WorkerBrowserError('BROWSER_HOST_CAPACITY','Chromium is unavailable.'));
