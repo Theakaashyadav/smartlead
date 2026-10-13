@@ -5,7 +5,7 @@ const config: NextConfig = {
     '/*': ['.puppeteerrc.cjs', 'node_modules/.cache/puppeteer/**/*', 'src/generated/mongo/**/*', 'src/generated/demo/**/*'],
   },
   logging: { incomingRequests: false, browserToTerminal: false },
-  serverExternalPackages: ['whatsapp-web.js', 'puppeteer', 'pdfkit', 'exceljs', 'mongodb'],
+  serverExternalPackages: ['baileys', 'pino', 'whatsapp-rust-bridge', 'whatsapp-web.js', 'puppeteer', 'pdfkit', 'exceljs', 'mongodb'],
   async headers() { return [{source:'/(.*)', headers:[
     {key:'X-Content-Type-Options',value:'nosniff'},
     {key:'Referrer-Policy',value:'no-referrer'},

@@ -20,6 +20,7 @@ import { organizationSettingKey, registerOrganization } from '@/lib/organization
 import { feedbackBaseURL } from '@/lib/feedback-url';
 import { databaseFailure, safeDatabaseErrorCode } from '@/lib/database-errors';
 import { requireWhatsAppWorker, workerHeartbeatFresh } from '@/lib/worker-status';
+import { socketWhatsApp } from '@/lib/whatsapp-mode';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -97,8 +98,9 @@ async function handler(request:Request,context:Context):Promise<Response> {
     if(path[0]==='feedback'&&path[1]){
       await rateLimit(`feedback:${hash(path[1])}`,60,60);
       const access=await getFeedbackAccess(path[1]);
-      if(method==='GET')return ok({simple:access.assignment.lead.sheet.connectionType.startsWith('SIMPLE_'),lead:{id:access.assignment.lead.id,customerName:access.assignment.lead.customerName,project:access.assignment.lead.project,mobile:access.assignment.lead.mobile,location:access.assignment.lead.location,sheetName:access.assignment.lead.sheet.name,questions:(access.assignment.lead.sourceData as {questions?:unknown[]}|null)?.questions||[],source:access.assignment.lead.source,status:access.assignment.lead.status,lastFeedback:access.assignment.lead.lastFeedback,writebackStatus:access.assignment.lead.writebackStatus,updatedAt:access.assignment.lead.updatedAt,nextFollowupAt:access.assignment.lead.nextFollowupAt,version:access.assignment.lead.version},employee:{name:access.assignment.employee.name},statuses:await allowedStatuses(access.assignment.lead.sheetId)});
-      if(method==='POST'){await saveFeedback(access.assignmentId,await body(request),undefined,access.id);if(access.assignment.lead.sheet.connectionType!=='SIMPLE_PUBLIC')await demoDrain(access.assignment.lead.sheet.organizationId);return ok({message:'Feedback saved. Google Sheet update queued.'});}
+      const writebackAvailable=access.assignment.lead.sheet.connectionType!=='SIMPLE_PUBLIC'||!socketWhatsApp();
+      if(method==='GET')return ok({simple:access.assignment.lead.sheet.connectionType.startsWith('SIMPLE_'),lead:{id:access.assignment.lead.id,customerName:access.assignment.lead.customerName,project:access.assignment.lead.project,mobile:access.assignment.lead.mobile,location:access.assignment.lead.location,sheetName:access.assignment.lead.sheet.name,questions:(access.assignment.lead.sourceData as {questions?:unknown[]}|null)?.questions||[],source:access.assignment.lead.source,status:access.assignment.lead.status,lastFeedback:access.assignment.lead.lastFeedback,writebackStatus:access.assignment.lead.writebackStatus,writebackAvailable,updatedAt:access.assignment.lead.updatedAt,nextFollowupAt:access.assignment.lead.nextFollowupAt,version:access.assignment.lead.version},employee:{name:access.assignment.employee.name},statuses:await allowedStatuses(access.assignment.lead.sheetId)});
+      if(method==='POST'){await saveFeedback(access.assignmentId,await body(request),undefined,access.id);if(access.assignment.lead.sheet.connectionType!=='SIMPLE_PUBLIC')await demoDrain(access.assignment.lead.sheet.organizationId);return ok({message:writebackAvailable?'Feedback saved. Google Sheet update queued.':'Feedback saved in SmartLead. Automatic updates to this public Google Sheet are unavailable with this connection.'});}
     }
     const user=await requireUser();
     await rateLimit(`api:${user.id}`,300,60);

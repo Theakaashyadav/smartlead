@@ -100,7 +100,7 @@ describe('separate organisation accounts',()=>{
       expect(await db.employee.count({where:employeeScope(user)})).toBe(1);
     }
   });
-  it.each(['background','qr','native'])('starts a visible %s connection for each organisation and scopes connection jobs',async mode=>{
+  it.each(['socket','background','qr','native'])('starts a visible %s connection for each organisation and scopes connection jobs',async mode=>{
     vi.stubEnv('WHATSAPP_LOGIN_MODE',mode);
     await db.setting.create({data:{key:'simple:worker',value:{at:Date.now()}}});
     const a=await registerOrganization({name:'Owner One',organizationName:'Agency One',email:'one@example.test',password});

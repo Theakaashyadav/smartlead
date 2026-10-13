@@ -6,7 +6,7 @@ vi.mock('node:fs/promises',()=>({mkdir:mocks.mkdir}));
 import { hostedDataDirectory, startHostedWorker, stopHostedWorker } from '@/lib/hosted-worker';
 
 beforeEach(()=>{
-  for(const key of ['SMARTLEAD_DATA_DIR','WHATSAPP_PROFILE_DIR','WHATSAPP_SESSION_DIR','WHATSAPP_REMOTE_AUTH_DIR','PUPPETEER_CACHE_DIR'])vi.stubEnv(key,'');
+  for(const key of ['SMARTLEAD_DATA_DIR','WHATSAPP_PROFILE_DIR','WHATSAPP_SESSION_DIR','WHATSAPP_REMOTE_AUTH_DIR','PUPPETEER_CACHE_DIR','WHATSAPP_LOGIN_MODE'])vi.stubEnv(key,'');
   mocks.mkdir.mockReset().mockResolvedValue(undefined);mocks.start.mockReset();
   mocks.start.mockImplementation(()=>{
     let finish!:(value:{failed:boolean;reason?:string})=>void;const done=new Promise<{failed:boolean;reason?:string}>(resolve=>{finish=resolve;});
@@ -15,6 +15,11 @@ beforeEach(()=>{
 });
 afterEach(async()=>{await stopHostedWorker();vi.useRealTimers();vi.unstubAllEnvs();});
 describe('embedded hosted worker',()=>{
+  it('defaults to browserless QR login and respects an explicitly configured transport',async()=>{
+    await startHostedWorker();expect(process.env.WHATSAPP_LOGIN_MODE).toBe('socket');
+    await stopHostedWorker();vi.stubEnv('WHATSAPP_LOGIN_MODE','background');
+    await startHostedWorker();expect(process.env.WHATSAPP_LOGIN_MODE).toBe('background');
+  });
   it('starts only one worker even if server initialization is repeated',async()=>{
     await startHostedWorker();await startHostedWorker();expect(mocks.start).toHaveBeenCalledOnce();
   });

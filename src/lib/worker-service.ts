@@ -10,6 +10,8 @@ import { closeMongoStorage } from './mongo-storage';
 import { WorkerLease } from './worker-lease';
 import { verifyWorkerBrowser, WorkerBrowserError } from './worker-browser';
 import { databaseFailure, safeDatabaseErrorCode } from './database-errors';
+import { socketWhatsApp } from './whatsapp-mode';
+import { closeSocketWhatsApp } from './whatsapp-socket';
 
 export function startWorkerService({closeDatabase=false}={}){
   const controller=new AbortController();
@@ -40,7 +42,7 @@ export function startWorkerService({closeDatabase=false}={}){
     try{
       // Only the lease owner probes/opens browsers; standby web instances do not.
       stage='browser';
-      if(!isDemo())await verifyWorkerBrowser();
+      if(!isDemo()&&!socketWhatsApp())await verifyWorkerBrowser();
       stage='restore';
       for(const sender of await db.sender.findMany({where:{provider:'WEB',status:{in:['CONNECTED','CONNECTING','WAITING_QR','WAITING_LOGIN']}}})){
         if(stopping())break;
@@ -86,6 +88,7 @@ export function startWorkerService({closeDatabase=false}={}){
     return {failed:true,reason:diagnostic.reason};
   }).finally(async()=>{
     controller.abort();
+    await closeSocketWhatsApp().catch(()=>{});
     await detachNativeWhatsApp({closeBackground:process.env.NODE_ENV==='production'}).catch(()=>{});
     await closePublicSheetEditor().catch(()=>{});
     await lease.release().catch(()=>{});

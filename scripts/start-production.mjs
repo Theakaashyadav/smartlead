@@ -16,7 +16,7 @@ export async function startProduction(args = process.argv.slice(2)) {
     ...process.env,
     SMARTLEAD_EXTERNAL_WORKER: 'true',
     HOSTNAME: '0.0.0.0',
-    WHATSAPP_LOGIN_MODE: process.env.WHATSAPP_LOGIN_MODE || 'background',
+    WHATSAPP_LOGIN_MODE: process.env.WHATSAPP_LOGIN_MODE || 'socket',
     WHATSAPP_PROFILE_DIR: process.env.WHATSAPP_PROFILE_DIR || path.join(dataDirectory, 'whatsapp-web'),
     WHATSAPP_SESSION_DIR: process.env.WHATSAPP_SESSION_DIR || path.join(dataDirectory, 'sessions'),
     WHATSAPP_REMOTE_AUTH_DIR: process.env.WHATSAPP_REMOTE_AUTH_DIR || path.join(dataDirectory, 'auth-archives'),

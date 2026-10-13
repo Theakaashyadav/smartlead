@@ -19,7 +19,7 @@ export async function startHostedWorker(){
   try{
     const storage=hostedDataDirectory();
     const profileDirectory=(value:string|undefined,fallback:string)=>value?path.resolve(storage,value):path.join(storage,fallback);
-    process.env.WHATSAPP_LOGIN_MODE=process.env.WHATSAPP_LOGIN_MODE==='headless'?'headless':'background';
+    process.env.WHATSAPP_LOGIN_MODE||='socket';
     process.env.WHATSAPP_PROFILE_DIR=profileDirectory(process.env.WHATSAPP_PROFILE_DIR,'whatsapp-web');
     process.env.WHATSAPP_SESSION_DIR=profileDirectory(process.env.WHATSAPP_SESSION_DIR,'sessions');
     process.env.WHATSAPP_REMOTE_AUTH_DIR=profileDirectory(process.env.WHATSAPP_REMOTE_AUTH_DIR,'auth-archives');

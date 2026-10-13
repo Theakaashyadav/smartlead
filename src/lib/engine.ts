@@ -199,7 +199,7 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
   // Meta approved template body parameter order is documented in README.
   const parameters=[message.lead.customerName,message.lead.mobile,message.lead.project,message.assignment.employee.name,body.match(/https?:\/\/\S+\/feedback\/\S+/)?.[0]||'Notification only'];
   try {
-    const result=await (providerOverride||whatsappProvider(message.sender)).sendMessage({to:message.recipient,body,template:rule?.metaTemplate,language:rule?.metaLanguage,parameters});
+    const result=await (providerOverride||whatsappProvider(message.sender)).sendMessage({to:message.recipient,body,template:rule?.metaTemplate,language:rule?.metaLanguage,parameters,messageId:message.id});
     await transaction(async tx=>{await tx.message.update({where:{id},data:{status:result.status,providerMessageId:result.id,submittedAt:new Date(),failureReason:null}});if(!message.lead.sheet.connectionType.startsWith('SIMPLE_'))await enqueue(tx,'WRITEBACK',message.leadId,`writeback:message:${id}:submitted`);});
   } catch(error) {
     if(error instanceof AppError&&error.code==='DISCONNECTED'){

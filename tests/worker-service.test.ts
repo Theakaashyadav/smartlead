@@ -14,11 +14,20 @@ const services:ReturnType<typeof startWorkerService>[]=[];
 beforeEach(async()=>{
   await db.setting.deleteMany({where:{key:{in:['simple:worker','simple:worker-error']}}});
   vi.stubEnv('DEMO_MODE','false');
+  vi.stubEnv('WHATSAPP_LOGIN_MODE','background');
   for(const mock of Object.values(mocks))mock.mockReset().mockResolvedValue(undefined);
 });
 afterEach(async()=>{for(const service of services.splice(0)){service.stop();await service.done;}vi.unstubAllEnvs();});
 afterAll(()=>db.$disconnect());
 describe('worker embedded in the website process',()=>{
+  it('runs sheet polling and sending without probing Chromium in socket mode',async()=>{
+    vi.stubEnv('WHATSAPP_LOGIN_MODE','socket');
+    mocks.probe.mockRejectedValue(new WorkerBrowserError('BROWSER_HOST_CAPACITY','Chromium is unavailable.'));
+    const service=startWorkerService();services.push(service);
+    await vi.waitFor(()=>expect(mocks.drain).toHaveBeenCalled());
+    expect(mocks.probe).not.toHaveBeenCalled();
+    expect(workerHeartbeatFresh((await db.setting.findUniqueOrThrow({where:{key:'simple:worker'}})).value)).toBe(true);
+  });
   it('reserves ownership during the browser probe without claiming that WhatsApp is online',async()=>{
     let finishProbe!:()=>void;mocks.probe.mockImplementation(()=>new Promise<void>(resolve=>{finishProbe=resolve;}));
     const service=startWorkerService();services.push(service);

@@ -13,7 +13,7 @@ type Session={browser:Browser;page:Page;controller:AbortController;client?:Clien
 const sessions=new Map<string,Session>();
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 
-export const backgroundWhatsApp=()=>!process.env.WHATSAPP_LOGIN_MODE||process.env.WHATSAPP_LOGIN_MODE==='background';
+export const backgroundWhatsApp=()=>process.env.WHATSAPP_LOGIN_MODE==='background';
 export const nativeWhatsAppLogin=()=>backgroundWhatsApp()||process.env.WHATSAPP_LOGIN_MODE==='native';
 
 export function nativeProfilePath(id:string){

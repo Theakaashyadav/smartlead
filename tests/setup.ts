@@ -1,13 +1,14 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 process.env.DEMO_MODE='true';
 process.env.DATABASE_PROVIDER='sqlite';
 process.env.SESSION_SECRET='test-session-secret-32-characters-minimum';
 process.env.ENCRYPTION_KEY='ab'.repeat(32);
 process.env.GOOGLE_SERVICE_ACCOUNT_BASE64=Buffer.from('{}').toString('base64');
 process.env.APP_URL='http://localhost:3000';
-const file=path.resolve(`data/test-${process.pid}.db`).replaceAll('\\','/');
+const file=path.resolve(`data/test-${process.pid}-${randomUUID()}.db`).replaceAll('\\','/');
 process.env.DEMO_DATABASE_URL=`file:${file}`;
 mkdirSync('data',{recursive:true});
 const sqlite=new DatabaseSync(file);

@@ -10,6 +10,7 @@ import { backgroundWhatsApp, nativeWhatsAppLogin } from './whatsapp-native';
 import { feedbackBaseURL } from './feedback-url';
 import { LEGACY_ORGANIZATION } from './organizations';
 import { requireWhatsAppWorker, workerHeartbeatFresh, workerOfflineMessage } from './worker-status';
+import { socketWhatsApp } from './whatsapp-mode';
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
 const sheetWhere={connectionType:{startsWith:'SIMPLE_'}};
@@ -32,7 +33,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
-    return {user:safeUser(user),organization,feedbackError,whatsappLoginMode:backgroundWhatsApp()?'background':nativeWhatsAppLogin()?'browser':'qr',account:account?{id:account.id,phone:account.phone,status:account.status,qrCode:nativeWhatsAppLogin()&&!backgroundWhatsApp()?null:account.qrCode,lastError:account.lastError}:null,sheets:summaries,workerRunning,workerMessage:workerRunning?null:workerOfflineMessage()};
+    return {user:safeUser(user),organization,feedbackError,publicSheetWritebackAvailable:!socketWhatsApp(),whatsappLoginMode:backgroundWhatsApp()?'background':nativeWhatsAppLogin()?'browser':'qr',account:account?{id:account.id,phone:account.phone,status:account.status,qrCode:nativeWhatsAppLogin()&&!backgroundWhatsApp()?null:account.qrCode,lastError:account.lastError}:null,sheets:summaries,workerRunning,workerMessage:workerRunning?null:workerOfflineMessage()};
   }
   if(route==='google'&&method==='GET'){
     const credentials=await db.googleCredential.findMany({where:{organizationId},select:{id:true,label:true,type:true},orderBy:{createdAt:'desc'}});

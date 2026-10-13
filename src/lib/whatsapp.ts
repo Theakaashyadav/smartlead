@@ -9,9 +9,11 @@ import { phoneSchema } from './validation';
 import type { WhatsAppContact } from './simple-shared';
 import { nativeWhatsAppLogin, NativeWhatsAppProvider } from './whatsapp-native';
 import { installWhatsAppCompatibility } from './whatsapp-compat';
+import { socketWhatsApp } from './whatsapp-mode';
+import { SocketWhatsAppProvider } from './whatsapp-socket';
 
 export class UncertainDelivery extends Error {}
-export interface SendInput {to:string;body:string;template?:string|null;language?:string;parameters:string[]}
+export interface SendInput {to:string;body:string;template?:string|null;language?:string;parameters:string[];messageId?:string}
 export interface WhatsAppProvider {
   connect(options?:{interactive?:boolean}):Promise<void>;
   disconnect():Promise<void>;
@@ -182,5 +184,5 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
 }
 export function whatsappProvider(sender:Sender):WhatsAppProvider {
   if(sender.provider==='DEMO'){if(!isDemo())throw new AppError(400,'Demo providers are disabled');return new DemoWhatsAppProvider(sender);}
-  return sender.provider==='META'?new MetaWhatsAppProvider(sender):nativeWhatsAppLogin()?new NativeWhatsAppProvider(sender):new WebWhatsAppProvider(sender);
+  return sender.provider==='META'?new MetaWhatsAppProvider(sender):socketWhatsApp()?new SocketWhatsAppProvider(sender):nativeWhatsAppLogin()?new NativeWhatsAppProvider(sender):new WebWhatsAppProvider(sender);
 }
