@@ -17,11 +17,13 @@ export function startWorkerService({closeDatabase=false}={}){
   let databaseReady=false;
   let fatalHeartbeat=false;
   let renewing:Promise<void>|undefined;
+  let stage='database';
   const stopping=()=>controller.signal.aborted;
   const pause=(ms:number)=>sleep(ms,undefined,{signal:controller.signal}).catch(error=>{if(!stopping())throw error;});
 
   async function run(){
     await databaseHealth();databaseReady=true;
+    stage='lease';
     let waiting=false;
     while(!stopping()&&!await lease.acquire()){
       if(!waiting){console.log(JSON.stringify({event:'worker_standby',message:'Another SmartLead worker owns the database. Waiting for it to stop.'}));waiting=true;}
@@ -37,12 +39,15 @@ export function startWorkerService({closeDatabase=false}={}){
     let heartbeatTimer=setInterval(heartbeat,10000);
     try{
       // Only the lease owner probes/opens browsers; standby web instances do not.
+      stage='browser';
       if(!isDemo())await verifyWorkerBrowser();
+      stage='restore';
       for(const sender of await db.sender.findMany({where:{provider:'WEB',status:{in:['CONNECTED','CONNECTING','WAITING_QR','WAITING_LOGIN']}}})){
         if(stopping())break;
         await whatsappProvider(sender).connect({interactive:false});
       }
       if(stopping())return;
+      stage='readiness';
       // Serialize with an in-flight renewal so both compare the latest lease value.
       clearInterval(heartbeatTimer);
       await renewing;
@@ -53,7 +58,9 @@ export function startWorkerService({closeDatabase=false}={}){
       console.log('SmartLead worker started. Automation jobs are stored in the application database.');
       while(!stopping()){
         try{
+          stage='schedule';
           await scheduleJobs(isDemo());
+          stage='jobs';
           await drainJobs(100,1500,undefined,()=>!stopping());
         }catch(error){
           if(databaseFailure(error))throw error;
@@ -66,14 +73,17 @@ export function startWorkerService({closeDatabase=false}={}){
 
   const done=run().then(()=>{
     if(fatalHeartbeat)throw new Error('Worker ownership or database connection was lost');
-    return {failed:false};
+    return {failed:false,reason:undefined as string|undefined};
   }).catch(async error=>{
-    const diagnostic=error instanceof WorkerBrowserError?{reason:error.reason,message:error.message}:databaseFailure(error)||{
+    const browserError=error instanceof WorkerBrowserError||error&&typeof error==='object'&&typeof error.reason==='string'&&/^BROWSER_[A-Z_]+$/.test(error.reason);
+    const diagnostic=browserError?{reason:error.reason as string,message:error.message as string}:databaseFailure(error)||{
       reason:'WORKER_START_FAILED',message:'The hosted worker stopped. Check the SmartLead runtime logs and database connection.',
     };
-    console.error(JSON.stringify({event:'worker_failed',code:safeDatabaseErrorCode(error),...diagnostic}));
+    const hint=typeof error?.message==='string'?error.message.match(/(?:[\w$]+\.)*[\w$]+ is not (?:a function|a constructor)|Worker (?:lease lost|heartbeat is invalid)/)?.[0]:undefined;
+    const frames=typeof error?.stack==='string'?error.stack.split('\n').filter((line:string)=>/^\s+at /.test(line)).slice(0,3):undefined;
+    console.error(JSON.stringify({event:'worker_failed',code:safeDatabaseErrorCode(error),stage,type:error?.name,hint,frames,...diagnostic}));
     if(databaseReady)await db.setting.upsert({where:{key:'simple:worker-error'},create:{key:'simple:worker-error',value:{...diagnostic,at:Date.now()}},update:{value:{...diagnostic,at:Date.now()}}}).catch(()=>{});
-    return {failed:true};
+    return {failed:true,reason:diagnostic.reason};
   }).finally(async()=>{
     controller.abort();
     await detachNativeWhatsApp({closeBackground:process.env.NODE_ENV==='production'}).catch(()=>{});

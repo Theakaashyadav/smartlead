@@ -31,10 +31,10 @@ export async function startHostedWorker(){
       const started=Date.now();
       console.log(JSON.stringify({event:'hosted_worker_starting',manager:'nextjs'}));
       state.service=startWorkerService();
-      void state.service.done.then(()=>{
+      void state.service.done.then(result=>{
         if(state.stopping)return;
         if(Date.now()-started>60000)attempts=0;
-        const delay=Math.min(1000*2**Math.min(attempts++,5),30000);
+        const delay=result.reason==='BROWSER_HOST_CAPACITY'?300000:Math.min(1000*2**Math.min(attempts++,5),30000);
         console.log(JSON.stringify({event:'hosted_worker_restarting',delayMs:delay}));
         state.retry=setTimeout(launch,delay);state.retry.unref();
       });

@@ -28,14 +28,14 @@ describe('worker embedded in the website process',()=>{
     expect(await new WorkerLease('overlapping-release').acquire()).toBe(false);
     finishProbe();
     await vi.waitFor(async()=>expect(workerHeartbeatFresh((await db.setting.findUniqueOrThrow({where:{key:'simple:worker'}})).value)).toBe(true));
-    service.stop();expect(await service.done).toEqual({failed:false});
+    service.stop();expect(await service.done).toMatchObject({failed:false});
     expect(workerHeartbeatFresh((await db.setting.findUniqueOrThrow({where:{key:'simple:worker'}})).value)).toBe(false);
     await databaseHealth();
   });
   it('records browser failures for hosted diagnostics and leaves the HTTP database usable',async()=>{
     mocks.probe.mockRejectedValue(new WorkerBrowserError('BROWSER_HOST_CAPACITY','The hosting account cannot start Chromium.'));
     const service=startWorkerService();services.push(service);
-    expect(await service.done).toEqual({failed:true});
+    expect(await service.done).toMatchObject({failed:true,reason:'BROWSER_HOST_CAPACITY'});
     expect((await db.setting.findUniqueOrThrow({where:{key:'simple:worker-error'}})).value).toMatchObject({reason:'BROWSER_HOST_CAPACITY'});
     expect(mocks.schedule).not.toHaveBeenCalled();await databaseHealth();
   });
