@@ -57,7 +57,9 @@ export async function initializeMongoDatabase(database:Db){
       // Install the partial index before removing the old email constraint.
       // Phone-only accounts have no email, and must coexist with legacy owners.
       if(model.name==='User')for(const index of await collection.listIndexes().toArray()){
-        if(index.unique&&!index.partialFilterExpression&&Object.keys(index.key).length===1&&index.key.email===1&&index.name)await collection.dropIndex(index.name);
+        if(index.unique&&!index.partialFilterExpression&&Object.keys(index.key).length===1&&index.key.email===1&&index.name){
+          try{await collection.dropIndex(index.name);}catch(error){if((error as {code?:number}).code!==27)throw error;}
+        }
       }
     }
     else if(!(await database.listCollections({name:collection.collectionName},{nameOnly:true}).hasNext()))await database.createCollection(collection.collectionName);
