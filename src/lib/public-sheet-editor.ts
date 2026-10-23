@@ -14,6 +14,7 @@ let browser:Promise<Browser>|undefined;
 let writes:Promise<unknown>=Promise.resolve();
 let editorStage='idle';
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+const lowResourceEditor=()=>process.env.SHEET_EDITOR_LOW_RESOURCE==='true'||(process.platform==='linux'&&process.env.SHEET_EDITOR_LOW_RESOURCE!=='false');
 export function sheetPasteText(value:string){
   const literal=/^[=+\-@]/.test(value)?`'${value}`:value;
   return /[\t\r\n"]/.test(literal)?`"${literal.replace(/"/g,'""')}"`:literal;
@@ -26,8 +27,8 @@ async function editorBrowser(){
     editorStage='browser-executable';
     const executablePath=await browserExecutablePath(()=>mod.executablePath());
     if(!executablePath)throw new AppError(503,'Sheet updates are queued. Enable Puppeteer browser downloads on the hosting server, then redeploy.','SHEET_EDITOR_UNAVAILABLE');
-    editorStage='browser-launch';
-    const instance=await mod.launch({headless:true,executablePath,timeout:20000,userDataDir:path.resolve(process.env.SMARTLEAD_DATA_DIR||'data','sheets-editor',String(process.pid),randomUUID()),args:['--disable-dev-shm-usage','--disable-background-timer-throttling',...(process.platform==='linux'?['--no-sandbox','--disable-setuid-sandbox']:[])]});
+    editorStage=lowResourceEditor()?'browser-launch-compact':'browser-launch';
+    const instance=await mod.launch({headless:true,executablePath,timeout:20000,userDataDir:path.resolve(process.env.SMARTLEAD_DATA_DIR||'data','sheets-editor',String(process.pid),randomUUID()),args:['--disable-dev-shm-usage','--disable-background-timer-throttling',...(process.platform==='linux'?['--no-sandbox','--disable-setuid-sandbox']:[]),...(lowResourceEditor()?['--no-zygote','--disable-gpu','--disable-software-rasterizer','--renderer-process-limit=1','--num-raster-threads=1']:[])]});
     instance.once('disconnected',()=>{browser=undefined;const child=instance.process();if(child&&child.exitCode===null&&!child.killed)child.kill();});return instance;
   })().catch(error=>{browser=undefined;throw error;});
   return browser;
@@ -64,10 +65,14 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
   let csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);
   const fields=Object.keys(values);
   let columns=outputColumns(csv,fields);
-  const instance=await editorBrowser();editorStage='browser-context';const context=await instance.createBrowserContext();
+  const instance=await editorBrowser();editorStage='browser-context';
+  // Avoid extra incognito renderer processes on constrained hosts. Public writes
+  // are serialized and anonymous; this dedicated profile never signs in.
+  const shared=lowResourceEditor();const context=shared?instance.defaultBrowserContext():await instance.createBrowserContext();
+  let page:Page|undefined;
   try{
     await context.overridePermissions('https://docs.google.com',['clipboard-read','clipboard-write','clipboard-sanitized-write']);
-    const page=await context.newPage();await page.setViewport({width:1440,height:1000});
+    page=await context.newPage();await page.setViewport({width:1440,height:1000});
     editorStage='open-sheet';
     await page.goto(`https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId}/edit?gid=${sheet.worksheetId}&hl=en`,{waitUntil:'domcontentloaded',timeout:45000});
     await page.waitForSelector('#t-name-box',{visible:true,timeout:30000});
@@ -133,7 +138,7 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
     }
     if(!verified)throw new AppError(502,'Feedback is saved in SmartLead, but Google has not confirmed the sheet update yet. It will be retried.');
     return verified;
-  }finally{await context.close();}
+  }finally{if(shared)await page?.close().catch(()=>{});else await context.close();}
 }
 export async function writePublicSheet(sheet:Sheet,stableId:string,values:Record<string,string>){
   const operation=writes.then(async()=>{

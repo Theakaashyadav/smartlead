@@ -6,11 +6,11 @@ const recoveryKey='sheets:output-layout-v2';
 export async function recoverUnavailableSheetWrites(){
   // Earlier editor failures exhausted retries before the sharing problem was
   // visible. Recover only sheet jobs; conflicts and message sends stay held.
-  const result=await db.job.updateMany({where:{type:'WRITEBACK',status:'DEAD',error:{in:[
+  const result=await db.job.updateMany({where:{type:'WRITEBACK',status:'DEAD',OR:[{error:{in:[
     'Google Sheets editor is temporarily unavailable. The sheet update will retry.',
     'Set this Google Sheet to Anyone with the link → Editor to save lead feedback.',
     'Google has not confirmed the output columns yet. The update will be retried.',
-  ]}},data:{status:'PENDING',attempts:0,runAt:new Date(),lockedAt:null,lockToken:null,error:null}});
+  ]}},{error:{startsWith:'The hosting server cannot start Chromium with its current process or memory limits.'}}]},data:{status:'PENDING',attempts:0,runAt:new Date(),lockedAt:null,lockToken:null,error:null}});
   return result.count;
 }
 export async function recoverSheetOutputs(){

@@ -7,8 +7,8 @@ import { writebackLead } from '@/lib/engine';
 
 const mocks=vi.hoisted(()=>({launch:vi.fn()}));vi.mock('puppeteer',()=>({launch:mocks.launch}));
 vi.mock('@/lib/browser-executable',()=>({browserExecutablePath:async()=>'/test/chromium'}));
-beforeEach(async()=>{await clearTestModels(['Job','SyncLog','Lead','Sheet']);});
-afterEach(async()=>{await closePublicSheetEditor();vi.restoreAllMocks();vi.unstubAllGlobals();});
+beforeEach(async()=>{vi.stubEnv('SHEET_EDITOR_LOW_RESOURCE','false');await clearTestModels(['Job','SyncLog','Lead','Sheet']);});
+afterEach(async()=>{await closePublicSheetEditor();vi.restoreAllMocks();vi.unstubAllGlobals();vi.unstubAllEnvs();});
 afterAll(()=>db.$disconnect());
 async function fixture(existing=false){
   const sheet=await db.sheet.create({data:{organizationId:'legacy',id:'editor-sheet',name:'Public source',project:'Plots',spreadsheetId:'public-editor-test-sheet-12345',worksheetId:0,connectionType:'SIMPLE_PUBLIC',columnMapping:{leadId:'ID',customerName:'Name',mobile:'Phone'}}});
@@ -20,12 +20,22 @@ async function fixture(existing=false){
     const row=Number(number)-1;clipboard.split('\t').forEach((value,i)=>{rows[row][index+i]=value;});
   });
   const access={mode:'',restricted:false};
-  const page={setViewport:vi.fn(),goto:vi.fn(),waitForSelector:vi.fn(),bringToFront:vi.fn(),click:vi.fn(),waitForFunction:vi.fn(),evaluate:vi.fn(async(_fn,arg)=>{if(typeof arg==='string')clipboard=arg;else return access;}),keyboard:{down:vi.fn(),up:vi.fn(),type:vi.fn(async value=>{range=value;}),press:vi.fn(async key=>{if(key==='KeyV')paste();})}};
-  const context={overridePermissions:vi.fn(),newPage:vi.fn(async()=>page),close:vi.fn()};mocks.launch.mockResolvedValue({createBrowserContext:async()=>context,once:vi.fn(),close:vi.fn(async()=>{})});
+  const page={close:vi.fn(async()=>{}),setViewport:vi.fn(),goto:vi.fn(),waitForSelector:vi.fn(),bringToFront:vi.fn(),click:vi.fn(),waitForFunction:vi.fn(),evaluate:vi.fn(async(_fn,arg)=>{if(typeof arg==='string')clipboard=arg;else return access;}),keyboard:{down:vi.fn(),up:vi.fn(),type:vi.fn(async value=>{range=value;}),press:vi.fn(async key=>{if(key==='KeyV')paste();})}};
+  const context={overridePermissions:vi.fn(),newPage:vi.fn(async()=>page),close:vi.fn()};
+  const instance={defaultBrowserContext:vi.fn(()=>context),createBrowserContext:vi.fn(async()=>context),once:vi.fn(),close:vi.fn(async()=>{})};mocks.launch.mockResolvedValue(instance);
   vi.stubGlobal('fetch',vi.fn(async()=>new Response(rows.map(row=>row.map(c=>`"${c.replace(/"/g,'""')}"`).join(',')).join('\n'),{headers:{'content-type':'text/csv'}})));
-  return {sheet,rows,paste,lead,access,page};
+  return {sheet,rows,paste,lead,access,page,context,instance};
 }
 describe('public Google Sheet writeback',()=>{
+  it('saves successive public rows in the compact browser without creating extra contexts or leaking pages',async()=>{
+    vi.stubEnv('SHEET_EDITOR_LOW_RESOURCE','true');
+    const {sheet,rows,page,context,instance}=await fixture();
+    await writePublicSheet(sheet,'public-id:source-a',{sentStatus:'Sent',sharedTo:'Person'});
+    await writePublicSheet(sheet,'public-id:source-a',{sentStatus:'Sent',sharedTo:'Person',status:'Interested',feedback:'Call tomorrow'});
+    expect(rows[2].slice(-4)).toEqual(['Sent','Person','Interested','Call tomorrow']);
+    expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({args:expect.arrayContaining(['--renderer-process-limit=1','--no-zygote'])}));
+    expect(instance.createBrowserContext).not.toHaveBeenCalled();expect(page.close).toHaveBeenCalledTimes(2);expect(context.close).not.toHaveBeenCalled();
+  });
   it.each(['View only','Comment only'])('stops before editing when Google labels its access control Mode with caption %s',async mode=>{
     const {sheet,rows,paste,access,page}=await fixture();const before=structuredClone(rows);
     access.mode=mode;

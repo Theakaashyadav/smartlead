@@ -88,12 +88,14 @@ describe('Sent Status and Shared To',()=>{
     const error='Google Sheets editor is temporarily unavailable. The sheet update will retry.';
     await db.job.createMany({data:[
       {organizationId:'legacy',key:'editor-dead',type:'WRITEBACK',entityId:f.lead.id,status:'DEAD',attempts:8,error},
+      {organizationId:'legacy',key:'capacity-dead',type:'WRITEBACK',entityId:f.lead.id,status:'DEAD',attempts:8,error:'The hosting server cannot start Chromium with its current process or memory limits. Sheet update will retry (browser-launch).'},
       {organizationId:'legacy',key:'editor-done',type:'WRITEBACK',entityId:f.lead.id,status:'COMPLETED',attempts:1,error},
       {organizationId:'legacy',key:'conflict-dead',type:'WRITEBACK',entityId:f.lead.id,status:'DEAD',attempts:8,error:'Managed cells changed outside SmartLead'},
       {organizationId:'legacy',key:'send-dead',type:'SEND',entityId:f.message.id,status:'DEAD',attempts:8,error},
     ]});
-    expect(await recoverUnavailableSheetWrites()).toBe(1);expect(await recoverUnavailableSheetWrites()).toBe(0);
+    expect(await recoverUnavailableSheetWrites()).toBe(2);expect(await recoverUnavailableSheetWrites()).toBe(0);
     expect(await db.job.findUniqueOrThrow({where:{key:'editor-dead'}})).toMatchObject({status:'PENDING',attempts:0,error:null});
+    expect(await db.job.findUniqueOrThrow({where:{key:'capacity-dead'}})).toMatchObject({status:'PENDING',attempts:0,error:null});
     expect(await db.job.findUniqueOrThrow({where:{key:'editor-done'}})).toMatchObject({status:'COMPLETED',attempts:1});
     expect(await db.job.findUniqueOrThrow({where:{key:'conflict-dead'}})).toMatchObject({status:'DEAD',attempts:8});
     expect(await db.job.findUniqueOrThrow({where:{key:'send-dead'}})).toMatchObject({status:'DEAD',attempts:8});

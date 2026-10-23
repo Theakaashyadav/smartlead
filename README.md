@@ -72,6 +72,8 @@ Public imports use a mapped Lead ID when present. Otherwise they identify each l
 
 The sheet cards show pending Google Sheet updates and their latest error separately from imports and WhatsApp delivery. A sheet that opens as **View only** or **Comment only** cannot accept Sent Status, Shared To, Feedback or Remark, even when public downloads work. Change **Share → General access → Anyone with the link → Editor**; permission-blocked updates keep retrying automatically. Worker startup also recovers previously exhausted editor jobs without retrying WhatsApp sends. Browser failures report the editor stage and identify missing runtime dependencies, Linux libraries or hosting process limits.
 
+Linux sheet editing limits renderer processes, disables GPU processes and closes each page after its update to reduce managed hosting resource use. This dedicated anonymous browser remains separate from WhatsApp. On a VPS, `SHEET_EDITOR_LOW_RESOURCE=false` restores Chromium's normal process settings and per-update browser contexts. An empty setting uses the Linux default.
+
 ## Feedback links: local testing and Hostinger
 
 For testing clickable links in WhatsApp on this PC, leave `APP_URL=http://127.0.0.1:3000` and `PUBLIC_FEEDBACK_URL` empty in `.env`, then open **Enable Local Feedback.cmd** once (or run the command below):
