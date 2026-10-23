@@ -72,8 +72,16 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
     await page.goto(`https://docs.google.com/spreadsheets/d/${sheet.spreadsheetId}/edit?gid=${sheet.worksheetId}&hl=en`,{waitUntil:'domcontentloaded',timeout:45000});
     await page.waitForSelector('#t-name-box',{visible:true,timeout:30000});
     await pause(3000);
-    const readOnly=await page.evaluate(()=>!!document.querySelector('[aria-label="View only"], [aria-label="Request edit access"]'));
-    if(readOnly)throw new AppError(403,'Set this Google Sheet to Anyone with the link → Editor to save lead feedback.');
+    editorStage='check-access';
+    const access=await page.evaluate(()=>({
+      mode:document.querySelector('#docs-access-level-indicator')?.textContent?.trim()||'',
+      restricted:!!document.querySelector('[aria-label="View only"], [aria-label="Request edit access"]'),
+    }));
+    // Google labels its current access control "Mode"; "View only" is its
+    // caption, rather than an aria-label. A readable sheet need not be editable.
+    if(access.restricted||/view\s*only|comment\s*only|request\s*edit\s*access/i.test(access.mode)){
+      throw new AppError(403,'Google Sheet is read-only. Set Share → General access → Anyone with the link → Editor to save Sent Status, Shared To, Feedback and Remark. Updates will retry automatically.','SHEET_READ_ONLY');
+    }
     await page.bringToFront();
     editorStage='output-columns';
     const legacy=legacyRemarkColumn(csv[0]);
@@ -135,7 +143,12 @@ export async function writePublicSheet(sheet:Sheet,stableId:string,values:Record
       console.error(JSON.stringify({event:'public_sheet_editor_retry',stage:editorStage,type:error instanceof Error?error.constructor.name:'UnknownError',reason:error instanceof Error?error.message.split('\n')[0].replace(/https?:\/\/\S+/g,'[URL]').slice(0,250):'Editor connection failed',frames:error instanceof Error?error.stack?.split('\n').filter(line=>/^\s+at /.test(line)).slice(0,3).map(line=>line.replace(/https?:\/\/\S+/g,'[URL]')):undefined}));
       // A broken browser context must not poison every later sheet job.
       await closePublicSheetEditor().catch(()=>{});
-      throw new AppError(502,'Google Sheets editor is temporarily unavailable. The sheet update will retry.','PUBLIC_EDITOR');
+      const reason=error instanceof Error?error.message:'';
+      const detail=/shared librar|\.so.*not found/i.test(reason)?'Chromium system libraries are missing on the hosting server.'
+        :/pthread_create|Resource temporarily unavailable|cannot fork/i.test(reason)?'The hosting server cannot start Chromium with its current process or memory limits.'
+        :/Cannot find (?:module|package)|ERR_MODULE_NOT_FOUND/i.test(reason)?'The deployed sheet editor is missing a runtime dependency.'
+        :'Google Sheets editor is temporarily unavailable.';
+      throw new AppError(502,`${detail} Sheet update will retry (${editorStage}).`,'PUBLIC_EDITOR');
     }
   });
   writes=operation.catch(()=>{});return operation;

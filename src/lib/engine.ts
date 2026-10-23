@@ -274,7 +274,7 @@ export async function processJob(id:string, candidate?:Job) {
     }
     await db.job.updateMany({where:{id,lockToken:token},data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
   }catch(error){
-    const paused=error instanceof AppError && ['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE'].includes(error.code);
+    const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
     const attempts=job.attempts+(paused?0:1);
     await db.job.updateMany({where:{id,lockToken:token},data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});
   }

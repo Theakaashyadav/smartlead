@@ -70,6 +70,8 @@ Lead 1 goes to selected person 1, lead 2 to person 2, and so on before repeating
 
 Public imports use a mapped Lead ID when present. Otherwise they identify each lead by its normalized phone number plus lead date, when available. Reordering rows or editing a customer's name does not resend that lead. Repeated rows with the same phone and date are imported once; use distinct Lead IDs or dates when separate leads share a phone number. Public-sheet writeback uses an isolated background browser and the original Google Sheets editor; no Google account or key is required. Keep link sharing set to **Editor**. Deleted source leads and edits to already managed output cells stop writeback instead of overwriting another row or an external edit.
 
+The sheet cards show pending Google Sheet updates and their latest error separately from imports and WhatsApp delivery. A sheet that opens as **View only** or **Comment only** cannot accept Sent Status, Shared To, Feedback or Remark, even when public downloads work. Change **Share → General access → Anyone with the link → Editor**; permission-blocked updates keep retrying automatically. Worker startup also recovers previously exhausted editor jobs without retrying WhatsApp sends. Browser failures report the editor stage and identify missing runtime dependencies, Linux libraries or hosting process limits.
+
 ## Feedback links: local testing and Hostinger
 
 For testing clickable links in WhatsApp on this PC, leave `APP_URL=http://127.0.0.1:3000` and `PUBLIC_FEEDBACK_URL` empty in `.env`, then open **Enable Local Feedback.cmd** once (or run the command below):

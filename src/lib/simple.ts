@@ -27,9 +27,16 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   if(route==='state'&&method==='GET'){
     const [account,sheets,worker,organization]=await Promise.all([simpleSender(organizationId),db.sheet.findMany({where:{...sheetWhere,organizationId},orderBy:{createdAt:'asc'},include:{rule:{include:{recipients:{orderBy:{position:'asc'},include:{employee:{select:{name:true,phone:true}}}}}},_count:{select:{leads:true}}}}),db.setting.findUnique({where:{key:'simple:worker'}}),db.organization.findUniqueOrThrow({where:{id:organizationId},select:{id:true,name:true}})]);
     const summaries=await Promise.all(sheets.map(async s=>{
-      const [counts,failure]=await Promise.all([db.message.groupBy({by:['status'],where:{lead:{sheetId:s.id}},_count:true}),db.message.findFirst({where:{lead:{sheetId:s.id},status:'FAILED'},orderBy:{failedAt:'desc'},select:{failureReason:true}})]);
+      const [counts,failure,writebacks,writebackError]=await Promise.all([
+        db.message.groupBy({by:['status'],where:{lead:{sheetId:s.id}},_count:true}),
+        db.message.findFirst({where:{lead:{sheetId:s.id},status:'FAILED'},orderBy:{failedAt:'desc'},select:{failureReason:true}}),
+        db.lead.groupBy({by:['writebackStatus'],where:{sheetId:s.id,sourceDeleted:false},_count:true}),
+        db.syncLog.findFirst({where:{sheetId:s.id,operation:'WRITEBACK',status:'ERROR'},orderBy:{createdAt:'desc'},select:{details:true}}),
+      ]);
       const total=(statuses:string[])=>counts.filter(c=>statuses.includes(c.status)).reduce((sum,c)=>sum+c._count,0);
-      return {id:s.id,name:s.name,worksheetName:s.worksheetName,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null}};
+      const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
+      const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
+      return {id:s.id,name:s.name,worksheetName:s.worksheetName,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);

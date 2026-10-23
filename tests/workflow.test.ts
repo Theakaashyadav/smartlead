@@ -198,6 +198,20 @@ describe('distribution strategies',()=>{
   it('rejects invalid weights and single-recipient rules',()=>{const base={enabled:true,senderId:null,template:DEFAULT_TEMPLATE,recipients:[{employeeId:'e0',weight:50}]};expect(ruleSchema.safeParse({...base,mode:'WEIGHTED'}).success).toBe(false);expect(ruleSchema.safeParse({...base,mode:'SINGLE'}).success).toBe(true);});
 });
 describe('durable end-to-end workflow',()=>{
+  it('shows sheet-write failures independently of successful imports and clears the warning once saved',async()=>{
+    const {admin}=await fixture();await synchronizeSheet('sheet');
+    await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_PUBLIC'}});
+    const leads=await db.lead.findMany({orderBy:{sourceRow:'asc'}});
+    await db.lead.updateMany({where:{id:{in:leads.map(l=>l.id)}},data:{writebackStatus:'SYNCED'}});
+    await db.lead.update({where:{id:leads[0].id},data:{writebackStatus:'ERROR'}});
+    await db.lead.update({where:{id:leads[1].id},data:{writebackStatus:'PENDING'}});
+    await db.syncLog.create({data:{sheetId:'sheet',operation:'WRITEBACK',status:'ERROR',details:'Google Sheet is read-only. Set link access to Editor.'}});
+    const state=await simpleAction(['state'],'GET',new Request('http://localhost:3000'),admin);
+    expect(state).toMatchObject({sheets:[{lastSyncError:null,writeback:{pending:1,failed:1,error:'Google Sheet is read-only. Set link access to Editor.'}}]});
+    await db.lead.updateMany({data:{writebackStatus:'SYNCED'}});
+    const saved=await simpleAction(['state'],'GET',new Request('http://localhost:3000'),admin);
+    expect(saved).toMatchObject({sheets:[{writeback:{pending:0,failed:0,error:null}}]});
+  });
   it('handles connection controls before older lead jobs',async()=>{
     const {sender}=await fixture();await db.sender.update({where:{id:sender.id},data:{status:'DISCONNECTED'}});await synchronizeSheet('sheet');
     const control=await enqueue(db,'CONNECT',sender.id,'priority-connect');await db.job.update({where:{id:control.id},data:{runAt:new Date(0)}});await drainJobs(1);

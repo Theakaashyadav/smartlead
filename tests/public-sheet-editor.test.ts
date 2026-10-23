@@ -19,12 +19,22 @@ async function fixture(existing=false){
     const [,letters,number]=range.match(/^([A-Z]+)(\d+)$/)!;let index=0;for(const c of letters)index=index*26+c.charCodeAt(0)-64;index--;
     const row=Number(number)-1;clipboard.split('\t').forEach((value,i)=>{rows[row][index+i]=value;});
   });
-  const page={setViewport:vi.fn(),goto:vi.fn(),waitForSelector:vi.fn(),bringToFront:vi.fn(),click:vi.fn(),waitForFunction:vi.fn(),evaluate:vi.fn(async(_fn,arg)=>{if(typeof arg==='string')clipboard=arg;else return false;}),keyboard:{down:vi.fn(),up:vi.fn(),type:vi.fn(async value=>{range=value;}),press:vi.fn(async key=>{if(key==='KeyV')paste();})}};
+  const access={mode:'',restricted:false};
+  const page={setViewport:vi.fn(),goto:vi.fn(),waitForSelector:vi.fn(),bringToFront:vi.fn(),click:vi.fn(),waitForFunction:vi.fn(),evaluate:vi.fn(async(_fn,arg)=>{if(typeof arg==='string')clipboard=arg;else return access;}),keyboard:{down:vi.fn(),up:vi.fn(),type:vi.fn(async value=>{range=value;}),press:vi.fn(async key=>{if(key==='KeyV')paste();})}};
   const context={overridePermissions:vi.fn(),newPage:vi.fn(async()=>page),close:vi.fn()};mocks.launch.mockResolvedValue({createBrowserContext:async()=>context,once:vi.fn(),close:vi.fn(async()=>{})});
   vi.stubGlobal('fetch',vi.fn(async()=>new Response(rows.map(row=>row.map(c=>`"${c.replace(/"/g,'""')}"`).join(',')).join('\n'),{headers:{'content-type':'text/csv'}})));
-  return {sheet,rows,paste,lead};
+  return {sheet,rows,paste,lead,access,page};
 }
 describe('public Google Sheet writeback',()=>{
+  it.each(['View only','Comment only'])('stops before editing when Google labels its access control Mode with caption %s',async mode=>{
+    const {sheet,rows,paste,access,page}=await fixture();const before=structuredClone(rows);
+    access.mode=mode;
+    vi.stubGlobal('document',{querySelector:(selector:string)=>selector==='#docs-access-level-indicator'?{textContent:mode}:null});
+    // Run the actual browser callback against the current Google control shape.
+    page.evaluate.mockImplementationOnce(async fn=>fn());
+    await expect(writePublicSheet(sheet,'public-id:source-a',{sentStatus:'Sent',sharedTo:'Person'})).rejects.toMatchObject({code:'SHEET_READ_ONLY',status:403});
+    expect(paste).not.toHaveBeenCalled();expect(rows).toEqual(before);
+  });
   it('adds exactly the requested headers and locates a moved lead without altering other cells',async()=>{
     const {sheet,rows}=await fixture();const originals=rows.slice(1).map(row=>row.slice());
     await writePublicSheet(sheet,'public-id:source-a',{sentStatus:'Sent',sharedTo:'Person'});

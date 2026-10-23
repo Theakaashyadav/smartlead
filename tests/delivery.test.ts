@@ -7,7 +7,7 @@ import { deliveryBackfillLeads, deliveryValues, queueDeliveryWriteback } from '@
 import { PublicSheetsProvider } from '@/lib/public-sheets';
 import { GoogleSheetsProvider, type SheetProvider } from '@/lib/google';
 import { clearTestModels } from './database-fixture';
-import { recoverSheetOutputs } from '@/lib/sheet-output-recovery';
+import { recoverSheetOutputs, recoverUnavailableSheetWrites } from '@/lib/sheet-output-recovery';
 vi.mock('google-auth-library',()=>({GoogleAuth:class{async getAccessToken(){return 'test-google-token';}},OAuth2Client:class{}}));
 
 beforeEach(async()=>{
@@ -70,6 +70,34 @@ describe('Sent Status and Shared To',()=>{
     await writebackLead(f.lead.id,f.sheetProvider,{deliveryOnly:true});
     expect(f.write.mock.calls[0][3]).toEqual({sentStatus:'Sent',sharedTo:'Original recipient',status:'Interested',feedback:'Call tomorrow afternoon'});
     expect(await db.lead.findUnique({where:{id:f.lead.id}})).toMatchObject({writebackStatus:'SYNCED',managedSnapshot:{status:'Interested',feedback:'Call tomorrow afternoon',__publicOutputV2:'1'}});
+  });
+  it('keeps read-only sheet updates retryable and saves them after sharing is corrected',async()=>{
+    const f=await fixture();await dispatchMessage(f.message.id,f.provider);
+    const job=await db.job.findFirstOrThrow({where:{key:{startsWith:'writeback:delivery:'}}});
+    await db.job.update({where:{id:job.id},data:{attempts:7}});
+    const write=vi.spyOn(PublicSheetsProvider.prototype,'write').mockRejectedValueOnce(new AppError(403,'Sheet is read-only','SHEET_READ_ONLY')).mockResolvedValue({});
+    await processJob(job.id);
+    expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'PENDING',attempts:7,error:'Sheet is read-only'});
+    await db.job.update({where:{id:job.id},data:{runAt:new Date(0)}});await processJob(job.id);
+    expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'COMPLETED',error:null});
+    expect(write).toHaveBeenLastCalledWith(expect.anything(),f.lead.stableSourceId,null,{sentStatus:'Sent',sharedTo:'Original recipient'});
+    expect(f.send).toHaveBeenCalledOnce();
+  });
+  it('recovers exhausted editor updates while preserving completed writes, conflicts and failed sends',async()=>{
+    const f=await fixture();await dispatchMessage(f.message.id,f.provider);
+    const error='Google Sheets editor is temporarily unavailable. The sheet update will retry.';
+    await db.job.createMany({data:[
+      {organizationId:'legacy',key:'editor-dead',type:'WRITEBACK',entityId:f.lead.id,status:'DEAD',attempts:8,error},
+      {organizationId:'legacy',key:'editor-done',type:'WRITEBACK',entityId:f.lead.id,status:'COMPLETED',attempts:1,error},
+      {organizationId:'legacy',key:'conflict-dead',type:'WRITEBACK',entityId:f.lead.id,status:'DEAD',attempts:8,error:'Managed cells changed outside SmartLead'},
+      {organizationId:'legacy',key:'send-dead',type:'SEND',entityId:f.message.id,status:'DEAD',attempts:8,error},
+    ]});
+    expect(await recoverUnavailableSheetWrites()).toBe(1);expect(await recoverUnavailableSheetWrites()).toBe(0);
+    expect(await db.job.findUniqueOrThrow({where:{key:'editor-dead'}})).toMatchObject({status:'PENDING',attempts:0,error:null});
+    expect(await db.job.findUniqueOrThrow({where:{key:'editor-done'}})).toMatchObject({status:'COMPLETED',attempts:1});
+    expect(await db.job.findUniqueOrThrow({where:{key:'conflict-dead'}})).toMatchObject({status:'DEAD',attempts:8});
+    expect(await db.job.findUniqueOrThrow({where:{key:'send-dead'}})).toMatchObject({status:'DEAD',attempts:8});
+    expect(f.send).toHaveBeenCalledOnce();
   });
   it('deduplicates backfills without changing completed jobs or versions again',async()=>{
     const f=await fixture();const first=await databaseTransaction(tx=>queueDeliveryWriteback(tx,f.message,'backfill-v1'));
