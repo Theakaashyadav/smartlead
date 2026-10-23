@@ -2,7 +2,7 @@ import type { NextConfig } from 'next';
 const config: NextConfig = {
   output: 'standalone',
   outputFileTracingExcludes: {
-    '**': ['data/**/*', '.env.admin-phone', '.env.hostinger', '.env.sheet-preview'],
+    '/*': ['./data/**/*', '.env.admin-phone', '.env.hostinger', '.env.sheet-preview'],
   },
   outputFileTracingIncludes: {
     '/*': ['.puppeteerrc.cjs', 'node_modules/.cache/puppeteer/**/*', 'src/generated/mongo/**/*', 'src/generated/demo/**/*'],
