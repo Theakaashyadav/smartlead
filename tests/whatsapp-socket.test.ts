@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearTestModels } from './database-fixture';
-const mocks=vi.hoisted(()=>({make:vi.fn(),instances:[] as any[]}));
+const mocks=vi.hoisted(()=>({make:vi.fn(),write:vi.fn(),instances:[] as any[]}));
 vi.mock('baileys',async importOriginal=>({...await importOriginal<typeof import('baileys')>(),default:mocks.make}));
+vi.mock('@/lib/public-sheet-editor',()=>({writePublicSheet:mocks.write,closePublicSheetEditor:vi.fn()}));
 import { db } from '@/lib/db';
 import { SocketWhatsAppProvider, closeSocketWhatsApp } from '@/lib/whatsapp-socket';
 import { socketAuthState } from '@/lib/whatsapp-socket-auth';
@@ -16,7 +17,7 @@ beforeEach(async()=>{
   vi.stubEnv('WHATSAPP_LOGIN_MODE','socket');
   await clearTestModels(['FeedbackToken','Feedback','Followup','Message','Assignment','Lead','RuleRecipient','DistributionRule','SheetAccess','SyncLog','Sheet','Employee','Sender','Job','Setting']);
   await db.organization.upsert({where:{id:'legacy'},create:{id:'legacy',name:'Test organisation'},update:{}});
-  mocks.instances.length=0;mocks.make.mockReset();
+  mocks.instances.length=0;mocks.make.mockReset();mocks.write.mockReset().mockResolvedValue(undefined);
   mocks.make.mockImplementation((options:any)=>{
     const socket={options,ev:new EventEmitter(),user:{id:'919876543210:1@s.whatsapp.net'},
       end:vi.fn(),logout:vi.fn().mockResolvedValue(undefined),
@@ -145,8 +146,9 @@ describe('WhatsApp QR login without Chromium',()=>{
     f.socket.sendMessage.mockRejectedValueOnce(new Error('timeout'));
     await expect(f.provider.sendMessage({to:'+919876543211',body:'Lead',parameters:[]})).rejects.toBeInstanceOf(UncertainDelivery);
   });
-  it('keeps unsupported public-sheet writes from launching Chromium in browserless mode',async()=>{
+  it('allows public-sheet delivery writes independently of socket WhatsApp login',async()=>{
     const f=await linked();const data=await source(f.sender.id);
-    await expect(new PublicSheetsProvider().write(data.sheet,'source',null,{status:'NEW'})).rejects.toMatchObject({code:'SHEET_WRITEBACK_UNAVAILABLE'});
+    await new PublicSheetsProvider().write(data.sheet,'source',null,{sentStatus:'Sent',sharedTo:'Employee 1'});
+    expect(mocks.write).toHaveBeenCalledWith(data.sheet,'source',{sentStatus:'Sent',sharedTo:'Employee 1'});
   });
 });

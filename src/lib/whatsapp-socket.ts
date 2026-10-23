@@ -2,7 +2,8 @@ import type { Contact, WASocket, WAMessage } from 'baileys';
 import type { Sender } from '@/generated/mongo';
 import QRCode from 'qrcode';
 import pino from 'pino';
-import { db } from './db';
+import { db, databaseTransaction } from './db';
+import { queueDeliveryWriteback } from './delivery';
 import { AppError, decrypt } from './security';
 import { phoneSchema } from './validation';
 import type { WhatsAppContact } from './simple-shared';
@@ -63,9 +64,12 @@ async function reconcile(session: Session, messages: WAMessage[]) {
     if (!message) continue;
     const body = item.message?.conversation || item.message?.extendedTextMessage?.text;
     if (phoneFromJid(item.key.remoteJid) !== message.recipient || body !== decrypt(message.encryptedBody)) continue;
-    await db.message.updateMany({ where: { id: message.id, status: 'FAILED', uncertain: true }, data: {
-      status: 'SUBMITTED', uncertain: false, submittedAt: new Date(), failedAt: null, failureReason: null,
-    } });
+    await databaseTransaction(async tx=>{
+      const updated=await tx.message.updateMany({ where: { id: message.id, status: 'FAILED', uncertain: true }, data: {
+        status: 'SUBMITTED', uncertain: false, submittedAt: new Date(), failedAt: null, failureReason: null,
+      } });
+      if(updated.count)await queueDeliveryWriteback(tx,message,`reconciled:${message.attemptCount}`);
+    });
   }
 }
 

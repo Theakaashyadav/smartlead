@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Browser, Page } from 'puppeteer';
@@ -6,7 +5,8 @@ import type { Sheet } from '@/generated/mongo';
 import { db } from './db';
 import { AppError } from './security';
 import { publicCSV, PublicSheetsProvider } from './public-sheets';
-import { SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
+import { DELIVERY_COLUMNS, SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
+import { browserExecutablePath } from './browser-executable';
 
 let browser:Promise<Browser>|undefined;
 let writes:Promise<unknown>=Promise.resolve();
@@ -15,20 +15,22 @@ const heading=(value:string)=>value.toLowerCase().replace(/[\s_]+/g,'');
 export function columnName(index:number){
   let name='';for(let n=index+1;n>0;n=Math.floor((n-1)/26))name=String.fromCharCode(65+(n-1)%26)+name;return name;
 }
-export function outputColumns(rows:string[][]){
+export function outputColumns(rows:string[][],fields:string[]=Object.keys(SIMPLE_OUTPUT_COLUMNS)){
   const headers=rows[0]?.map(h=>h.trim())||[];
   let next=Math.max(0,...rows.map(row=>row.length));
-  return Object.entries(SIMPLE_OUTPUT_COLUMNS).map(([field,label])=>{
+  if(fields.some(field=>!Object.hasOwn(SIMPLE_OUTPUT_COLUMNS,field)))throw new AppError(400,'Only SmartLead output columns may be updated.');
+  return Object.entries(SIMPLE_OUTPUT_COLUMNS).filter(([field])=>fields.includes(field)).map(([field,label])=>{
     const found=headers.map((h,i)=>heading(h)===heading(label)?i:-1).filter(i=>i>=0);
     if(found.length>1)throw new AppError(409,`Duplicate ${label} columns found. Keep one column with that heading.`);
     return {field,label,index:found[0]??next++,missing:!found.length};
   });
 }
 export function nextOutputMove(rows:string[][]){
-  const columns=outputColumns(rows);if(columns.some(c=>c.missing))return null;
-  const status=columns[0].index,owner=columns[1].index,feedback=columns[2].index;
-  if(owner!==status+1)return {start:owner,count:feedback===owner+1?2:1,direction:owner>status?'left' as const:'right' as const};
-  if(feedback!==owner+1)return {start:feedback,count:1,direction:feedback>owner?'left' as const:'right' as const};
+  const columns=outputColumns(rows,Object.keys(DELIVERY_COLUMNS));if(columns.some(c=>c.missing))return null;
+  const sent=columns[0].index,shared=columns[1].index;
+  const last=Math.max(...rows.map(row=>row.length))-1;
+  if(shared!==last)return {start:shared,count:1,direction:'right' as const};
+  if(sent!==last-1)return {start:sent,count:1,direction:'right' as const};
   return null;
 }
 export function sheetPasteText(value:string){
@@ -38,8 +40,9 @@ export function sheetPasteText(value:string){
 async function editorBrowser(){
   if(!browser)browser=(async()=>{
     const mod=await import('puppeteer');
-    const executablePath=[process.env.CHROME_PATH,...(process.platform==='win32'?['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe']:['/usr/bin/chromium','/usr/bin/google-chrome'])].find(p=>p&&existsSync(p));
-    const instance=await mod.launch({headless:true,executablePath,userDataDir:path.resolve('data/sheets-editor',String(process.pid),randomUUID()),args:['--disable-dev-shm-usage','--disable-background-timer-throttling',...(process.platform==='linux'?['--no-sandbox','--disable-setuid-sandbox']:[])]});
+    const executablePath=await browserExecutablePath(()=>mod.executablePath());
+    if(!executablePath)throw new AppError(503,'Sheet updates are queued. Enable Puppeteer browser downloads on the hosting server, then redeploy.','SHEET_EDITOR_UNAVAILABLE');
+    const instance=await mod.launch({headless:true,executablePath,timeout:20000,userDataDir:path.resolve(process.env.SMARTLEAD_DATA_DIR||'data','sheets-editor',String(process.pid),randomUUID()),args:['--disable-dev-shm-usage','--disable-background-timer-throttling',...(process.platform==='linux'?['--no-sandbox','--disable-setuid-sandbox']:[])]});
     instance.once('disconnected',()=>{browser=undefined;const child=instance.process();if(child&&child.exitCode===null&&!child.killed)child.kill();});return instance;
   })().catch(error=>{browser=undefined;throw error;});
   return browser;
@@ -73,7 +76,8 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
   const lead=await db.lead.findUniqueOrThrow({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
   if(lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'The original lead is no longer available for sheet updates.');
   let csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);
-  let columns=outputColumns(csv);
+  const fields=Object.keys(values);
+  let columns=outputColumns(csv,fields);
   const instance=await editorBrowser();const context=await instance.createBrowserContext();
   try{
     await context.overridePermissions('https://docs.google.com',['clipboard-read','clipboard-write','clipboard-sanitized-write']);
@@ -85,10 +89,14 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
     if(readOnly)throw new AppError(403,'Set this Google Sheet to Anyone with the link → Editor to save lead feedback.');
     await page.bringToFront();
     for(const column of columns.filter(c=>c.missing))await paste(page,`${columnName(column.index)}1`,[column.label]);
-    csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);
-    if(outputColumns(csv).some(c=>c.missing))throw new AppError(502,'Google has not confirmed the feedback columns yet. The update will be retried.');
-    // Move entire output columns through Sheets, preserving all values and
-    // source columns, so the requested three headings stay together in order.
+    for(let attempt=0;attempt<10;attempt++){
+      csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);
+      if(!outputColumns(csv,fields).some(c=>c.missing))break;
+      await pause(300);
+    }
+    if(outputColumns(csv,fields).some(c=>c.missing))throw new AppError(502,'Google has not confirmed the output columns yet. The update will be retried.');
+    // Keep Sent Status and Shared To together after the last used column.
+    // Whole-column moves preserve existing source cells and their relative order.
     let move=nextOutputMove(csv);let steps=0;
     while(move){
       if(++steps>csv[0].length*3)throw new AppError(502,'Google Sheets could not confirm the output column order. Please retry.');
@@ -97,7 +105,7 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
       if(csv[0].join('\t')===previous)throw new AppError(502,'Google has not confirmed the column move yet. The update will be retried.');
       move=nextOutputMove(csv);
     }
-    columns=outputColumns(csv);
+    columns=outputColumns(csv,fields);
     // Resolve the source identity again after opening the editor. Never use a
     // stale database row number when the source has been sorted or expanded.
     const matches=(await new PublicSheetsProvider().read(sheet)).filter(row=>row.stableId===stableId);
@@ -106,10 +114,10 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
     csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);
     const snapshot=(lead.managedSnapshot||{}) as Record<string,string>;
     for(const column of columns){
-      const actual=csv[row-1]?.[column.index]||'';const expected=snapshot[column.field]||'';const next=values[column.field]||'';
+      const actual=csv[row-1]?.[column.index]||'';const expected=snapshot[column.field]??(column.field==='sharedTo'?snapshot.assignedEmployee:'')??'';const next=values[column.field]||'';
       if(actual!==expected&&actual!==next)throw new AppError(409,`The sheet's ${column.label} changed outside SmartLead. Feedback is saved in the app; review this row before retrying.`,'SYNC_CONFLICT');
     }
-    // Group adjacent columns so status, owner and feedback reach Google together.
+    // Paste adjacent outputs together so the send status and recipient agree.
     const sorted=[...columns].sort((a,b)=>a.index-b.index);
     for(let i=0;i<sorted.length;){
       let end=i+1;while(end<sorted.length&&sorted[end].index===sorted[end-1].index+1)end++;

@@ -5,6 +5,7 @@ import { AppError, decrypt, hash, opaqueToken } from './security';
 import { MANAGED } from './validation';
 import { PublicSheetsProvider } from './public-sheets';
 import { LEGACY_ORGANIZATION } from './organizations';
+import { DELIVERY_COLUMNS } from './simple-shared';
 
 type Metadata = {metadataId:number;metadataKey:string;metadataValue:string;location:{dimensionRange?:{sheetId:number;startIndex:number;endIndex:number}}};
 export type SourceRow = {stableId:string;row:number;metadataId?:number;values:Record<string,string>;questions?:Array<{question:string;answer:string}>};
@@ -137,9 +138,29 @@ export class GoogleSheetsProvider implements SheetProvider {
   async write(sheet:Sheet, stableId:string, metadataId:number|null, values:Record<string,string>) {
     if(!metadataId) throw new AppError(409,'Row metadata is missing. Synchronize the source first.');
     const token=await googleToken(sheet.credentialId,sheet.organizationId);
-    const map=mapping(sheet);
+    const map={...mapping(sheet)};
     const headerData=await googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(`${tabRange(sheet)}!1:1`)}`,token);
     const headers:string[]=headerData.values?.[0]||[];
+    for(const field of Object.keys(values))if(!Object.hasOwn(MANAGED,field))throw new AppError(400,'Only application-managed fields may be written');
+    const missing=Object.keys(DELIVERY_COLUMNS).filter(field=>Object.hasOwn(values,field)&&(!map[field]||!headers.includes(map[field])));
+    if(missing.length){
+      // Delivery tracking is explicitly requested by the sheet connection. Only
+      // append its two outputs, beyond even source data with an empty heading.
+      const current=await googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(tabRange(sheet))}`,token);
+      const start=Math.max(headers.length,...(current.values||[]).map((row:unknown[])=>row.length));
+      const added:string[]=[];
+      for(const field of missing){
+        const label=sheet.connectionType.startsWith('SIMPLE_')?DELIVERY_COLUMNS[field as keyof typeof DELIVERY_COLUMNS]:MANAGED[field];
+        const matches=headers.filter(header=>header.toLowerCase().replace(/[\s_]+/g,'')===label.toLowerCase().replace(/[\s_]+/g,''));
+        if(matches.length>1)throw new AppError(409,`Duplicate ${label} columns found.`);
+        map[field]=matches[0]||label;if(!matches.length)added.push(label);
+      }
+      if(added.length){
+        await googleRequest(sheet.spreadsheetId,'/values:batchUpdate',token,{valueInputOption:'RAW',data:[{range:`${tabRange(sheet)}!${columnLetter(start)}1:${columnLetter(start+added.length-1)}1`,values:[added]}]});
+        while(headers.length<start)headers.push('');headers.push(...added);
+      }
+      await db.sheet.update({where:{id:sheet.id},data:{columnMapping:map}});
+    }
     const filter={developerMetadataLookup:{metadataId}};
     const current=await googleRequest(sheet.spreadsheetId,'/values:batchGetByDataFilter',token,{dataFilters:[filter]});
     if(current.valueRanges?.length!==1) throw new AppError(409,'The original row was deleted or its identity is missing. No cells were updated.');

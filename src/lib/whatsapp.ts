@@ -1,4 +1,5 @@
-import { db } from './db';
+import { db, databaseTransaction } from './db';
+import { queueDeliveryWriteback } from './delivery';
 import { AppError, decrypt } from './security';
 import { isDemo } from './config';
 import type { Sender } from '@/generated/mongo';
@@ -61,10 +62,14 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
         const message=await db.message.findUnique({where:{providerMessageId:status.id}});
         const value=status.status.toUpperCase();
         if(!message||message.senderId!==this.sender.id||!['SENT','DELIVERED','READ','FAILED'].includes(value))continue;
+        if(message.status===value)continue;
         if(value==='FAILED' && ['DELIVERED','READ'].includes(message.status))continue;
         if(value!=='FAILED' && (rank[value]||0)<(rank[message.status]||0))continue;
         const date=status.timestamp?new Date(Number(status.timestamp)*1000):new Date();
-        await db.message.update({where:{id:message.id},data:{status:value,...(value==='SENT'?{sentAt:date}:value==='DELIVERED'?{deliveredAt:date}:value==='READ'?{readAt:date}:{failedAt:date,failureReason:'Provider reported message delivery failure'})}});
+        await databaseTransaction(async tx=>{
+          await tx.message.update({where:{id:message.id},data:{status:value,uncertain:false,...(value==='SENT'?{sentAt:date}:value==='DELIVERED'?{deliveredAt:date}:value==='READ'?{readAt:date}:{failedAt:date,failureReason:'Provider reported message delivery failure'})}});
+          await queueDeliveryWriteback(tx,message,`status:${value}:${message.providerMessageId}`);
+        });
       }
     }
   }
@@ -175,7 +180,11 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
       },{recipient,attempts:attempts.map(m=>({id:m.id,body:decrypt(m.encryptedBody),attemptAt:m.lastAttemptAt!.getTime()}))}).catch(()=>[]);
       for(const match of matches){
         if(!match.id||await db.message.findUnique({where:{providerMessageId:match.id}}))continue;
-        await db.message.updateMany({where:{id:match.messageId,status:'FAILED',uncertain:true},data:{status:'SUBMITTED',providerMessageId:match.id,submittedAt:new Date(match.time),uncertain:false,failedAt:null,failureReason:null}});
+        const message=attempts.find(attempt=>attempt.id===match.messageId);if(!message)continue;
+        await databaseTransaction(async tx=>{
+          const updated=await tx.message.updateMany({where:{id:message.id,status:'FAILED',uncertain:true},data:{status:'SUBMITTED',providerMessageId:match.id,submittedAt:new Date(match.time),uncertain:false,failedAt:null,failureReason:null}});
+          if(updated.count)await queueDeliveryWriteback(tx,message,`reconciled:${message.attemptCount}`);
+        });
       }
     }
   }

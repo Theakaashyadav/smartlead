@@ -4,7 +4,6 @@ import { AppError, hash } from './security';
 import { phoneSchema } from './validation';
 import { detectColumns, sourceQuestions, SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
 import { writePublicSheet } from './public-sheet-editor';
-import { socketWhatsApp } from './whatsapp-mode';
 
 const sharingHelp='Cannot read this sheet. In Google Sheets, set Share → General access → Anyone with the link, then paste its link again.';
 const maxBytes=10*1024*1024;
@@ -89,7 +88,6 @@ export class PublicSheetsProvider implements SheetProvider{
     return result;
   }
   async write(sheet:Sheet,stableId:string,_metadataId:number|null,values:Record<string,string>){
-    if(socketWhatsApp())throw new AppError(503,'Feedback is saved in SmartLead. Automatic feedback updates to public Google Sheets are unavailable with the browserless connection.','SHEET_WRITEBACK_UNAVAILABLE');
     await writePublicSheet(sheet,stableId,values);
   }
 }

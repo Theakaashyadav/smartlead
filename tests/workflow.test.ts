@@ -90,11 +90,11 @@ describe('public Google Sheets links',()=>{
     let csv='Name,Phone,lead_status,shared to,Feedback\nCustomer,9876543210,BAD,Previous owner,Existing note';
     vi.stubGlobal('fetch',vi.fn(async()=>new Response(csv,{headers:{'content-type':'text/csv'}})));
     await synchronizeSheet(sheet.id);let lead=await db.lead.findFirstOrThrow();
-    expect(lead).toMatchObject({status:'BAD',lastFeedback:'Existing note',managedSnapshot:{status:'BAD',assignedEmployee:'Previous owner',feedback:'Existing note',__publicFeedbackInitialized:'1'}});
+    expect(lead).toMatchObject({status:'BAD',lastFeedback:'Existing note',managedSnapshot:{status:'BAD',sharedTo:'Previous owner',feedback:'Existing note',__publicFeedbackInitialized:'1'}});
     await db.lead.update({where:{id:lead.id},data:{managedSnapshot:{status:'',assignedEmployee:'',feedback:''},status:'New',lastFeedback:null}});
     await synchronizeSheet(sheet.id);lead=await db.lead.findFirstOrThrow();expect(lead.status).toBe('BAD');expect(lead.lastFeedback).toBe('Existing note');
     await assignLead(lead.id);const write=vi.fn<SheetProvider['write']>(async()=>{});await writebackLead(lead.id,{read:vi.fn(),write});
-    expect(write.mock.calls[0][3]).toEqual({status:'BAD',assignedEmployee:'Employee 0',feedback:'Existing note'});
+    expect(write.mock.calls[0][3]).toEqual({sentStatus:'',sharedTo:'',status:'BAD',feedback:'Existing note'});
     csv='Name,Phone,lead_status,shared to,Feedback\nCustomer,9876543210,External change,Other owner,External note';
     await synchronizeSheet(sheet.id);lead=await db.lead.findFirstOrThrow();expect(lead.status).toBe('BAD');expect(lead.lastFeedback).toBe('Existing note');expect(lead.managedSnapshot).toMatchObject({status:'BAD',__publicFeedbackInitialized:'1'});
     const assignment=await db.assignment.findFirstOrThrow();await saveFeedback(assignment.id,{status:'BAD',remarks:'Retain the original status',version:lead.version});
@@ -216,7 +216,7 @@ describe('durable end-to-end workflow',()=>{
     expect(await db.feedbackToken.count()).toBe(4);expect(await db.job.count({where:{type:'WRITEBACK'}})).toBe(0);
     const messages=await db.message.findMany();expect(messages).toHaveLength(4);
     for(const m of messages){expect(decrypt(m.encryptedBody)).toContain('You got a new lead from Test source');expect(decrypt(m.encryptedBody)).toContain('/feedback/');await dispatchMessage(m.id);}
-    expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(4);expect(await db.job.count({where:{type:'WRITEBACK'}})).toBe(0);
+    expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(4);expect(await db.job.count({where:{type:'WRITEBACK'}})).toBe(4);
     await synchronizeSheet('sheet',new DemoSheetsProvider());expect(await db.lead.count()).toBe(4);expect(await db.message.count()).toBe(4);
   });
   it('holds remote sends until a live public feedback address is available',async()=>{
@@ -248,7 +248,7 @@ describe('durable end-to-end workflow',()=>{
     body=decrypt((await db.message.findUniqueOrThrow({where:{id:outgoing.id}})).encryptedBody);expect(body).toContain('Ans.- Home');expect(body).toContain(token);expect(await db.message.count()).toBe(1);
     await saveFeedback(access.assignmentId,{status:'Interested',remarks:'Please arrange a site visit',version:access.assignment.lead.version},undefined,access.id);
     const write=vi.fn(async()=>{});await writebackLead(lead.id,{read:vi.fn(),write});
-    expect(write).toHaveBeenCalledWith(expect.objectContaining({id:'sheet'}),lead.stableSourceId,null,{status:'Interested',assignedEmployee:'Employee 0',feedback:'Please arrange a site visit'});
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({id:'sheet'}),lead.stableSourceId,null,{sentStatus:'',sharedTo:'',status:'Interested',feedback:'Please arrange a site visit'});
     expect((await db.lead.findUniqueOrThrow({where:{id:lead.id}})).writebackStatus).toBe('SYNCED');
   });
   it('starts a sheet with selected contacts and a new number, then pauses queued sends',async()=>{

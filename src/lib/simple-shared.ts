@@ -1,6 +1,7 @@
 export type WhatsAppContact = {name:string;phone:string};
 export const SIMPLE_TEMPLATE = '*New lead*\n\nName: {{customer_name}}\nPhone: {{mobile_number}}\nProject: {{project_name}}\nLocation: {{location}}\nBudget: {{budget}}\nSource: {{lead_source}}';
-export const SIMPLE_OUTPUT_COLUMNS={status:'lead_status',assignedEmployee:'shared to',feedback:'Feedback'};
+export const DELIVERY_COLUMNS={sentStatus:'Sent Status',sharedTo:'Shared To'};
+export const SIMPLE_OUTPUT_COLUMNS={status:'lead_status',feedback:'Feedback',...DELIVERY_COLUMNS};
 export type LeadQuestion={question:string;answer:string};
 export function questionLabel(header:string){
   const text=header.replace(/_/g,' ').replace(/\s+/g,' ').trim();

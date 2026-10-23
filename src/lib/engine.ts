@@ -10,6 +10,7 @@ import { simpleLeadMessage } from './simple-shared';
 import { feedbackBaseURL } from './feedback-url';
 import { organizationSettingKey } from './organizations';
 import { sheetPollSeconds } from './automation-policy';
+import { deliveryValues, queueDeliveryWriteback } from './delivery';
 
 const sourceChecks = new Map<string, string>();
 let nextSendAt = 0;
@@ -76,7 +77,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
         // the read-only sender. Subsequent external edits remain conflicts.
         const initialize=sheet.connectionType==='SIMPLE_PUBLIC'&&!snapshot.__publicFeedbackInitialized;
         const hasFeedback=initialize?await db.feedback.count({where:{leadId:existing.id}}):0;
-        const baseline=initialize?{managedSnapshot:{...snapshot,status:row.values.status||'',assignedEmployee:row.values.assignedEmployee||'',feedback:row.values.feedback||'',__publicFeedbackInitialized:'1'},...(!hasFeedback?{status:row.values.status||existing.status,lastFeedback:row.values.feedback||existing.lastFeedback}:{}),version:{increment:1}}:{};
+        const baseline=initialize?{managedSnapshot:{...snapshot,status:row.values.status||'',assignedEmployee:row.values.assignedEmployee||'',sentStatus:row.values.sentStatus||'',sharedTo:row.values.sharedTo||'',feedback:row.values.feedback||'',__publicFeedbackInitialized:'1'},...(!hasFeedback?{status:row.values.status||existing.status,lastFeedback:row.values.feedback||existing.lastFeedback}:{}),version:{increment:1}}:{};
         // A connector can fill a row in stages. Queue it when its phone first
         // becomes valid, retaining the stable Meta lead ID and job deduplication.
         if(parsed.success&&!phoneSchema.safeParse(existing.mobile).success){
@@ -149,7 +150,9 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
       }
     }
     await tx.distributionRule.update({where:{id:rule.id},data:{cursor:chosen.cursor}});
-    const needsWriteback=!simple||lead.sheet.connectionType==='SIMPLE_PUBLIC';
+    // Simple sheets record actual sends after provider acceptance, not a
+    // recipient selection that may still be queued or fail later.
+    const needsWriteback=!simple;
     const updated=await tx.lead.update({where:{id:leadId},data:{version:{increment:1},writebackStatus:needsWriteback?'PENDING':'SYNCED'}});
     if(needsWriteback)await enqueue(tx,'WRITEBACK',leadId,`writeback:assignment:${leadId}:${updated.version}`);
     await tx.auditLog.create({data:{userId,action:reassign?'REASSIGN':'ASSIGN',entityType:'lead',entityId:leadId}});
@@ -200,12 +203,13 @@ export async function saveFeedback(assignmentId:string,input:unknown,actorId?:st
     return feedback;
   });
 }
-export async function writebackLead(id:string, provider?:SheetProvider) {
-  const lead=await db.lead.findUniqueOrThrow({where:{id},include:{sheet:true,assignments:{where:{active:true,isPrimary:true},include:{employee:true}},messages:{orderBy:{queuedAt:'desc'},take:1}}});
+export async function writebackLead(id:string, provider?:SheetProvider,options:{deliveryOnly?:boolean}={}) {
+  const lead=await db.lead.findUniqueOrThrow({where:{id},include:{sheet:true,assignments:{where:{active:true,isPrimary:true},include:{employee:true}},messages:{orderBy:{queuedAt:'desc'},include:{assignment:{include:{employee:true}}}}}});
   const owner=lead.assignments[0]?.employee;
   const message=lead.messages[0];
   if(lead.redactedAt)return;
-  const values:Record<string,string>=lead.sheet.connectionType==='SIMPLE_PUBLIC'?{status:lead.status,assignedEmployee:owner?.name||'',feedback:lead.lastFeedback||''}:{assignedEmployee:owner?.name||'',assignedPhone:owner?.phone||'',status:lead.status,feedback:lead.lastFeedback||'',nextFollowupAt:lead.nextFollowupAt?.toISOString()||'',lastContactAt:lead.lastContactAt?.toISOString()||'',updatedAt:lead.updatedAt.toISOString(),updatedBy:owner?.name||'',sentStatus:message?.status||'',sentAt:message?.submittedAt?.toISOString()||'',deliveryStatus:message && ['SENT','DELIVERED','READ'].includes(message.status)?message.status:'Unconfirmed'};
+  const delivery=deliveryValues(lead.messages);
+  const values:Record<string,string>=options.deliveryOnly?delivery:lead.sheet.connectionType.startsWith('SIMPLE_')?{...delivery,...(lead.sheet.connectionType==='SIMPLE_PUBLIC'&&lead.lastFeedback?{status:lead.status,feedback:lead.lastFeedback}: {})}:{assignedEmployee:owner?.name||'',assignedPhone:owner?.phone||'',status:lead.status,feedback:lead.lastFeedback||'',nextFollowupAt:lead.nextFollowupAt?.toISOString()||'',lastContactAt:lead.lastContactAt?.toISOString()||'',updatedAt:lead.updatedAt.toISOString(),updatedBy:owner?.name||'',...delivery,sentAt:message?.submittedAt?.toISOString()||'',deliveryStatus:message && ['SENT','DELIVERED','READ'].includes(message.status)?message.status:'Unconfirmed'};
   try {
     await (provider||sheetProvider(lead.sheet)).write(lead.sheet,lead.stableSourceId,lead.metadataId,values);
     const snapshot={...(lead.managedSnapshot as Record<string,string>||{}),...values};
@@ -230,7 +234,7 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
   const parameters=[message.lead.customerName,message.lead.mobile,message.lead.project,message.assignment.employee.name,body.match(/https?:\/\/\S+\/feedback\/\S+/)?.[0]||'Notification only'];
   try {
     const result=await (providerOverride||whatsappProvider(message.sender)).sendMessage({to:message.recipient,body,template:rule?.metaTemplate,language:rule?.metaLanguage,parameters,messageId:message.id});
-    await transaction(async tx=>{await tx.message.update({where:{id},data:{status:result.status,providerMessageId:result.id,submittedAt:new Date(),failureReason:null}});if(!message.lead.sheet.connectionType.startsWith('SIMPLE_'))await enqueue(tx,'WRITEBACK',message.leadId,`writeback:message:${id}:submitted`);});
+    await transaction(async tx=>{await tx.message.update({where:{id},data:{status:result.status,providerMessageId:result.id,submittedAt:new Date(),uncertain:false,failureReason:null}});await queueDeliveryWriteback(tx,message,`submitted:${message.attemptCount+1}`);});
   } catch(error) {
     if(error instanceof AppError&&error.code==='DISCONNECTED'){
       await db.message.update({where:{id},data:{status:'QUEUED',failureReason:null}});throw error;
@@ -256,7 +260,7 @@ export async function processJob(id:string, candidate?:Job) {
       const result=await assignLead(job.entityId);
       if(!result.assigned && result.reason==='No employee has available capacity')throw new AppError(409,result.reason,'CAPACITY');
     }
-    else if(job.type==='WRITEBACK')await writebackLead(job.entityId);
+    else if(job.type==='WRITEBACK')await writebackLead(job.entityId,undefined,{deliveryOnly:job.key.startsWith('writeback:delivery:')});
     else if(job.type==='SEND')await dispatchMessage(job.entityId);
     else if(job.type==='CONNECT'||job.type==='DISCONNECT'||job.type==='CONTACTS'){
       const sender=await db.sender.findUniqueOrThrow({where:{id:job.entityId}});

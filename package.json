@@ -18,6 +18,7 @@
     "feedback:local": "tsx scripts/upgrade-feedback.ts --allow-local",
     "feedback:local-clickable": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup-local-feedback.ps1",
     "feedback:refresh-links": "tsx scripts/refresh-feedback-links.ts",
+    "sheets:backfill-delivery": "tsx scripts/backfill-delivery.ts",
     "seed": "tsx prisma/seed.ts",
     "worker": "node --import tsx src/worker.ts",
     "worker:check": "node --import tsx scripts/check-worker.ts",
