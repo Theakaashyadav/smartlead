@@ -22,3 +22,4 @@ input,textarea,select,.field{min-width:0}.form-grid,.mapping-grid{grid-template-
 .simple-login .simple-form .field{margin:0;gap:7px}
 .simple-login .simple-form .field>span{margin-bottom:0}
 .simple-login .simple-form .field>small{margin-top:0}
+.simple-dashboard-sheets{margin-top:44px}.simple-dashboard-sheets>.simple-page-heading{align-items:center;margin-bottom:18px}.simple-dashboard-sheets h2{font-size:22px;letter-spacing:-.5px}.simple-sheet-bottom>.row{flex-wrap:wrap}.simple-app .btn.danger{color:#b42318;background:#fff3f2;border-color:#f3c5c0}.simple-app .btn.danger:hover{background:#fee4e2;border-color:#eaa59c}.simple-delete-sheet{display:grid;gap:17px;padding-top:15px;line-height:1.7;color:#64776b}.simple-delete-sheet>.row{justify-content:flex-end;margin-top:8px}.simple-delete-sheet>.alert{margin:0}

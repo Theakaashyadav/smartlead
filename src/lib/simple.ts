@@ -87,6 +87,37 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     const sheet=await db.sheet.create({data:{organizationId,name:info.title,project:info.title,spreadsheetId:data.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_PUBLIC',columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:account?.id,template:SIMPLE_TEMPLATE}}}});
     await audit(user.id,'CONNECT_SHEET','sheet',sheet.id);return {id:sheet.id};
   }
+  if(path[0]==='sheets'&&path[1]&&path.length===2&&method==='DELETE'){
+    return transaction(async tx=>{
+      const sheet=await tx.sheet.findFirst({where:{id:path[1],organizationId,...sheetWhere},include:{rule:true}});
+      if(!sheet)throw new AppError(404,'Sheet not found');
+      const leads=await tx.lead.findMany({where:{sheetId:sheet.id},select:{id:true}});
+      const leadIds=leads.map(lead=>lead.id);
+      const messages=await tx.message.findMany({where:{leadId:{in:leadIds}},select:{id:true,status:true}});
+      const jobs={organizationId,OR:[{type:'SYNC',entityId:sheet.id},{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:leadIds}},{type:'SEND',entityId:{in:messages.map(m=>m.id)}}]};
+      if(messages.some(m=>m.status==='PROCESSING')||await tx.job.findFirst({where:{...jobs,status:'PROCESSING'},select:{id:true}})){
+        throw new AppError(409,'This sheet is being updated or sending a message. Pause it, wait a moment, then try deleting again.');
+      }
+      // Remove queued work and dependent records together, keeping shared
+      // recipients, WhatsApp accounts, and the source Google Sheet intact.
+      await tx.job.deleteMany({where:jobs});
+      await tx.feedbackToken.deleteMany({where:{assignment:{leadId:{in:leadIds}}}});
+      await tx.feedback.deleteMany({where:{leadId:{in:leadIds}}});
+      await tx.followup.deleteMany({where:{leadId:{in:leadIds}}});
+      await tx.message.deleteMany({where:{leadId:{in:leadIds}}});
+      await tx.assignment.deleteMany({where:{leadId:{in:leadIds}}});
+      await tx.lead.deleteMany({where:{sheetId:sheet.id}});
+      if(sheet.rule)await tx.ruleRecipient.deleteMany({where:{ruleId:sheet.rule.id}});
+      await tx.distributionRule.deleteMany({where:{sheetId:sheet.id}});
+      await tx.sheetAccess.deleteMany({where:{sheetId:sheet.id}});
+      await tx.syncLog.deleteMany({where:{sheetId:sheet.id}});
+      await tx.setting.deleteMany({where:{key:{in:[`statuses:${sheet.id}`,`demo-source:${sheet.id}`]}}});
+      await tx.rateLimit.deleteMany({where:{key:`sync:${sheet.id}`}});
+      await tx.sheet.delete({where:{id:sheet.id}});
+      await tx.auditLog.create({data:{userId:user.id,action:'DELETE_SHEET',entityType:'sheet',entityId:sheet.id,metadata:{name:sheet.name,leads:leads.length}}});
+      return {deleted:true};
+    });
+  }
   if(path[0]==='sheets'&&path[1]&&path[2]==='recipients'&&method==='PUT'){
     const sheet=await sheetById(path[1],organizationId);
     const {recipients}=z.object({recipients:z.array(recipientSchema).min(1,'Select at least one person.').max(100)}).parse(await input());
