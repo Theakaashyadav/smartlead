@@ -25,7 +25,9 @@ model User {
   organizationId String @default("legacy")
   organization Organization @relation(fields:[organizationId], references:[id])
   name String
-  email String @unique
+  email String? @unique
+  phone String? @unique
+  pinHash String?
   passwordHash String
   role String @default("EXECUTIVE")
   active Boolean @default(true)

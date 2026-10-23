@@ -11,6 +11,25 @@ import { Prisma } from '@/generated/mongo';
 afterAll(async()=>{await db.$disconnect();await closeMongoStorage();});
 afterEach(()=>{vi.unstubAllEnvs();vi.restoreAllMocks();});
 describe('MongoDB storage constraints',()=>{
+  it('allows multiple phone-only and email-only users, enforces phone uniqueness, and upgrades the old email index',async()=>{
+    const client=new MongoClient(mongoSettings().url);await client.connect();
+    try{
+      const database=client.db(`${process.env.MONGODB_DATABASE}_phone_indexes`);
+      await initializeMongoDatabase(database);
+      const users=database.collection<{_id:string;email?:string|null;phone?:string|null}>('users');
+      await users.insertOne({_id:'legacy-email',email:'existing@test.invalid'});
+      await users.createIndex({email:1},{name:'email_unique',unique:true});
+      await initializeMongoDatabase(database);
+      expect((await users.listIndexes().toArray()).some(index=>index.name==='email_unique')).toBe(false);
+      await users.insertOne({_id:'phone-a',phone:'+919876543210',email:null});
+      await users.insertOne({_id:'phone-b',phone:'+919876543211',email:null});
+      await users.insertOne({_id:'email-a',email:'first-phone-index@test.invalid',phone:null});
+      await users.insertOne({_id:'email-b',email:'second-phone-index@test.invalid',phone:null});
+      await expect(users.insertOne({_id:'duplicate-phone',phone:'+919876543210'})).rejects.toMatchObject({code:11000});
+      await expect(users.insertOne({_id:'duplicate-email',email:'first-phone-index@test.invalid'})).rejects.toMatchObject({code:11000});
+      await initializeMongoDatabase(database);
+    }finally{await client.close();}
+  });
   it('reports missing hosting configuration without exposing credentials',async()=>{
     vi.stubEnv('MONGODB_URI','');vi.stubEnv('APP_URL','https://hosted.example.com');
     const response=await GET(new Request('https://hosted.example.com/api/health'),{params:Promise.resolve({path:['health']})});
@@ -32,7 +51,7 @@ describe('MongoDB storage constraints',()=>{
   it('returns an actionable registration failure when MongoDB rejects credentials',async()=>{
     const privateURI='mongodb+srv://private-user:private-password@cluster.invalid';
     vi.spyOn(db.rateLimit,'upsert').mockRejectedValueOnce(new Prisma.PrismaClientInitializationError(`Authentication failed: ${privateURI}`,'6.19.0','P1000'));
-    const response=await POST(new Request('http://localhost:3000/api/auth/register',{method:'POST',headers:{origin:process.env.APP_URL!,'content-type':'application/json'},body:'{}'}),{params:Promise.resolve({path:['auth','register']})});
+    const response=await POST(new Request('http://localhost:3000/api/auth/register',{method:'POST',headers:{origin:process.env.APP_URL!,'content-type':'application/json'},body:JSON.stringify({name:'Owner',organizationName:'Agency',phone:'9876543210',pin:'4826'})}),{params:Promise.resolve({path:['auth','register']})});
     const result=await response.json();
     expect(response.status).toBe(503);
     expect(result).toMatchObject({error:{code:'DATABASE_UNAVAILABLE'},diagnostic:{reason:'DATABASE_AUTHENTICATION',prismaCode:'P1000'}});

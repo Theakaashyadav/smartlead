@@ -3,12 +3,16 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js';
 export const STATUSES = ['New','Not Contacted','Call Attempted','No Answer','Switched Off','Not Reachable','Connected','Interested','Very Interested / Hot Lead','Follow-up Required','Site Visit Scheduled','Site Visit Completed','Negotiation','Booking Confirmed','Converted / Closed Won','Not Interested','Invalid Number','Duplicate Lead','Lost / Closed Lost'];
 export const CLOSED = ['Converted / Closed Won','Lost / Closed Lost','Not Interested','Invalid Number','Duplicate Lead'];
 export const MODES = ['SINGLE','ROUND_ROBIN','ALL','MANUAL','WEIGHTED','CAPACITY'] as const;
-export const phoneSchema = z.string().transform((v,ctx)=>{
+export const phoneSchema = z.string().trim().max(40).transform((v,ctx)=>{
   const p = parsePhoneNumberFromString(v,'IN');
   if (!p?.isValid()) {ctx.addIssue({code:'custom',message:'Enter a valid Indian or international phone number'}); return z.NEVER;}
   return p.number;
 });
-export const loginSchema = z.object({email:z.email().max(254),password:z.string().min(1).max(128),code:z.string().optional()});
+export const pinSchema = z.string().regex(/^\d{4}$/, 'Enter a 4-digit PIN');
+export const loginSchema = z.union([
+  z.object({phone:phoneSchema,pin:pinSchema,code:z.string().max(6).optional()}),
+  z.object({email:z.email().max(254),password:z.string().min(1).max(128),code:z.string().max(6).optional()}),
+]);
 export const feedbackSchema = z.object({status:z.string().min(1).max(80),remarks:z.string().trim().min(3,'Add at least 3 characters of feedback').max(5000),interest:z.enum(['Hot','Warm','Cold','Not Interested']).optional(),callOutcome:z.string().max(200).optional(),contactMethod:z.string().max(40).optional(),siteVisitAt:z.iso.datetime().nullish(),expectedBudget:z.string().max(100).optional(),nextFollowupAt:z.iso.datetime().nullish(),version:z.number().int().nonnegative()});
 export const employeeSchema = z.object({name:z.string().min(2).max(100),phone:phoneSchema,department:z.string().max(100).default('Sales'),role:z.string().max(80).default('Sales Executive'),projects:z.array(z.string().max(100)).default([]),dailyLimit:z.number().int().min(1).max(1000).default(50),capacity:z.number().int().min(1).max(10000).default(100),active:z.boolean().default(true),remarks:z.string().max(2000).default(''),email:z.email().optional(),password:z.string().min(12).max(128).optional()});
 export const ruleSchema = z.object({mode:z.enum(MODES),enabled:z.boolean(),senderId:z.string().nullable(),recipients:z.array(z.object({employeeId:z.string(),weight:z.number().int().min(0).max(100).default(0)})).max(100),template:z.string().min(10).max(4000),metaTemplate:z.string().max(100).nullish(),metaLanguage:z.string().max(20).default('en')}).superRefine((v,ctx)=>{

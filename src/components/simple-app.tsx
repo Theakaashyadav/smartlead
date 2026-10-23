@@ -8,10 +8,11 @@ import { api, Button, Field, Modal, Select } from './ui';
 import { detectColumns, type WhatsAppContact } from '@/lib/simple-shared';
 import { WhatsAppBrowserLogin } from './whatsapp-browser-login';
 import { WhatsAppBackgroundLogin } from './whatsapp-background-login';
+import { PhoneLoginSettings } from './phone-login-settings';
 
 type SheetSummary={id:string;name:string;worksheetName:string;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;recipients:WhatsAppContact[];delivery?:{submitted:number;queued:number;failed:number;error:string|null}};
 type Account={id:string;phone:string|null;status:string;qrCode:string|null;lastError:string|null};
-type State={user:{name:string;email:string};organization:{id:string;name:string};account:Account|null;sheets:SheetSummary[];workerRunning:boolean;workerMessage?:string|null;whatsappLoginMode?:'background'|'browser'|'qr';feedbackError?:string|null;publicSheetWritebackAvailable?:boolean};
+type State={user:{name:string;email:string|null;phone?:string|null;pinEnabled?:boolean;twoFactor?:boolean};organization:{id:string;name:string};account:Account|null;sheets:SheetSummary[];workerRunning:boolean;workerMessage?:string|null;whatsappLoginMode?:'background'|'browser'|'qr';feedbackError?:string|null;publicSheetWritebackAvailable?:boolean};
 type Inspection={spreadsheetId:string;title:string;gid?:number;tabs:{id:number;name:string;headers:string[]}[]};
 const message=(e:unknown)=>e instanceof Error?e.message:'Please try again.';
 
@@ -19,6 +20,7 @@ export function SimpleApp(){
   const pathname=usePathname();const router=useRouter();
   const [state,setState]=useState<State|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState(false);
   const [connectOpen,setConnectOpen]=useState(false);const [recipientSheet,setRecipientSheet]=useState<string|null>(null);
+  const [loginSettings,setLoginSettings]=useState(false);
   const closeConnect=useCallback(()=>setConnectOpen(false),[]);const closeRecipients=useCallback(()=>setRecipientSheet(null),[]);
   const reload=useCallback(async()=>{const result=await api<State>('simple/state');setState(result);return result;},[]);
   useEffect(()=>{let active=true;const refresh=()=>api<State>('simple/state').then(s=>{if(active)setState(s);}).catch(e=>{if(active)setError(message(e));});refresh();const timer=setInterval(refresh,5000);return()=>{active=false;clearInterval(timer);};},[]);
@@ -29,7 +31,8 @@ export function SimpleApp(){
   return <div className="simple-app">
     <header className="simple-header"><Link className="simple-brand" href="/dashboard"><span><ArrowRight size={21}/></span>SmartLead</Link><nav aria-label="Main navigation"><Link href="/dashboard" aria-current={section==='dashboard'?'page':undefined}>Dashboard</Link><Link href="/sheets" aria-current={section==='sheets'?'page':undefined}>Sheets</Link><Link href="/whatsapp" aria-current={section==='whatsapp'?'page':undefined}>WhatsApp</Link></nav><Button variant="ghost" aria-label="Sign out" onClick={async()=>{await api('auth/logout','POST');window.location.assign('/login');}}><LogOut size={17}/><span>Sign out</span></Button></header>
     <main className="simple-main">
-      {state&&<div className="simple-organization" aria-label="Current organisation"><strong>{state.organization.name}</strong><span>{state.user.name} · {state.user.email}</span></div>}
+      {state&&<div className="simple-organization" aria-label="Current organisation"><strong>{state.organization.name}</strong><span>{state.user.name} · {state.user.phone?.replace(/^\+91(?=\d{10}$)/,'')||state.user.email}</span><Button variant="ghost" onClick={()=>setLoginSettings(true)}>Login & PIN</Button></div>}
+      {state&&loginSettings&&<PhoneLoginSettings user={state.user} onClose={()=>setLoginSettings(false)} onSaved={reload}/>}
       {error&&<div role="alert" className="alert error">{error}<button onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
       {!state?<p className="simple-loading">Loading your workspace…</p>:<>
         {section==='dashboard'&&<><div className="simple-intro"><span className="simple-kicker">SHEETS → WHATSAPP</span><h1>Your leads. Sent automatically.</h1><p>Connect your sheets, link WhatsApp, and choose who receives each lead.</p></div><div className="simple-cards">

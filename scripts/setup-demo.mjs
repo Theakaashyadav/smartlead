@@ -16,4 +16,4 @@ for (const args of [['prisma','generate'], ['prisma','generate','--schema','pris
   const r = spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', args, { stdio:'inherit', shell:process.platform === 'win32' });
   if (r.status) process.exit(r.status);
 }
-console.log('\nSmartLead demo ready. Run npm run dev. Login: admin@smartlead.demo / SmartLead!2026\n');
+console.log('\nSmartLead demo ready. Run npm run dev. Login: 9876543210 / PIN 2468\n');

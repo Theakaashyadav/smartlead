@@ -16,7 +16,8 @@ import { inspectSpreadsheet } from '@/lib/google';
 import { whatsappProvider } from '@/lib/whatsapp';
 import { csv, reportRows, safeCell } from '@/lib/reports';
 import { simpleAction } from '@/lib/simple';
-import { organizationSettingKey, registerOrganization } from '@/lib/organizations';
+import { organizationSettingKey, registerOrganization, registrationSchema } from '@/lib/organizations';
+import { phoneCredentialsSchema, setPhoneLogin } from '@/lib/phone-login';
 import { feedbackBaseURL } from '@/lib/feedback-url';
 import { databaseFailure, safeDatabaseErrorCode } from '@/lib/database-errors';
 import { requireWhatsAppWorker, workerHeartbeatFresh } from '@/lib/worker-status';
@@ -62,27 +63,31 @@ async function handler(request:Request,context:Context):Promise<Response> {
     }
     checkOrigin(request,path[0]==='feedback'&&path.length===2&&method==='POST'?await feedbackBaseURL():undefined);
     if(route==='auth/register'&&method==='POST'){
-      const input=await body(request);
-      const email=typeof input?.email==='string'?input.email.toLowerCase().slice(0,254):'';
+      const input=registrationSchema.parse(await body(request));
+      const identifier='phone' in input?input.phone:input.email;
       await rateLimit('register:global',100,3600);
-      await rateLimit(`register:${hash(email)}`,5,3600);
+      await rateLimit(`register:${hash(identifier)}`,5,3600);
       const user=await registerOrganization(input);
       await loginSession(user);await audit(user.id,'REGISTER_ORGANIZATION','organization',user.organizationId);
       return ok(safeUser(user),201);
     }
     if(route==='auth/login'&&method==='POST'){
       const data=loginSchema.parse(await body(request));
-      await rateLimit(`login:${hash(data.email.toLowerCase())}`,10,900);
-      const user=await db.user.findUnique({where:{email:data.email.toLowerCase()}});
-      const valid=verifyPassword(data.password,user?.passwordHash||'00000000000000000000000000000000:'+ '0'.repeat(128));
-      if(!user?.active||!valid||!verifyTotp(user,data.code))throw new AppError(401,'Email, password, or verification code is incorrect');
+      const phoneLogin='phone' in data;
+      const loginKey=phoneLogin?`login:phone:${hash(data.phone)}`:`login:${hash(data.email.toLowerCase())}`;
+      await rateLimit(loginKey,phoneLogin?5:10,900);
+      const user=await db.user.findUnique({where:phoneLogin?{phone:data.phone}:{email:data.email.toLowerCase()}});
+      const stored=phoneLogin?user?.pinHash:!user?.pinHash?user?.passwordHash:undefined;
+      const valid=verifyPassword(phoneLogin?data.pin:data.password,stored||'00000000000000000000000000000000:'+ '0'.repeat(128));
+      if(!user?.active||!valid||!verifyTotp(user,data.code))throw new AppError(401,phoneLogin?'Phone number, PIN, or verification code is incorrect':'Email, password, or verification code is incorrect');
+      if(phoneLogin)await db.rateLimit.deleteMany({where:{key:loginKey}});
       await loginSession(user);await audit(user.id,'LOGIN','user',user.id);return ok(safeUser(user));
     }
     if(route==='auth/logout'&&method==='POST'){await logoutSession();return ok({loggedOut:true});}
     if(route==='auth/reset-request'&&method==='POST'){
       const {email}=z.object({email:z.email()}).parse(await body(request));await rateLimit(`reset:${hash(email)}`,3,3600);
       const user=await db.user.findUnique({where:{email:email.toLowerCase()}});
-      if(user && process.env.SMTP_HOST){
+      if(user?.email && !user.pinHash && process.env.SMTP_HOST){
         const raw=opaqueToken();await db.resetToken.create({data:{id:hash(raw),userId:user.id,expiresAt:new Date(Date.now()+30*60000)}});
         const nodemailer=await import('nodemailer');
         const transporter=nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT)||587,secure:Number(process.env.SMTP_PORT)===465,auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASSWORD}});
@@ -107,6 +112,13 @@ async function handler(request:Request,context:Context):Promise<Response> {
     await rateLimit(`api:${user.id}`,300,60);
     if(path[0]==='simple')return ok(await simpleAction(path.slice(1),method,request,user));
     if(route==='auth/me')return ok(safeUser(user));
+    if(route==='auth/phone'&&method==='PUT'){
+      await rateLimit(`phone-settings:${user.id}`,5,900);
+      const data=phoneCredentialsSchema.extend({currentCredential:z.string().min(1).max(128),code:z.string().max(6).optional()}).parse(await body(request));
+      if(!verifyPassword(data.currentCredential,user.pinHash||user.passwordHash)||!verifyTotp(user,data.code))throw new AppError(403,'Current PIN, password, or verification code is incorrect');
+      const updated=await setPhoneLogin(user.id,data);
+      await loginSession(updated);return ok(safeUser(updated));
+    }
     if(route==='auth/password'&&method==='PUT'){
       const data=z.object({currentPassword:z.string(),password:z.string().min(12).max(128)}).parse(await body(request));
       if(!verifyPassword(data.currentPassword,user.passwordHash))throw new AppError(403,'Current password is incorrect');
@@ -117,7 +129,7 @@ async function handler(request:Request,context:Context):Promise<Response> {
       if(!verifyPassword(data.password,user.passwordHash))throw new AppError(403,'Current password is incorrect');
       if(data.disable){if(!verifyTotp(user,data.code))throw new AppError(400,'Invalid verification code');await db.user.update({where:{id:user.id},data:{totpSecret:null}});return ok({enabled:false});}
       if(data.secret&&data.code){const totp=new TOTP({secret:data.secret});if(totp.validate({token:data.code,window:1})===null)throw new AppError(400,'Invalid verification code');await db.user.update({where:{id:user.id},data:{totpSecret:encrypt(data.secret)}});return ok({enabled:true});}
-      const secret=new Secret({size:20}).base32;const totp=new TOTP({issuer:'SmartLead',label:user.email,secret});return ok({secret,qr:await QRCode.toDataURL(totp.toString())});
+      const secret=new Secret({size:20}).base32;const totp=new TOTP({issuer:'SmartLead',label:user.phone||user.email||user.name,secret});return ok({secret,qr:await QRCode.toDataURL(totp.toString())});
     }
     if(route==='workspace'||route==='dashboard/overview'||(path[0]==='dashboard'&&path[1]==='sheets')){if(path[2])p.set('sheet',path[2]);return ok({...await workspace(user,p),demo:isDemo()});}
     if(route==='sheets'&&method==='GET')return ok(await db.sheet.findMany({where:sheetScope(user),include:{rule:{include:{recipients:true}}}}));

@@ -14,8 +14,12 @@ async function seed(){
     await db.user.upsert({where:{email},create:{organizationId:'legacy',name:process.env.ADMIN_NAME||'Workspace Admin',email,passwordHash:passwordHash(password),role:'SUPER_ADMIN'},update:{}});
     console.log('Production administrator initialized.');return;
   }
-  if(await db.user.findUnique({where:{email:'admin@smartlead.demo'}})){console.log('Demo data already exists; no records changed.');return;}
-  await db.user.create({data:{organizationId:'legacy',id:'admin-demo',name:'Akash Yadav',email:'admin@smartlead.demo',passwordHash:passwordHash('SmartLead!2026'),role:'SUPER_ADMIN'}});
+  const demoAdmin=await db.user.findUnique({where:{email:'admin@smartlead.demo'}});
+  if(demoAdmin){
+    if(!demoAdmin.phone&&!demoAdmin.pinHash)await db.user.update({where:{id:demoAdmin.id},data:{phone:'+919876543210',pinHash:passwordHash('2468')}});
+    console.log('Demo data already exists; phone login is ready.');return;
+  }
+  await db.user.create({data:{organizationId:'legacy',id:'admin-demo',name:'Akash Yadav',email:'admin@smartlead.demo',phone:'+919876543210',pinHash:passwordHash('2468'),passwordHash:passwordHash('SmartLead!2026'),role:'SUPER_ADMIN'}});
   const names=['Akash Yadav','Aman Sharma','Kunal Verma','Sahil Singh'];
   for(const [i,name] of names.entries())await db.employee.create({data:{organization:{connect:{id:'legacy'}},id:`employee-${i}`,name,phone:`+9198765400${10+i}`,department:i===3?'Digital Solutions':'Property Sales',projects:i===3?['Website Development']:['Noida Studio','Uttarakhand','Yamuna Expressway'],dailyLimit:1000,capacity:500,role:i===0?'Team Lead':'Sales Executive',user:{create:{organizationId:'legacy',name,email:`${name.split(' ')[0].toLowerCase()}@smartlead.demo`,passwordHash:passwordHash('SmartLead!2026'),role:'EXECUTIVE'}}}});
   await db.sender.create({data:{organizationId:'legacy',id:'sender-demo',name:'SmartLead · Operations',provider:'DEMO',phone:'+919876543210',status:'CONNECTED',lastConnectedAt:new Date()}});

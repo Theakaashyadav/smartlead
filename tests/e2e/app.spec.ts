@@ -2,14 +2,18 @@
 async function login(page:any){await page.goto('/login');await page.getByRole('button',{name:'Log in',exact:true}).click();await expect(page).toHaveURL(/dashboard/);await expect(page.getByRole('heading',{name:'Your leads. Sent automatically.'})).toBeVisible();}
 
 test('two organisation owners create separate accounts and keep their connections when switching logins',async({page,browser})=>{
-  const email=`agency-one-${Date.now()}@example.test`;const otherEmail=`agency-two-${Date.now()}@example.test`;const password='SeparateWorkspace!2026';
-  await page.goto('/login');await page.getByRole('link',{name:'Create an account',exact:true}).click();
+  const suffix=Date.now().toString().slice(-9);const phone=`9${suffix}`,otherPhone=`8${suffix}`,pin='4826';
+  await page.goto('/login');
+  await expect(page.getByLabel('Phone number',{exact:false})).toBeVisible();await expect(page.getByLabel(/^PIN/)).toBeVisible();
+  await page.screenshot({path:'data/phone-login-desktop.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});await page.screenshot({path:'data/phone-login-mobile.png',fullPage:true});await page.setViewportSize({width:1440,height:1050});
+  await page.getByRole('link',{name:'Create an account',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Create your organisation'})).toBeVisible();
   await page.screenshot({path:'data/simple-registration-desktop.png',fullPage:true});
   await page.getByLabel('Your name',{exact:true}).fill('Manager One');await page.getByLabel('Organisation name',{exact:true}).fill('Agency One');
-  await page.getByLabel('Email',{exact:false}).fill(email);await page.getByLabel('Password',{exact:false}).first().fill(password);await page.getByLabel('Confirm password',{exact:true}).fill(password);
+  await page.getByLabel('Phone number',{exact:false}).fill(phone);await page.getByLabel(/^PIN/).fill(pin);await page.getByLabel('Confirm PIN',{exact:true}).fill(pin);
   await page.getByRole('button',{name:'Create organisation account'}).click();await expect(page).toHaveURL(/dashboard/);
-  await expect(page.getByLabel('Current organisation')).toContainText('Agency One');await expect(page.getByLabel('Current organisation')).toContainText(email);
+  await expect(page.getByLabel('Current organisation')).toContainText('Agency One');await expect(page.getByLabel('Current organisation')).toContainText(phone);
   const one=(await (await page.request.get('/api/simple/state')).json()).data;expect(one.sheets).toEqual([]);expect(one.account).toBeNull();
   await page.request.post('/api/simple/whatsapp/connect');
   const connectionOne=(await (await page.request.get('/api/simple/state')).json()).data.account;
@@ -17,7 +21,7 @@ test('two organisation owners create separate accounts and keep their connection
   try{
     await other.goto(new URL('/register',page.url()).href);
     await other.getByLabel('Your name',{exact:true}).fill('Manager Two');await other.getByLabel('Organisation name',{exact:true}).fill('Agency Two');
-    await other.getByLabel('Email',{exact:false}).fill(otherEmail);await other.getByLabel('Password',{exact:false}).first().fill(password);await other.getByLabel('Confirm password',{exact:true}).fill(password);
+    await other.getByLabel('Phone number',{exact:false}).fill(otherPhone);await other.getByLabel(/^PIN/).fill(pin);await other.getByLabel('Confirm PIN',{exact:true}).fill(pin);
     await other.getByRole('button',{name:'Create organisation account'}).click();await expect(other).toHaveURL(/dashboard/);
     await expect(other.getByLabel('Current organisation')).toContainText('Agency Two');
     const two=(await (await other.request.get('/api/simple/state')).json()).data;expect(two.organization.id).not.toBe(one.organization.id);expect(two.sheets).toEqual([]);expect(two.account).toBeNull();
@@ -25,8 +29,16 @@ test('two organisation owners create separate accounts and keep their connection
     await other.request.post('/api/simple/whatsapp/connect');const connectionTwo=(await (await other.request.get('/api/simple/state')).json()).data.account;
     expect(connectionTwo.id).not.toBe(connectionOne.id);
     await page.getByRole('button',{name:'Sign out'}).click();await expect(page).toHaveURL(/login/);
-    await page.getByLabel('Email',{exact:false}).fill(email);await page.getByLabel('Password',{exact:false}).first().fill(password);await page.getByRole('button',{name:'Log in',exact:true}).click();
+    await page.getByLabel('Phone number',{exact:false}).fill(phone);await page.getByLabel(/^PIN/).fill(pin);await page.getByRole('button',{name:'Log in',exact:true}).click();
     await expect(page).toHaveURL(/dashboard/);await expect(page.getByLabel('Current organisation')).toContainText('Agency One');
+    expect((await (await page.request.get('/api/simple/state')).json()).data.account.id).toBe(connectionOne.id);
+    await page.getByRole('button',{name:'Login & PIN',exact:true}).click();
+    await page.getByLabel('Current PIN',{exact:true}).fill(pin);await page.getByLabel('New PIN',{exact:false}).fill('0482');await page.getByLabel('Confirm PIN',{exact:true}).fill('0482');
+    await page.getByRole('button',{name:'Save phone & PIN'}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
+    await page.getByRole('button',{name:'Sign out'}).click();await expect(page).toHaveURL(/login/);
+    await page.getByLabel('Phone number',{exact:false}).fill(phone);await page.getByLabel(/^PIN/).fill(pin);await page.getByRole('button',{name:'Log in',exact:true}).click();
+    await expect(page.locator('.simple-login').getByRole('alert')).toContainText('Phone number, PIN, or verification code is incorrect');
+    await page.getByLabel(/^PIN/).fill('0482');await page.getByRole('button',{name:'Log in',exact:true}).click();await expect(page).toHaveURL(/dashboard/);
     expect((await (await page.request.get('/api/simple/state')).json()).data.account.id).toBe(connectionOne.id);
   }finally{await context.close();}
 });

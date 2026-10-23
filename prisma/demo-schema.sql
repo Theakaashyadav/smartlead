@@ -10,7 +10,9 @@ CREATE TABLE "User" (
     "organizationId" TEXT NOT NULL DEFAULT 'legacy',
     "id" TEXT NOT NULL PRIMARY KEY,
     "name" TEXT NOT NULL,
-    "email" TEXT NOT NULL,
+    "email" TEXT,
+    "phone" TEXT,
+    "pinHash" TEXT,
     "passwordHash" TEXT NOT NULL,
     "role" TEXT NOT NULL DEFAULT 'EXECUTIVE',
     "active" BOOLEAN NOT NULL DEFAULT true,
@@ -315,6 +317,7 @@ CREATE TABLE "RateLimit" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+CREATE UNIQUE INDEX "User_phone_key" ON "User"("phone");
 
 -- CreateIndex
 CREATE INDEX "AuthSession_userId_idx" ON "AuthSession"("userId");

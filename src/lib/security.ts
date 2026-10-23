@@ -82,7 +82,7 @@ export async function requireUser(roles?: string[]) {
   if (roles && !roles.includes(user.role)) throw new AppError(403,'You do not have permission for this action','FORBIDDEN');
   return user;
 }
-export const safeUser = (u: User) => ({id:u.id,name:u.name,email:u.email,role:u.role,organizationId:u.organizationId,twoFactor:!!u.totpSecret});
+export const safeUser = (u: User) => ({id:u.id,name:u.name,email:u.email,phone:u.phone,pinEnabled:!!u.pinHash,role:u.role,organizationId:u.organizationId,twoFactor:!!u.totpSecret});
 export function verifyTotp(user: User, code?: string) {
   if (!user.totpSecret) return true;
   return new TOTP({secret:decrypt(user.totpSecret),digits:6,period:30}).validate({token:code||'',window:1}) !== null;
