@@ -174,7 +174,7 @@ test('private lead link has only status and feedback and reports the confirmed s
   await expect(page.getByText('Sheet: Plot enquiries',{exact:true})).toBeVisible();
   await expect(page.getByText('Q.1 - What is your approximate budget?',{exact:true})).toBeVisible();
   await expect(page.getByRole('combobox')).toHaveCount(1);await expect(page.locator('textarea')).toHaveCount(1);await expect(page.locator('input')).toHaveCount(0);
-  await page.getByLabel('Lead status',{exact:true}).selectOption('Interested');await page.getByLabel('Feedback',{exact:true}).fill('Please arrange a site visit on Sunday.');
+  await page.getByLabel('Feedback (lead status)',{exact:true}).selectOption('Interested');await page.getByLabel('Remark',{exact:true}).fill('Please arrange a site visit on Sunday.');
   await page.getByRole('button',{name:'Save status & feedback'}).click();
   await expect(page.getByRole('status')).toHaveText('Feedback saved. Updating Google Sheet…');
   await expect(page.getByRole('status')).toHaveText('Status and feedback saved to Google Sheet.');

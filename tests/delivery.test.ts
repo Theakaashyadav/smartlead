@@ -1,12 +1,13 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, databaseTransaction, usingSQLite } from '@/lib/db';
-import { assignLead, dispatchMessage, processJob, writebackLead } from '@/lib/engine';
+import { assignLead, dispatchMessage, processJob, saveFeedback, writebackLead } from '@/lib/engine';
 import { AppError, encrypt } from '@/lib/security';
 import { MetaWhatsAppProvider, UncertainDelivery } from '@/lib/whatsapp';
 import { deliveryBackfillLeads, deliveryValues, queueDeliveryWriteback } from '@/lib/delivery';
 import { PublicSheetsProvider } from '@/lib/public-sheets';
 import { GoogleSheetsProvider, type SheetProvider } from '@/lib/google';
 import { clearTestModels } from './database-fixture';
+import { recoverSheetOutputs } from '@/lib/sheet-output-recovery';
 vi.mock('google-auth-library',()=>({GoogleAuth:class{async getAccessToken(){return 'test-google-token';}},OAuth2Client:class{}}));
 
 beforeEach(async()=>{
@@ -61,12 +62,31 @@ describe('Sent Status and Shared To',()=>{
     expect(f.send).toHaveBeenCalledOnce();expect((await db.message.findUniqueOrThrow({where:{id:f.message.id}})).status).toBe('SUBMITTED');
     expect(await db.job.findUnique({where:{id:job.id}})).toMatchObject({status:'PENDING',attempts:1});
   });
+  it.each(['SIMPLE_PUBLIC','SIMPLE_SERVICE_ACCOUNT'])('repairs feedback and remark from a delayed delivery job on %s',async connectionType=>{
+    const f=await fixture();await dispatchMessage(f.message.id,f.provider);
+    await db.sheet.update({where:{id:f.lead.sheetId},data:{connectionType}});
+    const assignment=await db.assignment.findFirstOrThrow({where:{leadId:f.lead.id,isPrimary:true},include:{lead:true}});
+    await saveFeedback(assignment.id,{status:'Interested',remarks:'Call tomorrow afternoon',version:assignment.lead.version});
+    await writebackLead(f.lead.id,f.sheetProvider,{deliveryOnly:true});
+    expect(f.write.mock.calls[0][3]).toEqual({sentStatus:'Sent',sharedTo:'Original recipient',status:'Interested',feedback:'Call tomorrow afternoon'});
+    expect(await db.lead.findUnique({where:{id:f.lead.id}})).toMatchObject({writebackStatus:'SYNCED',managedSnapshot:{status:'Interested',feedback:'Call tomorrow afternoon',__publicOutputV2:'1'}});
+  });
   it('deduplicates backfills without changing completed jobs or versions again',async()=>{
     const f=await fixture();const first=await databaseTransaction(tx=>queueDeliveryWriteback(tx,f.message,'backfill-v1'));
     await db.job.update({where:{id:first.id},data:{status:'COMPLETED'}});
     const version=(await db.lead.findUniqueOrThrow({where:{id:f.lead.id}})).version;
     const second=await databaseTransaction(tx=>queueDeliveryWriteback(tx,f.message,'backfill-v1'));
     expect(second).toMatchObject({id:first.id,status:'COMPLETED'});expect((await db.lead.findUniqueOrThrow({where:{id:f.lead.id}})).version).toBe(version);
+  });
+  it('recovers existing sheet outputs once without creating or retrying sends',async()=>{
+    const f=await fixture();await dispatchMessage(f.message.id,f.provider);
+    const jobs=await db.job.count({where:{type:'SEND'}});
+    expect(await recoverSheetOutputs()).toBe(1);
+    expect(await recoverSheetOutputs()).toBe(0);
+    expect(await db.job.count({where:{key:`writeback:outputs-v2:${f.lead.id}`}})).toBe(1);
+    expect(await db.job.count({where:{type:'SEND'}})).toBe(jobs);expect(f.send).toHaveBeenCalledOnce();
+    await writebackLead(f.lead.id,f.sheetProvider);
+    expect(await db.job.findUnique({where:{key:`writeback:outputs-v2:${f.lead.id}`}})).toMatchObject({status:'COMPLETED'});
   });
   it('backfills successful unredacted leads even when MongoDB stores no optional redaction field',async()=>{
     const f=await fixture();expect(await deliveryBackfillLeads(f.lead.sheetId)).toEqual([]);
@@ -108,9 +128,32 @@ describe('Sent Status and Shared To',()=>{
     }));
     await new GoogleSheetsProvider().write(sheet,f.lead.stableSourceId,100,{sentStatus:'Sent',sharedTo:'Original recipient'});
     const add=requests.find(r=>r.url.includes('/values:batchUpdate')&&!r.url.includes('ByDataFilter'))!;
-    expect(add.body.data[0]).toEqual({range:"'Sheet1'!F1:G1",values:[['Sent Status','Shared To']]});
+    expect(add.body.data[0]).toEqual({range:"'Sheet1'!F1:I1",values:[['Sent Status','Shared To','Feedback','Remark']]});
     const write=requests.find(r=>r.url.includes('/values:batchUpdateByDataFilter'))!;
-    expect(write.body).toEqual({valueInputOption:'RAW',data:[{dataFilter:{developerMetadataLookup:{metadataId:100}},values:[[null,null,null,null,null,'Sent','Original recipient']]}]});
+    expect(write.body).toEqual({valueInputOption:'RAW',data:[{dataFilter:{developerMetadataLookup:{metadataId:100}},values:[[null,null,null,null,null,'Sent','Original recipient',null,null]]}]});
     expect((await db.sheet.findUniqueOrThrow({where:{id:sheet.id}})).columnMapping).toMatchObject({leadId:'ID',sentStatus:'Sent Status',sharedTo:'Shared To'});
+  });
+  it('migrates legacy API feedback to Remark and moves all four columns while retaining source cells',async()=>{
+    const f=await fixture();
+    const sheet=await db.sheet.update({where:{id:f.lead.sheetId},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT',columnMapping:{leadId:'ID',customerName:'Name',mobile:'Phone',status:'lead_status',feedback:'Feedback'}}});
+    await db.lead.update({where:{id:f.lead.id},data:{managedSnapshot:{status:'New',feedback:'Old note',sentStatus:'Sent',sharedTo:'Original recipient'}}});
+    const rows=[['ID','Name','Phone','lead_status','Feedback','Sent Status','Shared To','Source Extra'],[f.lead.stableSourceId,'Customer','9876543210','New','Old note','Sent','Original recipient','Keep source']];
+    vi.stubGlobal('fetch',vi.fn(async(url:string,init?:RequestInit)=>{
+      const body=init?.body?JSON.parse(String(init.body)):null;
+      if(url.includes('/values:batchUpdateByDataFilter')){body.data[0].values[0].forEach((value:string|null,i:number)=>{if(value!==null)rows[1][i]=value;});return Response.json({totalUpdatedRows:1});}
+      if(url.includes('/values:batchGetByDataFilter'))return Response.json({valueRanges:[{valueRange:{values:[rows[1]]}}]});
+      if(url.includes('/values:batchUpdate')){
+        for(const update of body.data){const letters=update.range.match(/!([A-Z]+)1/)![1];let index=0;for(const letter of letters)index=index*26+letter.charCodeAt(0)-64;update.values[0].forEach((value:string,i:number)=>{rows[0][index-1+i]=value;});}
+        return Response.json({totalUpdatedRows:1});
+      }
+      if(url.endsWith(':batchUpdate')){
+        for(const {moveDimension:move} of body.requests){for(const row of rows){while(row.length<rows[0].length)row.push('');const cells=row.splice(move.source.startIndex,1);row.splice(move.destinationIndex>move.source.startIndex?move.destinationIndex-1:move.destinationIndex,0,...cells);}}
+        return Response.json({});
+      }
+      return Response.json({values:url.includes('1%3A1')?[rows[0]]:rows});
+    }));
+    await new GoogleSheetsProvider().write(sheet,f.lead.stableSourceId,100,{sentStatus:'Sent',sharedTo:'Original recipient',status:'Interested',feedback:'Site visit Sunday'});
+    expect(rows[0]).toEqual(['ID','Name','Phone','lead_status','Source Extra','Sent Status','Shared To','Feedback','Remark']);
+    expect(rows[1]).toEqual([f.lead.stableSourceId,'Customer','9876543210','New','Keep source','Sent','Original recipient','Interested','Site visit Sunday']);
   });
 });

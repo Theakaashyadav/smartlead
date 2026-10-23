@@ -5,13 +5,14 @@ import { AppError, decrypt, hash, opaqueToken } from './security';
 import { MANAGED } from './validation';
 import { PublicSheetsProvider } from './public-sheets';
 import { LEGACY_ORGANIZATION } from './organizations';
-import { DELIVERY_COLUMNS } from './simple-shared';
+import { DELIVERY_COLUMNS, SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
+import { expectedOutputValue, legacyRemarkColumn, nextOutputMove, outputColumns, simpleOutputValues } from './sheet-output';
 
 type Metadata = {metadataId:number;metadataKey:string;metadataValue:string;location:{dimensionRange?:{sheetId:number;startIndex:number;endIndex:number}}};
 export type SourceRow = {stableId:string;row:number;metadataId?:number;values:Record<string,string>;questions?:Array<{question:string;answer:string}>};
 export interface SheetProvider {
   read(sheet: Sheet): Promise<SourceRow[]>;
-  write(sheet: Sheet, stableId: string, metadataId: number|null, values: Record<string,string>): Promise<void>;
+  write(sheet: Sheet, stableId: string, metadataId: number|null, values: Record<string,string>): Promise<void|Record<string,string>>;
 }
 export async function googleToken(credentialId?: string|null,organizationId=LEGACY_ORGANIZATION) {
   if (credentialId) {
@@ -93,6 +94,7 @@ export class GoogleSheetsProvider implements SheetProvider {
     for(let index=1;index<rows.length;index++) {
       const row=rows[index];
       const values=Object.fromEntries(Object.entries(map).map(([field,col])=>[field,row[headers.indexOf(col)]||'']));
+      if(sheet.connectionType.startsWith('SIMPLE_'))Object.assign(values,simpleOutputValues(headers,row));
       if(!values.customerName && !values.mobile) continue;
       const tags=existing.filter(m=>m.location.dimensionRange?.startIndex===index);
       if(tags.length>1) throw new AppError(409,'Multiple SmartLead row identities found; resolve duplicate row metadata');
@@ -142,6 +144,32 @@ export class GoogleSheetsProvider implements SheetProvider {
     const headerData=await googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(`${tabRange(sheet)}!1:1`)}`,token);
     const headers:string[]=headerData.values?.[0]||[];
     for(const field of Object.keys(values))if(!Object.hasOwn(MANAGED,field))throw new AppError(400,'Only application-managed fields may be written');
+    const simple=sheet.connectionType.startsWith('SIMPLE_');
+    if(simple){
+      const current=await googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(tabRange(sheet))}`,token);
+      const rows:string[][]=(current.values||[headers]).map((row:unknown[])=>row.map(value=>String(value??'')));
+      const legacy=legacyRemarkColumn(headers);
+      if(legacy>=0){
+        await googleRequest(sheet.spreadsheetId,'/values:batchUpdate',token,{valueInputOption:'RAW',data:[{range:`${tabRange(sheet)}!${columnLetter(legacy)}1`,values:[['Remark']]}]});
+        headers[legacy]='Remark';rows[0][legacy]='Remark';
+      }
+      const columns=outputColumns(rows);const added=columns.filter(c=>c.missing);
+      if(added.length){
+        await googleRequest(sheet.spreadsheetId,'/values:batchUpdate',token,{valueInputOption:'RAW',data:[{range:`${tabRange(sheet)}!${columnLetter(added[0].index)}1:${columnLetter(added.at(-1)!.index)}1`,values:[added.map(c=>c.label)]}]});
+        for(const column of added){while(rows[0].length<column.index)rows[0].push('');rows[0][column.index]=column.label;}
+      }
+      const moves:unknown[]=[];let move=nextOutputMove(rows);
+      while(move){
+        if(moves.length>rows[0].length*4)throw new AppError(409,'Could not arrange the output columns safely.');
+        moves.push({moveDimension:{source:{sheetId:sheet.worksheetId,dimension:'COLUMNS',startIndex:move.start,endIndex:move.start+1},destinationIndex:move.direction==='right'?move.start+2:move.start-1}});
+        for(const row of rows){while(row.length<rows[0].length)row.push('');const cells=row.splice(move.start,1);row.splice(move.start+(move.direction==='right'?1:-1),0,...cells);}
+        move=nextOutputMove(rows);
+      }
+      if(moves.length)await googleRequest(sheet.spreadsheetId,':batchUpdate',token,{requests:moves});
+      headers.splice(0,headers.length,...rows[0]);
+      for(const [field] of Object.entries(SIMPLE_OUTPUT_COLUMNS))map[field]=headers[outputColumns(rows,[field])[0].index];
+      await db.sheet.update({where:{id:sheet.id},data:{columnMapping:map}});
+    }else{
     const missing=Object.keys(DELIVERY_COLUMNS).filter(field=>Object.hasOwn(values,field)&&(!map[field]||!headers.includes(map[field])));
     if(missing.length){
       // Delivery tracking is explicitly requested by the sheet connection. Only
@@ -150,7 +178,7 @@ export class GoogleSheetsProvider implements SheetProvider {
       const start=Math.max(headers.length,...(current.values||[]).map((row:unknown[])=>row.length));
       const added:string[]=[];
       for(const field of missing){
-        const label=sheet.connectionType.startsWith('SIMPLE_')?DELIVERY_COLUMNS[field as keyof typeof DELIVERY_COLUMNS]:MANAGED[field];
+        const label=MANAGED[field];
         const matches=headers.filter(header=>header.toLowerCase().replace(/[\s_]+/g,'')===label.toLowerCase().replace(/[\s_]+/g,''));
         if(matches.length>1)throw new AppError(409,`Duplicate ${label} columns found.`);
         map[field]=matches[0]||label;if(!matches.length)added.push(label);
@@ -160,6 +188,7 @@ export class GoogleSheetsProvider implements SheetProvider {
         while(headers.length<start)headers.push('');headers.push(...added);
       }
       await db.sheet.update({where:{id:sheet.id},data:{columnMapping:map}});
+    }
     }
     const filter={developerMetadataLookup:{metadataId}};
     const current=await googleRequest(sheet.spreadsheetId,'/values:batchGetByDataFilter',token,{dataFilters:[filter]});
@@ -173,11 +202,13 @@ export class GoogleSheetsProvider implements SheetProvider {
       if(!Object.hasOwn(MANAGED,field)) throw new AppError(400,'Only application-managed fields may be written');
       const index=headers.indexOf(map[field]);
       if(index<0) throw new AppError(409,`Map or approve the managed ${field} column before writeback`);
-      if(Object.hasOwn(snapshot,field)&&String(source[index]||'')!==snapshot[field]&&String(source[index]||'')!==value)throw new AppError(409,`The source ${field} was edited outside SmartLead. Review the conflict before writing back.`,'SYNC_CONFLICT');
+      const actual=String(source[index]||'');const expected=simple?expectedOutputValue(snapshot,field,actual):snapshot[field];
+      if(Object.hasOwn(snapshot,field)&&actual!==expected&&actual!==value)throw new AppError(409,`The source ${field} was edited outside SmartLead. Review the conflict before writing back.`,'SYNC_CONFLICT');
       output[index]=value;
     }
     const written=await googleRequest(sheet.spreadsheetId,'/values:batchUpdateByDataFilter',token,{valueInputOption:'RAW',data:[{dataFilter:filter,values:[output]}]});
     if(written.totalUpdatedRows!==1) throw new AppError(409,'The source row could not be updated safely');
+    if(simple)return Object.fromEntries(outputColumns([headers]).map(column=>[column.field,values[column.field]??String(source[column.index]||'')]));
   }
 }
 

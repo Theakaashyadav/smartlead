@@ -204,16 +204,21 @@ export async function saveFeedback(assignmentId:string,input:unknown,actorId?:st
   });
 }
 export async function writebackLead(id:string, provider?:SheetProvider,options:{deliveryOnly?:boolean}={}) {
+  const startedAt=new Date();
   const lead=await db.lead.findUniqueOrThrow({where:{id},include:{sheet:true,assignments:{where:{active:true,isPrimary:true},include:{employee:true}},messages:{orderBy:{queuedAt:'desc'},include:{assignment:{include:{employee:true}}}}}});
   const owner=lead.assignments[0]?.employee;
   const message=lead.messages[0];
   if(lead.redactedAt)return;
   const delivery=deliveryValues(lead.messages);
-  const values:Record<string,string>=options.deliveryOnly?delivery:lead.sheet.connectionType.startsWith('SIMPLE_')?{...delivery,...(lead.sheet.connectionType==='SIMPLE_PUBLIC'&&lead.lastFeedback?{status:lead.status,feedback:lead.lastFeedback}: {})}:{assignedEmployee:owner?.name||'',assignedPhone:owner?.phone||'',status:lead.status,feedback:lead.lastFeedback||'',nextFollowupAt:lead.nextFollowupAt?.toISOString()||'',lastContactAt:lead.lastContactAt?.toISOString()||'',updatedAt:lead.updatedAt.toISOString(),updatedBy:owner?.name||'',...delivery,sentAt:message?.submittedAt?.toISOString()||'',deliveryStatus:message && ['SENT','DELIVERED','READ'].includes(message.status)?message.status:'Unconfirmed'};
+  const simple=lead.sheet.connectionType.startsWith('SIMPLE_');
+  // Delivery jobs also repair the latest submitted feedback. Otherwise an old
+  // delivery job can mark a lead SYNCED while its feedback is still missing.
+  const values:Record<string,string>=simple?{...delivery,...(lead.lastFeedback?{status:lead.status,feedback:lead.lastFeedback}: {})}:options.deliveryOnly?delivery:{assignedEmployee:owner?.name||'',assignedPhone:owner?.phone||'',status:lead.status,feedback:lead.lastFeedback||'',nextFollowupAt:lead.nextFollowupAt?.toISOString()||'',lastContactAt:lead.lastContactAt?.toISOString()||'',updatedAt:lead.updatedAt.toISOString(),updatedBy:owner?.name||'',...delivery,sentAt:message?.submittedAt?.toISOString()||'',deliveryStatus:message && ['SENT','DELIVERED','READ'].includes(message.status)?message.status:'Unconfirmed'};
   try {
-    await (provider||sheetProvider(lead.sheet)).write(lead.sheet,lead.stableSourceId,lead.metadataId,values);
-    const snapshot={...(lead.managedSnapshot as Record<string,string>||{}),...values};
+    const observed=await (provider||sheetProvider(lead.sheet)).write(lead.sheet,lead.stableSourceId,lead.metadataId,values);
+    const snapshot={...(lead.managedSnapshot as Record<string,string>||{}),...observed,...values,...(simple&&(observed||Object.hasOwn(values,'status'))?{__publicOutputV2:'1'}:{})};
     const updated=await db.lead.updateMany({where:{id,version:lead.version},data:{writebackStatus:'SYNCED',managedSnapshot:snapshot}});
+    if(updated.count&&(simple||!options.deliveryOnly))await db.job.updateMany({where:{type:'WRITEBACK',entityId:id,status:{in:['PENDING','DEAD']},createdAt:{lte:startedAt}},data:{status:'COMPLETED',error:null,lockedAt:null,lockToken:null}});
     if(!updated.count){await db.lead.update({where:{id},data:{managedSnapshot:snapshot}});await enqueue(db,'WRITEBACK',id,`writeback:repair:${id}:${opaqueToken()}`);}
     await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'SUCCESS',details:`Managed fields synchronized for lead ${id}.`}});
   }catch(error){await db.lead.update({where:{id},data:{writebackStatus:'ERROR'}});await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Google writeback unavailable; feedback remains saved in the database.'}});throw error;}

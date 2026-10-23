@@ -15,7 +15,8 @@ async function run(){
   for(const lead of leads){
     if(values.write){
       // Direct administrative backfill cannot be claimed by an older hosted
-      // worker. It only writes delivery cells and never drains sending jobs.
+      // worker. It repairs outputs, including saved feedback, without draining
+      // sending jobs or submitting another WhatsApp message.
       await writebackLead(lead.id,undefined,{deliveryOnly:true});
       completed++;
     }else{

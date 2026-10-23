@@ -9,6 +9,7 @@ import { phoneSchema } from './validation';
 import type { WhatsAppContact } from './simple-shared';
 import { clearSocketAuth, socketAuthState } from './whatsapp-socket-auth';
 import { UncertainDelivery, type SendInput, type WhatsAppProvider } from './whatsapp';
+import { redactSessionLogs } from './session-log-redaction';
 
 type Session = {
   id: string; stopped: boolean; connected: boolean; attempts: number;
@@ -95,6 +96,7 @@ async function warmRecipients(session: Session, socket: WASocket) {
 }
 
 async function open(session: Session) {
+  redactSessionLogs();
   const { default: makeWASocket, DisconnectReason } = await import('baileys');
   if (session.stopped) return;
   session.auth ||= await socketAuthState(session.id);

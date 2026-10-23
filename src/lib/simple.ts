@@ -4,7 +4,7 @@ import { AppError, audit, encrypt, opaqueToken, safeUser } from './security';
 import { enqueue, transaction } from './engine';
 import { inspectPublicSpreadsheet } from './public-sheets';
 import { phoneSchema } from './validation';
-import { SIMPLE_TEMPLATE, spreadsheetIdentity } from './simple-shared';
+import { SIMPLE_OUTPUT_COLUMNS, SIMPLE_TEMPLATE, spreadsheetIdentity } from './simple-shared';
 import type { User } from '@/generated/mongo';
 import { backgroundWhatsApp, nativeWhatsAppLogin } from './whatsapp-native';
 import { feedbackBaseURL } from './feedback-url';
@@ -33,7 +33,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
-    return {user:safeUser(user),organization,feedbackError,publicSheetWritebackAvailable:true,whatsappLoginMode:backgroundWhatsApp()?'background':nativeWhatsAppLogin()?'browser':'qr',account:account?{id:account.id,phone:account.phone,status:account.status,qrCode:nativeWhatsAppLogin()&&!backgroundWhatsApp()?null:account.qrCode,lastError:account.lastError}:null,sheets:summaries,workerRunning,workerMessage:workerRunning?null:workerOfflineMessage()};
+    return {user:safeUser(user),organization,feedbackError,publicSheetWritebackAvailable:true,sheetOutputColumns:Object.values(SIMPLE_OUTPUT_COLUMNS),whatsappLoginMode:backgroundWhatsApp()?'background':nativeWhatsAppLogin()?'browser':'qr',account:account?{id:account.id,phone:account.phone,status:account.status,qrCode:nativeWhatsAppLogin()&&!backgroundWhatsApp()?null:account.qrCode,lastError:account.lastError}:null,sheets:summaries,workerRunning,workerMessage:workerRunning?null:workerOfflineMessage()};
   }
   if(route==='google'&&method==='GET'){
     const credentials=await db.googleCredential.findMany({where:{organizationId},select:{id:true,label:true,type:true},orderBy:{createdAt:'desc'}});

@@ -2,7 +2,8 @@ import type { Sheet } from '@/generated/mongo';
 import type { SheetProvider, SourceRow } from './google';
 import { AppError, hash } from './security';
 import { phoneSchema } from './validation';
-import { detectColumns, sourceQuestions, SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
+import { detectColumns, sourceQuestions } from './simple-shared';
+import { simpleOutputValues } from './sheet-output';
 import { writePublicSheet } from './public-sheet-editor';
 
 const sharingHelp='Cannot read this sheet. In Google Sheets, set Share → General access → Anyone with the link, then paste its link again.';
@@ -74,10 +75,7 @@ export class PublicSheetsProvider implements SheetProvider{
     const seen=new Set<string>();const result:SourceRow[]=[];
     for(let index=1;index<rows.length;index++){
       const values=Object.fromEntries(Object.entries(mapping).map(([field,column])=>[field,(rows[index][headers.indexOf(column)]||'').trim()]));
-      for(const [field,label] of Object.entries(SIMPLE_OUTPUT_COLUMNS)){
-        const column=headers.findIndex(h=>h.toLowerCase().replace(/[\s_]+/g,'')===label.toLowerCase().replace(/[\s_]+/g,''));
-        values[field]=column<0?'':rows[index][column]||'';
-      }
+      Object.assign(values,simpleOutputValues(headers,rows[index]));
       if(!values.customerName&&!values.mobile)continue;
       const number=phoneSchema.safeParse(values.mobile);
       // Prefer its Lead ID, otherwise use phone + lead date when available.
@@ -88,6 +86,6 @@ export class PublicSheetsProvider implements SheetProvider{
     return result;
   }
   async write(sheet:Sheet,stableId:string,_metadataId:number|null,values:Record<string,string>){
-    await writePublicSheet(sheet,stableId,values);
+    return writePublicSheet(sheet,stableId,values);
   }
 }

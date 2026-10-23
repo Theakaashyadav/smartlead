@@ -13,6 +13,7 @@ import { databaseFailure, safeDatabaseErrorCode } from './database-errors';
 import { socketWhatsApp } from './whatsapp-mode';
 import { closeSocketWhatsApp } from './whatsapp-socket';
 import { SEND_INTERVAL_MS, WORKER_IDLE_MS } from './automation-policy';
+import { recoverSheetOutputs } from './sheet-output-recovery';
 
 export function startWorkerService({closeDatabase=false}={}){
   const controller=new AbortController();
@@ -58,6 +59,7 @@ export function startWorkerService({closeDatabase=false}={}){
       if(!await lease.markReady())throw new Error('Worker lease lost');
       heartbeatTimer=setInterval(heartbeat,10000);
       await db.setting.deleteMany({where:{key:'simple:worker-error'}});
+      if(!isDemo())await recoverSheetOutputs();
       console.log('SmartLead worker started. Automation jobs are stored in the application database.');
       let maintainedAt=0;
       const loop=async(name:string,task:()=>Promise<unknown>,interval:number)=>{
