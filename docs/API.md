@@ -4,7 +4,7 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 
 | Method | Endpoint | Access / behavior |
 | --- | --- | --- |
-| GET | /api/health | Database health and configured application origin; failures return 503 with missing variable names and a safe diagnostic reason/code, never credentials, raw errors, or filesystem paths |
+| GET | /api/health | Database health, configured application origin and automation policy (`skipAlreadySentLeads: true`); failures return 503 with missing variable names and a safe diagnostic reason/code, never credentials, raw errors, or filesystem paths |
 | GET | /api/simple/state | Administrator; connected sheets, recipients, sending counts and feedback-link readiness |
 | GET | /api/simple/google | Administrator; credential labels, OAuth configuration status and expected redirect URI; no secrets |
 | POST | /api/simple/google/authorize | Administrator; `{url,popup:true}` for a pasted sheet or `{sheetId,popup:true}` for an existing connection; returns the Google consent URL |
@@ -81,5 +81,7 @@ Feedback example:
 A stale version returns 409; refresh the record and review the accepted update before retrying. Feedback can be saved successfully while sheet writeback remains pending/error. Repeated updates create feedback history, not duplicate leads.
 
 For simple sheet connections, `GET /api/feedback/:token` includes `simple: true`, the sheet name, ordered source questions and answers, the current lead version and `writebackStatus`. The employee form submits only status, remarks and version. The worker writes **Sent Status**, **Shared To** (confirmed successful recipients), **Feedback** (lead status) and **Remark** to the same source identity. Authorized connections verify the API result before `writebackStatus` becomes `SYNCED`. Existing public connections require Apps Script for production writeback; connecting it preserves lead identities and sending history.
+
+Simple imports save rows already marked **Sent** without assigning or sending them. Assignment and dispatch also block repeat sends using confirmed database history. Production dispatch verifies the current source marker before claiming the lead; unavailable, missing or ambiguous source rows hold submission. Concurrent queued messages for one lead are serialized through a shared lead update. Imported **Sent Status** and **Shared To** remain intact during feedback writeback even without a local provider receipt. Other imported managed-cell edits continue to require conflict resolution.
 
 Demo-only endpoints: `POST /api/sheets/:id/demo-lead` inserts a fictional source row and processes the workflow; `GET /api/sheets/:id/source` reads that scoped durable source fixture. Demo providers are unavailable for new production connections.

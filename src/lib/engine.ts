@@ -1,6 +1,6 @@
 import type { Prisma, Sheet, Job } from '@/generated/mongo';
 import { db, databaseTransaction, usingSQLite } from './db';
-import { appUrl } from './config';
+import { appUrl, isDemo } from './config';
 import { AppError, audit, decrypt, encrypt, hash, opaqueToken, signedFeedbackToken, verifyFeedbackSignature } from './security';
 import { sheetProvider, sourceFingerprint, type SheetProvider } from './google';
 import { CLOSED, DEFAULT_TEMPLATE, phoneSchema, feedbackSchema, STATUSES, VARIABLES, MANAGED as MANAGED_FIELDS } from './validation';
@@ -10,7 +10,7 @@ import { simpleLeadMessage } from './simple-shared';
 import { feedbackBaseURL } from './feedback-url';
 import { organizationSettingKey } from './organizations';
 import { sheetPollSeconds } from './automation-policy';
-import { deliveryValues, queueDeliveryWriteback } from './delivery';
+import { deliveryValues, queueDeliveryWriteback, sheetAlreadySent, sheetSaysSent, SUCCESSFUL_SEND_STATUSES } from './delivery';
 
 const sourceChecks = new Map<string, string>();
 let nextSendAt = 0;
@@ -31,6 +31,22 @@ export async function transaction<T>(fn:(tx:Prisma.TransactionClient)=>Promise<T
     catch(error){const code=(error as {code?:string}).code;if(!['P2034','P1008','P2028'].includes(code||'')||attempt===4)throw error;await new Promise(r=>setTimeout(r,50*(attempt+1)));}
   }
   throw new Error('Transaction retry exhausted');
+}
+const alreadySentReason='Lead already marked Sent or successfully submitted; repeat sending prevented.';
+async function cancelQueuedLeadMessages(tx:Prisma.TransactionClient,leadId:string,reason=alreadySentReason){
+  const pending=await tx.message.findMany({where:{leadId,status:'QUEUED'},select:{id:true}});
+  if(!pending.length)return;
+  await tx.message.updateMany({where:{id:{in:pending.map(m=>m.id)},status:'QUEUED'},data:{status:'CANCELLED',failureReason:reason}});
+  await tx.job.updateMany({where:{type:'SEND',entityId:{in:pending.map(m=>m.id)},status:'PENDING'},data:{status:'COMPLETED',error:null,lockedAt:null,lockToken:null}});
+}
+async function hasSubmittedLead(tx:Prisma.TransactionClient,leadId:string){
+  return !!await tx.message.findFirst({where:{leadId,status:{in:SUCCESSFUL_SEND_STATUSES},uncertain:false},select:{id:true}});
+}
+async function rememberSheetSent(tx:Prisma.TransactionClient,leadId:string,values:Record<string,string>){
+  const lead=await tx.lead.findUniqueOrThrow({where:{id:leadId},select:{managedSnapshot:true}});
+  const snapshot=(lead.managedSnapshot||{}) as Record<string,string>;
+  if(snapshot.__sourceSent!=='1'||snapshot.sentStatus!==values.sentStatus||snapshot.sharedTo!==(values.sharedTo||''))await tx.lead.update({where:{id:leadId},data:{managedSnapshot:{...snapshot,sentStatus:values.sentStatus,sharedTo:values.sharedTo||'',__sourceSent:'1'},version:{increment:1}}});
+  await cancelQueuedLeadMessages(tx,leadId);
 }
 export async function synchronizeSheet(id:string, provider?:SheetProvider, options:{skipUnchanged?:boolean;refreshQueued?:boolean}={}) {
   const sheet=await db.sheet.findUniqueOrThrow({where:{id}});
@@ -60,6 +76,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
       const fingerprint=hash(JSON.stringify([sourceFingerprint(row.values),row.questions||[]]));
       const existing=existingById.get(row.stableId);
       if(existing?.redactedAt)continue;
+      const sourceSent=sheet.connectionType.startsWith('SIMPLE_')&&sheetSaysSent(row.values.sentStatus);
       const date=row.values.leadDate?new Date(row.values.leadDate):new Date();
       const data={customerName:row.values.customerName||'Unnamed lead',mobile,email:row.values.email||null,project:row.values.project||sheet.project,location:row.values.location||null,budget:row.values.budget||null,source:row.values.source||null,requirement:row.values.requirement||null,sourceRow:row.row,metadataId:row.metadataId||null,sourceFingerprint:fingerprint,sourceData:{questions:row.questions||[]},sourceDeleted:false};
       if(!existing) {
@@ -67,7 +84,8 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
           const publicSheet=['SIMPLE_PUBLIC','SIMPLE_GOOGLE','SIMPLE_APPS_SCRIPT'].includes(sheet.connectionType);
           const managedSnapshot={...Object.fromEntries(Object.keys(MANAGED_FIELDS).map(k=>[k,row.values[k]||''])),...(publicSheet?{__publicFeedbackInitialized:'1'}:{})};
           const lead=await tx.lead.upsert({where:{sheetId_stableSourceId:{sheetId:id,stableSourceId:row.stableId}},create:{...data,managedSnapshot,...(publicSheet?{status:row.values.status||'New',lastFeedback:row.values.feedback||null}:{}),sheetId:id,stableSourceId:row.stableId,leadDate:Number.isNaN(date.getTime())?new Date():date},update:{...data}});
-          if(parsed.success) await enqueue(tx,'ASSIGN',lead.id,`assign:${lead.id}`);
+          if(sourceSent)await rememberSheetSent(tx,lead.id,row.values);
+          else if(parsed.success) await enqueue(tx,'ASSIGN',lead.id,`assign:${lead.id}`);
           else await tx.syncLog.create({data:{sheetId:id,operation:'VALIDATION',status:'WARNING',details:`Row ${row.row} has an invalid phone number; automatic assignment paused.`}});
         });
         imported++;
@@ -83,11 +101,12 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
         if(parsed.success&&!phoneSchema.safeParse(existing.mobile).success){
           await transaction(async tx=>{
             await tx.lead.update({where:{id:existing.id},data:{...data,...baseline}});
-            await enqueue(tx,'ASSIGN',existing.id,`assign:${existing.id}`);
+            if(!sourceSent&&!sheetAlreadySent(snapshot))await enqueue(tx,'ASSIGN',existing.id,`assign:${existing.id}`);
           });
         }else if(initialize||existing.sourceFingerprint!==fingerprint||existing.sourceRow!==row.row||existing.metadataId!==(row.metadataId||null)||existing.sourceDeleted){
           await db.lead.update({where:{id:existing.id},data:{...(existing.sourceFingerprint!==fingerprint?data:{sourceRow:row.row,metadataId:row.metadataId||null,sourceDeleted:false}),...baseline}});
         }
+        if(sourceSent&&(snapshot.__sourceSent!=='1'||snapshot.sentStatus!==row.values.sentStatus||snapshot.sharedTo!==(row.values.sharedTo||'')))await transaction(tx=>rememberSheetSent(tx,existing.id,row.values));
       }
     }
     await db.lead.updateMany({where:{sheetId:id,sourceDeleted:false,stableSourceId:{notIn:[...seen]}},data:{sourceDeleted:true}});
@@ -117,6 +136,8 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
     if(!rule)throw new AppError(400,'Configure distribution settings first');
     if((rule.sender&&rule.sender.organizationId!==lead.sheet.organizationId)||rule.recipients.some(r=>r.employee.organizationId!==lead.sheet.organizationId))throw new AppError(403,'Sender and recipients must belong to this organisation');
     if(lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'This lead is no longer available for assignment');
+    if(simple&&(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,leadId))){await cancelQueuedLeadMessages(tx,leadId);return {assigned:false,reason:'Already sent'};}
+    if(simple&&await tx.message.findFirst({where:{leadId,status:'PROCESSING'},select:{id:true}}))return {assigned:false,reason:'Delivery in progress'};
     if(lead.assignments.length && !reassign)return {assigned:false,reason:'Already assigned'};
     if(!rule.enabled && !employeeId)return {assigned:false,reason:'Distribution paused'};
     if(!employeeId && rule.mode==='MANUAL')return {assigned:false,reason:'Manual assignment required'};
@@ -209,8 +230,8 @@ export async function writebackLead(id:string, provider?:SheetProvider,options:{
   const owner=lead.assignments[0]?.employee;
   const message=lead.messages[0];
   if(lead.redactedAt)return;
-  const delivery=deliveryValues(lead.messages);
   const simple=lead.sheet.connectionType.startsWith('SIMPLE_');
+  const delivery=deliveryValues(lead.messages,simple?lead.managedSnapshot:undefined);
   // Delivery jobs also repair the latest submitted feedback. Otherwise an old
   // delivery job can mark a lead SYNCED while its feedback is still missing.
   const values:Record<string,string>=simple?{...delivery,...(lead.lastFeedback?{status:lead.status,feedback:lead.lastFeedback}: {})}:options.deliveryOnly?delivery:{assignedEmployee:owner?.name||'',assignedPhone:owner?.phone||'',status:lead.status,feedback:lead.lastFeedback||'',nextFollowupAt:lead.nextFollowupAt?.toISOString()||'',lastContactAt:lead.lastContactAt?.toISOString()||'',updatedAt:lead.updatedAt.toISOString(),updatedBy:owner?.name||'',...delivery,sentAt:message?.submittedAt?.toISOString()||'',deliveryStatus:message && ['SENT','DELIVERED','READ'].includes(message.status)?message.status:'Unconfirmed'};
@@ -223,15 +244,32 @@ export async function writebackLead(id:string, provider?:SheetProvider,options:{
     await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'SUCCESS',details:`Managed fields synchronized for lead ${id}.`}});
   }catch(error){await db.lead.update({where:{id},data:{writebackStatus:'ERROR'}});await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Google writeback unavailable; feedback remains saved in the database.'}});throw error;}
 }
-export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvider) {
+export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvider,sourceProvider?:SheetProvider) {
   const message=await db.message.findUniqueOrThrow({where:{id},include:{sender:true,assignment:{include:{employee:true}},lead:{include:{sheet:{include:{rule:true}}}}}});
   if(message.status!=='QUEUED')return;
   if(message.sender.organizationId!==message.lead.sheet.organizationId||message.assignment.employee.organizationId!==message.lead.sheet.organizationId)throw new AppError(403,'Message connections must belong to this organisation');
+  const simple=message.lead.sheet.connectionType.startsWith('SIMPLE_');
+  if(simple&&(sheetAlreadySent(message.lead.managedSnapshot)||await hasSubmittedLead(db,message.leadId))){await transaction(tx=>cancelQueuedLeadMessages(tx,message.leadId));return;}
   if(message.lead.sheet.connectionType.startsWith('SIMPLE_')&&!message.lead.sheet.rule?.enabled)throw new AppError(409,'Automatic sending is paused','PAUSED');
   if(!message.assignment.active||!message.assignment.employee.active){await db.message.update({where:{id},data:{status:'CANCELLED',failureReason:'Recipient or assignment is inactive'}});return;}
   if(message.sender.status!=='CONNECTED')throw new AppError(409,'Sender disconnected; outgoing jobs remain queued','DISCONNECTED');
-  if(message.lead.sheet.connectionType.startsWith('SIMPLE_'))await refreshSimpleQueuedMessages(message.lead.sheetId,id,true);
-  const claimed=await db.message.updateMany({where:{id,status:'QUEUED'},data:{status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date()}});
+  if(simple&&(!isDemo()||sourceProvider)){
+    const rows=await (sourceProvider||sheetProvider(message.lead.sheet)).read(message.lead.sheet);
+    const matches=rows.filter(row=>row.stableId===message.lead.stableSourceId);
+    if(matches.length!==1)throw new AppError(409,'The original lead row is missing or duplicated. Sending is held for review.','SYNC_CONFLICT');
+    if(sheetSaysSent(matches[0].values.sentStatus)){await transaction(tx=>rememberSheetSent(tx,message.leadId,matches[0].values));return;}
+  }
+  if(simple)await refreshSimpleQueuedMessages(message.lead.sheetId,id,true);
+  const claimData={status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date()};
+  const claimed=simple?await transaction(async tx=>{
+    const lead=await tx.lead.findUniqueOrThrow({where:{id:message.leadId},select:{managedSnapshot:true}});
+    if(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,message.leadId)){await cancelQueuedLeadMessages(tx,message.leadId);return {count:0};}
+    if(await tx.message.findFirst({where:{leadId:message.leadId,id:{not:id},status:'PROCESSING'},select:{id:true}})){await cancelQueuedLeadMessages(tx,message.leadId,'A delivery for this lead is already in progress; duplicate sending prevented.');return {count:0};}
+    // Both competing send claims write the lead, so MongoDB/SQLite serializes
+    // them before either can submit a second message for the same lead.
+    await tx.lead.update({where:{id:message.leadId},data:{version:{increment:1}}});
+    return tx.message.updateMany({where:{id,status:'QUEUED',assignment:{active:true}},data:claimData});
+  }):await db.message.updateMany({where:{id,status:'QUEUED'},data:claimData});
   if(!claimed.count)return;
   const body=decrypt((await db.message.findUniqueOrThrow({where:{id}})).encryptedBody);
   const rule=message.lead.sheet.rule;

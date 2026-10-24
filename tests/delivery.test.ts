@@ -46,12 +46,11 @@ describe('Sent Status and Shared To',()=>{
     expect(f.write.mock.calls[0][3]).toEqual({sentStatus:'',sharedTo:''});
     expect(await db.job.count({where:{key:{startsWith:'writeback:delivery:'}}})).toBe(0);
   });
-  it('uses the successful message recipient when the lead has since been reassigned',async()=>{
+  it('keeps the successful recipient and prevents reassignment from sending an already-sent lead again',async()=>{
     const f=await fixture();await dispatchMessage(f.message.id,f.provider);
-    await assignLead(f.lead.id,f.recipients[1].id,undefined,true);
-    const pending=await db.message.findFirstOrThrow({where:{leadId:f.lead.id,status:'QUEUED'}});
-    f.send.mockRejectedValueOnce(new AppError(400,'Rejected'));
-    await dispatchMessage(pending.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    expect(await assignLead(f.lead.id,f.recipients[1].id,undefined,true)).toMatchObject({assigned:false,reason:'Already sent'});
+    expect(await db.message.count({where:{leadId:f.lead.id,status:'QUEUED'}})).toBe(0);
+    await writebackLead(f.lead.id,f.sheetProvider);expect(f.send).toHaveBeenCalledOnce();
     expect(f.write.mock.calls[0][3]).toEqual({sentStatus:'Sent',sharedTo:'Original recipient'});
   });
   it('does not resend a successful message when writing to Google fails',async()=>{

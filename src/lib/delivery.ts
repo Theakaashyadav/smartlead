@@ -2,8 +2,19 @@ import { db, usingSQLite, type Transaction } from './db';
 
 export const SUCCESSFUL_SEND_STATUSES=['SUBMITTED','SENT','DELIVERED','READ'];
 type DeliveryMessage={status:string;uncertain:boolean;assignment:{employee:{name:string}}};
-export function deliveryValues(messages:DeliveryMessage[]){
+export const sheetSaysSent=(value:unknown)=>typeof value==='string'&&value.trim().toLowerCase()==='sent';
+export function sheetAlreadySent(value:unknown){
+  const snapshot=(value||{}) as Record<string,unknown>;
+  return snapshot.__sourceSent==='1'||sheetSaysSent(snapshot.sentStatus);
+}
+export function deliveryValues(messages:DeliveryMessage[],sourceSnapshot?:unknown){
   const sent=messages.filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
+  // Imported Sent rows have no local provider receipt. Keep their existing
+  // delivery cells when saving feedback instead of clearing their history.
+  if(!sent.length&&sheetAlreadySent(sourceSnapshot)){
+    const snapshot=sourceSnapshot as Record<string,string>;
+    return {sentStatus:sheetSaysSent(snapshot.sentStatus)?snapshot.sentStatus:'Sent',sharedTo:snapshot.sharedTo||snapshot.assignedEmployee||''};
+  }
   return {sentStatus:sent.length?'Sent':'',sharedTo:[...new Set(sent.map(message=>message.assignment.employee.name))].join(', ')};
 }
 
