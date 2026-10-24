@@ -1,5 +1,5 @@
 export type WhatsAppContact = {name:string;phone:string};
-export const SIMPLE_TEMPLATE = '*New lead*\n\nName: {{customer_name}}\nPhone: {{mobile_number}}\nProject: {{project_name}}\nLocation: {{location}}\nBudget: {{budget}}\nSource: {{lead_source}}';
+export const SIMPLE_TEMPLATE = "Hello, You got a new lead\nProject – *{{project_name}}*\nHere's what we know:\nName: *{{customer_name}}*\nPhone: *{{mobile_number}}*\nCity: *{{location}}*\n*Submit Feedback*\n{{feedback_link}}\nThank you!";
 export const DELIVERY_COLUMNS={sentStatus:'Sent Status',sharedTo:'Shared To'};
 export const SIMPLE_OUTPUT_COLUMNS={...DELIVERY_COLUMNS,status:'Feedback',feedback:'Remark'};
 export type LeadQuestion={question:string;answer:string};
@@ -13,9 +13,23 @@ export function sourceQuestions(headers:string[],cells:string[]):LeadQuestion[]{
     return /\?\s*$/.test(text)||/^(what|when|where|why|which|how|are you|do you|have you|would you|is your|can you)\b/i.test(text)?[{question:questionLabel(header),answer:(cells[index]||'').trim()}]:[];
   });
 }
-export function simpleLeadMessage(lead:{customerName:string;mobile:string;location?:string|null;sourceData?:unknown},sheetName:string,feedbackLink:string){
+function messageValue(value:string){return value.replace(/[\r\n]+/g,' ').trim();}
+function messageQuestionLabel(question:string){
+  const label=questionLabel(question).replace(/\?+$/,'').trim();
+  if(/\bpurpose\b/i.test(label))return 'purpose';
+  if(/\bbudget\b/i.test(label))return 'budget';
+  if(/\bsite visit\b/i.test(label))return 'available for a site visit';
+  if(/\b(purchase|purchasing|buy|buying)\b/i.test(label)&&/\b(when|plan|planning|timeline|timeframe)\b/i.test(label))return 'planning to purchase';
+  return label;
+}
+export function simpleLeadMessage(lead:{customerName:string;mobile:string;location?:string|null;budget?:string|null;sourceData?:unknown},projectName:string,feedbackLink:string){
   const questions=(lead.sourceData as {questions?:LeadQuestion[]}|null)?.questions||[];
-  return ['Hello',`You got a new lead from ${sheetName}`,"Here's what we know:",...questions.map((q,i)=>`Q.${i+1} - ${q.question}\nAns.- ${q.answer||'Not provided'}`),`Name: ${lead.customerName}\nPhone: ${lead.mobile}\nCity: ${lead.location||'Not provided'}`,`*Submit Feedback*\n${feedbackLink}`,'Thank you!'].join('\n\n');
+  const details=questions.map(q=>({label:messageQuestionLabel(q.question),answer:q.answer}));
+  if(lead.budget&&!details.some(q=>q.label==='budget'))details.push({label:'budget',answer:lead.budget});
+  const order=['purpose','budget','planning to purchase','available for a site visit'];
+  const rank=(label:string)=>{const index=order.indexOf(label);return index<0?order.length:index;};
+  details.sort((a,b)=>rank(a.label)-rank(b.label));
+  return ['Hello, You got a new lead',`Project – *${messageValue(projectName)}*`,"Here's what we know:",`Name: *${messageValue(lead.customerName)}*`,`Phone: *${messageValue(lead.mobile)}*`,`City: *${messageValue(lead.location||'Not provided')}*`,...details.map(q=>`${messageValue(q.label)} - *${messageValue(q.answer||'Not provided')}*`),'*Submit Feedback*',feedbackLink,'Thank you!'].join('\n');
 }
 export function spreadsheetIdentity(input:string) {
   const value=input.trim();

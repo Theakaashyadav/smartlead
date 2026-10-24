@@ -231,9 +231,25 @@ describe('durable end-to-end workflow',()=>{
     expect(assignments.map(a=>a.employeeId)).toEqual(['e0','e1','e2','e0']);
     expect(await db.feedbackToken.count()).toBe(4);expect(await db.job.count({where:{type:'WRITEBACK'}})).toBe(0);
     const messages=await db.message.findMany();expect(messages).toHaveLength(4);
-    for(const m of messages){expect(decrypt(m.encryptedBody)).toContain('You got a new lead from Test source');expect(decrypt(m.encryptedBody)).toContain('/feedback/');await dispatchMessage(m.id);}
+    for(const m of messages){expect(decrypt(m.encryptedBody)).toContain('Project – *Noida*');expect(decrypt(m.encryptedBody)).toContain('/feedback/');await dispatchMessage(m.id);}
     expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(4);expect(await db.job.count({where:{type:'WRITEBACK'}})).toBe(4);
     await synchronizeSheet('sheet',new DemoSheetsProvider());expect(await db.lead.count()).toBe(4);expect(await db.message.count()).toBe(4);
+  });
+  it('uses a changed project for queued messages while keeping source data and feedback links unchanged',async()=>{
+    const {admin}=await fixture();await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
+    await synchronizeSheet('sheet',new DemoSheetsProvider());const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);
+    const message=await db.message.findFirstOrThrow();const token=decrypt(message.encryptedBody).match(/\/feedback\/([^\s]+)/)![1];
+    const source=await db.setting.findUniqueOrThrow({where:{key:'demo-source:sheet'}});const write=vi.spyOn(DemoSheetsProvider.prototype,'write');
+    const request=(project:string)=>new Request('http://localhost',{method:'PUT',body:JSON.stringify({project})});
+    await expect(simpleAction(['sheets','sheet','project'],'PUT',request('Wrong project'),{...admin,organizationId:'another-org'})).rejects.toMatchObject({status:404});
+    for(const invalid of ['   ','x'.repeat(121),'Project\nInjected line'])await expect(simpleAction(['sheets','sheet','project'],'PUT',request(invalid),admin)).rejects.toThrow();
+    expect(await simpleAction(['sheets','sheet','project'],'PUT',request('  Corbett Meadows  '),admin)).toEqual({project:'Corbett Meadows'});
+    const provider={sendMessage:vi.fn(async()=>({id:'project-message',status:'SUBMITTED'}))} as any;
+    await dispatchMessage(message.id,provider);await dispatchMessage(message.id,provider);
+    expect(provider.sendMessage).toHaveBeenCalledOnce();expect(provider.sendMessage.mock.calls[0][0].body).toContain('Project – *Corbett Meadows*');expect(provider.sendMessage.mock.calls[0][0].body).toContain(token);
+    expect((await db.setting.findUniqueOrThrow({where:{key:'demo-source:sheet'}})).value).toEqual(source.value);expect(write).not.toHaveBeenCalled();write.mockRestore();
+    expect(await db.message.count()).toBe(1);expect((await db.sheet.findUniqueOrThrow({where:{id:'sheet'}})).name).toBe('Test source');
+    expect(await simpleAction(['state'],'GET',new Request('http://localhost'),admin)).toMatchObject({sheets:[{project:'Corbett Meadows'}]});
   });
   it('holds remote sends until a live public feedback address is available',async()=>{
     await fixture();await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
@@ -254,14 +270,14 @@ describe('durable end-to-end workflow',()=>{
     vi.stubGlobal('fetch',vi.fn(async()=>new Response(csv,{headers:{'content-type':'text/csv'}})));
     await synchronizeSheet('sheet');const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);
     const outgoing=await db.message.findFirstOrThrow();let body=decrypt(outgoing.encryptedBody);
-    expect(body).toContain('Hello\n\nYou got a new lead from Test source\n\nHere\'s what we know:');
-    expect(body).toContain('Q.1 - What is your primary purpose for buying a plot?\nAns.- Investment');
-    expect(body).toContain('Q.4 - When would you be available for a site visit?\nAns.- Sunday');
-    expect(body).toContain('Name: Sample customer\nPhone: +919876543210\nCity: Noida');expect(body.endsWith('Thank you!')).toBe(true);
-    expect(body).toMatch(/\*Submit Feedback\*\nhttps?:\/\/[^\s]+\/feedback\/[^\s]+\n\nThank you!/);
+    expect(body).toContain("Hello, You got a new lead\nProject – *Noida*\nHere's what we know:");
+    expect(body).toContain('purpose - *Investment*');
+    expect(body).toContain('available for a site visit - *Sunday*');
+    expect(body).toContain('Name: *Sample customer*\nPhone: *+919876543210*\nCity: *Noida*');expect(body.endsWith('Thank you!')).toBe(true);
+    expect(body).toMatch(/\*Submit Feedback\*\nhttps?:\/\/[^\s]+\/feedback\/[^\s]+\nThank you!/);
     const token=body.match(/\/feedback\/([^\s]+)/)![1];const access=await getFeedbackAccess(token);expect(access.assignment.lead.id).toBe(lead.id);
     csv=csv.replace('Investment,50 lakh','Home,50 lakh');await synchronizeSheet('sheet');
-    body=decrypt((await db.message.findUniqueOrThrow({where:{id:outgoing.id}})).encryptedBody);expect(body).toContain('Ans.- Home');expect(body).toContain(token);expect(await db.message.count()).toBe(1);
+    body=decrypt((await db.message.findUniqueOrThrow({where:{id:outgoing.id}})).encryptedBody);expect(body).toContain('purpose - *Home*');expect(body).toContain(token);expect(await db.message.count()).toBe(1);
     await saveFeedback(access.assignmentId,{status:'Interested',remarks:'Please arrange a site visit',version:access.assignment.lead.version},undefined,access.id);
     const write=vi.fn(async()=>{});await writebackLead(lead.id,{read:vi.fn(),write});
     expect(write).toHaveBeenCalledWith(expect.objectContaining({id:'sheet'}),lead.stableSourceId,null,{sentStatus:'',sharedTo:'',status:'Interested',feedback:'Please arrange a site visit'});

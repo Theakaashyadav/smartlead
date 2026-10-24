@@ -144,7 +144,7 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
       const feedbackLink=assignment.isPrimary?`${simple?await feedbackBaseURL(tx,true):appUrl()}/feedback/${raw}`:'The accountable lead owner will submit feedback.';
       if(assignment.isPrimary)await tx.feedbackToken.create({data:{assignmentId:assignment.id,tokenHash:hash(raw),expiresAt:new Date(Date.now()+30*86400000)}});
       if(rule.senderId) {
-        const body=simple?simpleLeadMessage(lead,lead.sheet.name,feedbackLink):templateBody(rule.template||DEFAULT_TEMPLATE,{customer_name:lead.customerName,mobile_number:lead.mobile,project_name:lead.project,location:lead.location||'',budget:lead.budget||'',lead_source:lead.source||'',assigned_employee:rule.recipients.find(r=>r.employeeId===chosen.owner)!.employee.name,lead_date:lead.leadDate.toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}),feedback_link:feedbackLink});
+        const body=simple?simpleLeadMessage(lead,lead.sheet.project,feedbackLink):templateBody(rule.template||DEFAULT_TEMPLATE,{customer_name:lead.customerName,mobile_number:lead.mobile,project_name:lead.project,location:lead.location||'',budget:lead.budget||'',lead_source:lead.source||'',assigned_employee:rule.recipients.find(r=>r.employeeId===chosen.owner)!.employee.name,lead_date:lead.leadDate.toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}),feedback_link:feedbackLink});
         const message=await tx.message.create({data:{idempotencyKey:`assignment:${assignment.id}`,leadId,assignmentId:assignment.id,senderId:rule.senderId,recipient:employee.phone,encryptedBody:encrypt(body)}});
         await enqueue(tx,'SEND',message.id,`send:${message.id}`);
       }
@@ -169,13 +169,13 @@ export async function refreshSimpleQueuedMessages(sheetId:string,messageId?:stri
     if(!saved||saved.assignmentId!==current.assignmentId||saved.revokedAt||saved.expiresAt<new Date()){
       token=signedFeedbackToken();await tx.feedbackToken.create({data:{assignmentId:current.assignmentId,tokenHash:hash(token),expiresAt:new Date(Date.now()+30*86400000)}});
     }
-    const body=simpleLeadMessage(current.lead,current.lead.sheet.name,`${await feedbackBaseURL(tx,requireOnline)}/feedback/${token}`);
+    const body=simpleLeadMessage(current.lead,current.lead.sheet.project,`${await feedbackBaseURL(tx,requireOnline)}/feedback/${token}`);
     if(body!==decrypt(current.encryptedBody))await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(body)}});
   });
 }
 export async function getFeedbackAccess(token:string) {
   if(token.length<30||token.length>100||!verifyFeedbackSignature(token))throw new AppError(404,'Feedback link not found');
-  const record=await db.feedbackToken.findUnique({where:{tokenHash:hash(token)},include:{assignment:{include:{employee:true,lead:{include:{sheet:{select:{name:true,id:true,connectionType:true,worksheetName:true,organizationId:true}}}}}}}});
+  const record=await db.feedbackToken.findUnique({where:{tokenHash:hash(token)},include:{assignment:{include:{employee:true,lead:{include:{sheet:{select:{name:true,project:true,id:true,connectionType:true,worksheetName:true,organizationId:true}}}}}}}});
   if(!record||record.revokedAt||record.expiresAt<new Date()||!record.assignment.active||!record.assignment.isPrimary)throw new AppError(410,'This feedback link has expired or been revoked. Ask your manager for a new link.');
   return record;
 }

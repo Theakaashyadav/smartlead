@@ -4,7 +4,7 @@ import { AppError, audit, encrypt, opaqueToken, safeUser } from './security';
 import { enqueue, transaction, updateLeadSheetNow } from './engine';
 import { inspectSpreadsheet, verifyGoogleSheetEditor } from './google';
 import { attachAuthorizedSheet, googleOAuthConfiguration, startGoogleAuthorization } from './google-oauth';
-import { phoneSchema } from './validation';
+import { phoneSchema, projectNameSchema } from './validation';
 import { SIMPLE_OUTPUT_COLUMNS, SIMPLE_TEMPLATE, spreadsheetIdentity } from './simple-shared';
 import type { User } from '@/generated/mongo';
 import { backgroundWhatsApp, nativeWhatsAppLogin } from './whatsapp-native';
@@ -38,7 +38,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       const total=(statuses:string[])=>counts.filter(c=>statuses.includes(c.status)).reduce((sum,c)=>sum+c._count,0);
       const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
       const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
-      return {id:s.id,name:s.name,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
+      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
@@ -101,18 +101,18 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   }
   if(route==='sheets'&&method==='POST'){
     const body=await input();
-    if(body.scriptSetupId){const data=z.object({scriptSetupId:z.string(),spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),columnMapping:z.record(z.string(),z.string())}).parse(body);return connectAppsScriptSheet(user,data);}
-    const data=z.object({spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),credentialId:z.string().min(1,'Connect this sheet with Apps Script first.'),columnMapping:z.record(z.string(),z.string())}).parse(body);
+    if(body.scriptSetupId){const data=z.object({scriptSetupId:z.string(),spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),columnMapping:z.record(z.string(),z.string()),project:projectNameSchema.optional()}).parse(body);return connectAppsScriptSheet(user,data);}
+    const data=z.object({spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),credentialId:z.string().min(1,'Connect this sheet with Apps Script first.'),columnMapping:z.record(z.string(),z.string()),project:projectNameSchema.optional()}).parse(body);
     const info=await inspectSpreadsheet(data.spreadsheetId,data.credentialId,organizationId);const tab=info.tabs.find((t:{id:number})=>t.id===data.worksheetId);
     if(!tab)throw new AppError(400,'Choose a sheet tab.');
     await verifyGoogleSheetEditor(data.spreadsheetId,data.credentialId,organizationId);
     const existing=await db.sheet.findFirst({where:{organizationId,...sheetWhere,spreadsheetId:data.spreadsheetId,worksheetId:data.worksheetId}});
-    if(existing){await attachAuthorizedSheet(user,existing.id,data.credentialId,tab.name);return {id:existing.id,reauthorized:true};}
+    if(existing){await attachAuthorizedSheet(user,existing.id,data.credentialId,tab.name);if(data.project)await db.sheet.update({where:{id:existing.id},data:{project:data.project}});return {id:existing.id,reauthorized:true};}
     const allowed=['customerName','mobile','project','email','location','budget','source','requirement','leadDate','leadId'];
     const mapping=Object.fromEntries(Object.entries(data.columnMapping).filter(([k,v])=>allowed.includes(k)&&v));
     if(!mapping.customerName||!mapping.mobile||Object.values(mapping).some(c=>!tab.headers.includes(c))||new Set(Object.values(mapping)).size!==Object.values(mapping).length)throw new AppError(400,'Choose different, valid columns for name and phone.');
     const account=await simpleSender(organizationId);
-    const sheet=await db.sheet.create({data:{organizationId,name:info.title,project:info.title,spreadsheetId:data.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_GOOGLE',credentialId:data.credentialId,columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:account?.id,template:SIMPLE_TEMPLATE}}}});
+    const sheet=await db.sheet.create({data:{organizationId,name:info.title,project:data.project||info.title,spreadsheetId:data.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_GOOGLE',credentialId:data.credentialId,columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:account?.id,template:SIMPLE_TEMPLATE}}}});
     await audit(user.id,'CONNECT_SHEET','sheet',sheet.id);return {id:sheet.id};
   }
   if(path[0]==='sheets'&&path[1]&&path.length===2&&method==='DELETE'){
@@ -145,6 +145,13 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       await tx.auditLog.create({data:{userId:user.id,action:'DELETE_SHEET',entityType:'sheet',entityId:sheet.id,metadata:{name:sheet.name,leads:leads.length}}});
       return {deleted:true};
     });
+  }
+  if(path[0]==='sheets'&&path[1]&&path[2]==='project'&&path.length===3&&method==='PUT'){
+    const sheet=await sheetById(path[1],organizationId);
+    const {project}=z.object({project:projectNameSchema}).parse(await input());
+    await db.sheet.update({where:{id:sheet.id},data:{project}});
+    await audit(user.id,'UPDATE_SHEET_PROJECT','sheet',sheet.id);
+    return {project};
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='writeback'&&path.length===3&&method==='POST'){
     const sheet=await sheetById(path[1],organizationId);

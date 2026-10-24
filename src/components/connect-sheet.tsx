@@ -6,9 +6,10 @@ import {detectColumns,spreadsheetIdentity} from '@/lib/simple-shared';
 
 type Setup={setupId:string;code:string;sheetUrl:string;endpoint?:string};
 type Inspection={spreadsheetId:string;title:string;gid?:number;scriptSetupId:string;canRead:boolean;canWrite:boolean;tabs:{id:number;name:string;headers:string[]}[]};
-export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{id:string;name:string}|null;onClose:()=>void;onConnected:(id:string,reauthorized?:boolean)=>Promise<void>}){
+export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{id:string;name:string;project?:string}|null;onClose:()=>void;onConnected:(id:string,reauthorized?:boolean)=>Promise<void>}){
   const [url,setUrl]=useState('');const [setup,setSetup]=useState<Setup|null>(null);const [endpoint,setEndpoint]=useState('');const [info,setInfo]=useState<Inspection|null>(null);
   const [tabId,setTabId]=useState(0);const [mapping,setMapping]=useState<Record<string,string>>({});const [busy,setBusy]=useState(!!initialSheet);const [error,setError]=useState('');const [copied,setCopied]=useState(false);
+  const [project,setProject]=useState(initialSheet?.project||initialSheet?.name||'');
   const message=(error:unknown)=>error instanceof Error?error.message:'Please try again.';
   useEffect(()=>{
     if(!initialSheet)return;let active=true;
@@ -18,13 +19,14 @@ export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{i
   async function prepare(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{spreadsheetIdentity(url);setSetup(await api<Setup>('simple/sheets/script','POST',{url}));}catch(error){setError(message(error));}finally{setBusy(false);}}
   async function copy(){try{await navigator.clipboard.writeText(setup!.code);setCopied(true);}catch{setError('Select the code below and copy it manually.');}}
   async function check(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{const result=await api<Inspection>('simple/sheets/script/check','POST',{setupId:setup!.setupId,endpoint});const selected=result.tabs.find(t=>t.id===result.gid)||result.tabs[0];setInfo(result);setTabId(selected.id);setMapping(detectColumns(selected.headers));}catch(error){setError(message(error));}finally{setBusy(false);}}
-  async function connect(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{const result=await api<{id:string;reauthorized?:boolean}>('simple/sheets','POST',{scriptSetupId:info!.scriptSetupId,spreadsheetId:info!.spreadsheetId,worksheetId:tabId,columnMapping:mapping});await onConnected(result.id,result.reauthorized);}catch(error){setError(message(error));}finally{setBusy(false);}}
+  async function connect(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{const result=await api<{id:string;reauthorized?:boolean}>('simple/sheets','POST',{scriptSetupId:info!.scriptSetupId,spreadsheetId:info!.spreadsheetId,worksheetId:tabId,columnMapping:mapping,project:project.trim()});await onConnected(result.id,result.reauthorized);}catch(error){setError(message(error));}finally{setBusy(false);}}
   const tab=info?.tabs.find(t=>t.id===tabId);
   return <Modal title={initialSheet?'Connect Apps Script':'Connect Google Sheet'} description={initialSheet?initialSheet.name:'Paste the link, install the script, then check the connection.'} onClose={onClose}>
     {error&&<div role="alert" className="alert error">{error}</div>}
     {!setup?<form className="simple-form" onSubmit={prepare}>
       <p className="simple-share-note">Connect your sheet using Apps Script. Your sheet can stay private.</p>
       <Field label="Google Sheets link"><input type="url" required value={url} placeholder="https://docs.google.com/spreadsheets/d/…" onChange={e=>setUrl(e.target.value)} autoFocus/></Field>
+      <Field label="Project name"><input aria-label="Project name" required maxLength={120} value={project} onChange={e=>setProject(e.target.value)} placeholder="e.g. Godrej Evergreen"/><small>This name appears in the WhatsApp lead message.</small></Field>
       <Button type="submit" variant="primary" busy={busy}>Continue<ArrowRight size={16}/></Button>
     </form>:!info?<form className="simple-form" onSubmit={check}>
       <ol className="simple-script-steps">
@@ -41,6 +43,7 @@ export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{i
     </form>:<form className="simple-form" onSubmit={connect}>
       <div className="simple-found-sheet"><FileSpreadsheet size={22}/><strong>{info.title}</strong><button type="button" onClick={()=>setInfo(null)}>Check again</button></div>
       <p role="status" className="simple-share-note">Connection checked: read and write access confirmed.</p>
+      <Field label="Project name"><input aria-label="Project name" required maxLength={120} value={project} onChange={e=>setProject(e.target.value)} placeholder="e.g. Godrej Evergreen"/></Field>
       {info.tabs.length>1&&<Field label="Sheet tab"><Select value={tabId} disabled={!!initialSheet} onChange={e=>{const id=Number(e.target.value);setTabId(id);setMapping(detectColumns(info.tabs.find(t=>t.id===id)!.headers));}}>{info.tabs.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</Select></Field>}
       {!initialSheet&&<div className="simple-column-fields">{[['customerName','Customer name column'],['mobile','Phone number column']].map(([key,label])=><Field key={key} label={label}><Select required value={mapping[key]||''} onChange={e=>setMapping(m=>({...m,[key]:e.target.value}))}><option value="">Choose column</option>{tab?.headers.filter(Boolean).map((h,i)=><option key={`${h}-${i}`} value={h}>{h}</option>)}</Select></Field>)}</div>}
       <p className="simple-share-note">{initialSheet?'Existing leads, recipients and sending history will be kept.':'Existing leads will start sending when you choose recipients.'}</p>

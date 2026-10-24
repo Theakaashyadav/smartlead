@@ -82,13 +82,13 @@ test('a pasted sheet link offers Apps Script code and checks access before conne
   await page.route('**/api/simple/sheets/script',route=>{prepared=route.request().postDataJSON();return route.fulfill({json:{data:{setupId:'test-setup',sheetUrl:url,code:'function doPost(e) { return ContentService.createTextOutput("test"); }'}}});});
   await page.route('**/api/simple/sheets/script/check',route=>{checked=route.request().postDataJSON();return route.fulfill({json:{data:{scriptSetupId:'test-setup',spreadsheetId:'script-test-spreadsheet-123456789',title:'Private leads',gid:42,canRead:true,canWrite:true,tabs:[{id:0,name:'Other',headers:['Full Name','Phone Number']},{id:42,name:'Incoming',headers:['Name','Phone']}]}}});});
   await page.route('**/api/simple/sheets',route=>{saved=route.request().postDataJSON();state.sheets=[sheet];return route.fulfill({json:{data:{id:sheet.id}}});});
-  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect sheet',exact:true}).first().click();await page.getByLabel('Google Sheets link').fill(url);await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect sheet',exact:true}).first().click();await page.getByLabel('Google Sheets link').fill(url);await page.getByLabel('Project name',{exact:true}).fill('Corbett Meadows');await page.getByRole('button',{name:'Continue',exact:true}).click();
   await expect(page.getByLabel('Apps Script code')).toContainText('function doPost');await expect(page.getByRole('button',{name:'Copy Apps Script code'})).toBeVisible();expect(checked).toBeUndefined();
   await expect(page.getByRole('dialog')).toContainText('Who has access: Anyone');await page.screenshot({path:'data/apps-script-setup-desktop.png',fullPage:true});
   const endpoint='https://script.google.com/macros/s/AKfycb_test_deployment_123456789/exec';await page.getByLabel('Apps Script web app URL').fill(endpoint);await page.getByRole('button',{name:'Check connection',exact:true}).click();
   await expect(page.getByRole('status')).toContainText('read and write access confirmed');await expect(page.getByLabel('Sheet tab')).toHaveValue('42');await expect(page.getByLabel('Customer name column')).toHaveValue('Name');await expect(page.getByLabel('Phone number column')).toHaveValue('Phone');
   await page.getByRole('dialog').getByRole('button',{name:'Connect sheet',exact:true}).click();await expect(page.getByRole('heading',{name:'Who should receive these leads?'})).toBeVisible();
-  expect(prepared).toEqual({url});expect(checked).toEqual({setupId:'test-setup',endpoint});expect(saved).toEqual({scriptSetupId:'test-setup',spreadsheetId:'script-test-spreadsheet-123456789',worksheetId:42,columnMapping:{customerName:'Name',mobile:'Phone'}});expect(popups).toBe(0);
+  expect(prepared).toEqual({url});expect(checked).toEqual({setupId:'test-setup',endpoint});expect(saved).toEqual({scriptSetupId:'test-setup',spreadsheetId:'script-test-spreadsheet-123456789',worksheetId:42,columnMapping:{customerName:'Name',mobile:'Phone'},project:'Corbett Meadows'});expect(popups).toBe(0);
 });
 
 test('Apps Script reconnect keeps the existing sheet and recipients',async({page})=>{
@@ -107,9 +107,21 @@ test('Apps Script deployment errors keep the code and retry form available on mo
   await page.setViewportSize({width:390,height:844});
   await page.route('**/api/simple/sheets/script',route=>route.fulfill({json:{data:{setupId:'test-setup',sheetUrl:'https://docs.google.com/spreadsheets/d/script-test-spreadsheet-123456789/edit',code:'function doPost(e) {}'}}}));
   await page.route('**/api/simple/sheets/script/check',route=>route.fulfill({status:400,json:{error:{message:'Deploy the script as a Web app, Execute as Me, with access set to Anyone.'}}}));
-  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect sheet',exact:true}).first().click();await page.getByLabel('Google Sheets link').fill('https://docs.google.com/spreadsheets/d/script-test-spreadsheet-123456789/edit');await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect sheet',exact:true}).first().click();await page.getByLabel('Google Sheets link').fill('https://docs.google.com/spreadsheets/d/script-test-spreadsheet-123456789/edit');await page.getByLabel('Project name',{exact:true}).fill('Corbett Meadows');await page.getByRole('button',{name:'Continue',exact:true}).click();
   await page.getByLabel('Apps Script web app URL').fill('https://script.google.com/macros/s/AKfycb_test_deployment_123456789/exec');await page.getByRole('button',{name:'Check connection',exact:true}).click();await expect(page.getByRole('dialog').getByRole('alert')).toContainText('access set to Anyone');await expect(page.getByRole('button',{name:'Check connection',exact:true})).toBeEnabled();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await page.screenshot({path:'data/apps-script-setup-mobile.png',fullPage:true});
+});
+test('an existing sheet project can be changed without reconnecting its script',async({page})=>{
+  const sheet={id:'project-sheet',name:'Meta sheet title',project:'Old project',worksheetName:'Incoming',appsScriptConnected:true,enabled:false,leadCount:9,recipients:[],lastSyncError:null};
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:null,sheets:[sheet]};
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));let saved:any;let scriptOpened=false;
+  await page.route('**/api/simple/sheets/script',route=>{scriptOpened=true;return route.abort();});
+  await page.route('**/api/simple/sheets/project-sheet/project',route=>{saved=route.request().postDataJSON();sheet.project=saved.project;return route.fulfill({json:{data:{project:sheet.project}}});});
+  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Edit project',exact:true}).click();
+  await expect(page.getByLabel('Project name',{exact:true})).toHaveValue('Old project');await page.getByLabel('Project name',{exact:true}).fill('Corbett Meadows');
+  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await page.screenshot({path:'data/project-name-mobile.png',fullPage:true});
+  await page.getByRole('button',{name:'Save project name',exact:true}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('article')).toContainText('Project: Corbett Meadows');await expect(page.getByRole('heading',{name:'Meta sheet title',exact:true})).toBeVisible();expect(saved).toEqual({project:'Corbett Meadows'});expect(scriptOpened).toBe(false);
 });
 
 test('offline WhatsApp connections show an error and keep the retry button usable',async({page})=>{

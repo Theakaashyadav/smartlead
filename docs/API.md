@@ -11,7 +11,8 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | POST | /api/simple/sheets/script | Administrator; {url} or {sheetId}; generate a private per-sheet Apps Script and expiring setup ID |
 | POST | /api/simple/sheets/script/check | Administrator; {setupId,endpoint}; validate deployment, sheet identity and read/write access |
 | POST | /api/simple/sheets/inspect | Administrator; `{url,credentialId}`; Google Sheets API inspection and Editor permission check |
-| POST | /api/simple/sheets | Administrator; {scriptSetupId,spreadsheetId,worksheetId,columnMapping}; consume a checked setup and create or upgrade the existing connection. Legacy credentialId input remains supported. |
+| POST | /api/simple/sheets | Administrator; {scriptSetupId,spreadsheetId,worksheetId,columnMapping,project}; consume a checked setup and create or upgrade the existing connection. The UI requires the project name; older API callers may omit it to retain the existing project or default to the sheet title. Legacy credentialId input remains supported. |
+| PUT | /api/simple/sheets/:id/project | Administrator; {project}; set the project name for this organisation's sheet and future/queued messages, without editing the Google Sheet or resending delivered messages |
 | PUT | /api/simple/sheets/:id/recipients | Administrator; ordered `{recipients:[{name,phone}]}`; starts round-robin sending |
 | POST | /api/simple/sheets/:id/writeback | Administrator; retry saved output updates for this organisation's sheet; immediately attempt the first waiting lead; never sends WhatsApp messages or resumes distribution |
 | POST | /api/auth/login | `{email,password,code?}`; optional authenticator code |

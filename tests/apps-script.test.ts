@@ -47,11 +47,15 @@ async function fixture(){
     expect(input).toBe(endpoint);const body=JSON.parse(String(init?.body));calls.push({url:input,body});
     context.INPUT=JSON.stringify(body);const reply=runInContext('doPost({postData:{contents:INPUT}})',context);return new Response(reply.text,{headers:{'content-type':'application/json'}});
   }));
-  const connect=async()=>{await checkAppsScriptSetup(user,setup.setupId,endpoint);const result=await connectAppsScriptSheet(user,{scriptSetupId:setup.setupId,spreadsheetId,worksheetId:42,columnMapping:mapping});return db.sheet.findUniqueOrThrow({where:{id:result.id}});};
+  const connect=async(project?:string)=>{await checkAppsScriptSetup(user,setup.setupId,endpoint);const result=await connectAppsScriptSheet(user,{scriptSetupId:setup.setupId,spreadsheetId,worksheetId:42,columnMapping:mapping,project});return db.sheet.findUniqueOrThrow({where:{id:result.id}});};
   return {user,setup,rows,tags,writes,calls,context,connect,controls};
 }
 
 describe('Apps Script connection',()=>{
+  it('stores the entered project separately from the sheet title and original source values',async()=>{
+    const f=await fixture();const source=f.rows.map(row=>row.slice(0,5));const sheet=await f.connect('Corbett Meadows');
+    expect(sheet.project).toBe('Corbett Meadows');expect(sheet.name).toBe('Private script leads');expect(f.rows.map(row=>row.slice(0,5))).toEqual(source);
+  });
   it('generates private per-sheet code and verifies read/write access before creating a connection',async()=>{
     const f=await fixture();expect(f.setup.code).toContain(spreadsheetId);expect(await db.sheet.count()).toBe(0);
     const checked=await checkAppsScriptSetup(f.user,f.setup.setupId,endpoint);expect(checked).toMatchObject({spreadsheetId,canRead:true,canWrite:true,gid:42});expect(f.tags).toEqual([]);

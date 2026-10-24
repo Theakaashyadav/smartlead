@@ -9,6 +9,7 @@ import {appsScriptCode} from './apps-script-code';
 import {enqueue,transaction} from './engine';
 import {SUCCESSFUL_SEND_STATUSES} from './delivery';
 import {SIMPLE_POLL_SECONDS} from './automation-policy';
+import {projectNameSchema} from './validation';
 
 const protocol='smartlead-apps-script-v1';
 const settingsSchema=z.object({token:z.string().min(32),spreadsheetId:z.string().regex(/^[\w-]+$/),gid:z.number().optional(),sheetId:z.string().optional(),endpoint:z.string().optional(),identityStyle:z.enum(['PUBLIC','RAW_ID']).optional()});
@@ -91,7 +92,8 @@ export async function checkAppsScriptSetup(user:User,id:string,endpoint:string){
   if(!updated.count)throw new AppError(409,'This setup changed. Check the connection again.');
   return {...info,scriptSetupId:id};
 }
-export async function connectAppsScriptSheet(user:User,input:{scriptSetupId:string;spreadsheetId:string;worksheetId:number;columnMapping:Record<string,string>}){
+export async function connectAppsScriptSheet(user:User,input:{scriptSetupId:string;spreadsheetId:string;worksheetId:number;columnMapping:Record<string,string>;project?:string}){
+  const project=input.project===undefined?undefined:projectNameSchema.parse(input.project);
   const {record,settings}=await pendingSetup(user,input.scriptSetupId);
   if(!settings.endpoint||input.spreadsheetId!==settings.spreadsheetId)throw new AppError(400,'Check the Apps Script connection for this sheet first.');
   if(settings.sheetId&&settings.gid!==input.worksheetId)throw new AppError(409,'Select the original tab to reconnect this sheet.');
@@ -117,12 +119,12 @@ export async function connectAppsScriptSheet(user:User,input:{scriptSetupId:stri
     if(!claimed.count)throw new AppError(409,'This script setup was already used. Reopen the sheet connection.');
     const credential=await tx.googleCredential.create({data:{organizationId:user.organizationId,label:`Apps Script · ${info.title}`,type:'APPS_SCRIPT',encryptedValue:encrypt(JSON.stringify({...settings,identityStyle}))}});
     if(existing){
-      await tx.sheet.update({where:{id:existing.id},data:{connectionType:'SIMPLE_APPS_SCRIPT',credentialId:credential.id,worksheetName:tab.name,lastSyncError:null}});
+      await tx.sheet.update({where:{id:existing.id},data:{connectionType:'SIMPLE_APPS_SCRIPT',credentialId:credential.id,worksheetName:tab.name,lastSyncError:null,...(project?{project}:{})}});
       const leads=await tx.lead.findMany({where:{sheetId:existing.id,sourceDeleted:false,OR:[{feedback:{some:{}}},{messages:{some:{status:{in:SUCCESSFUL_SEND_STATUSES},uncertain:false}}}]},select:{id:true,redactedAt:true}});
       for(const lead of leads){if(lead.redactedAt)continue;await tx.lead.update({where:{id:lead.id},data:{writebackStatus:'PENDING',version:{increment:1}}});await enqueue(tx,'WRITEBACK',lead.id,`writeback:apps-script:${credential.id}:${lead.id}`);}
       return {id:existing.id,reauthorized:true};
     }
-    const sheet=await tx.sheet.create({data:{organizationId:user.organizationId,name:info.title,project:info.title,spreadsheetId:settings.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_APPS_SCRIPT',credentialId:credential.id,columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:sender?.id,template:SIMPLE_TEMPLATE}}}});
+    const sheet=await tx.sheet.create({data:{organizationId:user.organizationId,name:info.title,project:project||info.title,spreadsheetId:settings.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_APPS_SCRIPT',credentialId:credential.id,columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:sender?.id,template:SIMPLE_TEMPLATE}}}});
     return {id:sheet.id,reauthorized:false};
   });
   await audit(user.id,'CONNECT_APPS_SCRIPT','sheet',result.id);return result;

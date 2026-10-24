@@ -56,7 +56,7 @@ describe('feedback links that recipients can open',()=>{
   it('places the complete URL on its own line below Submit Feedback, keeping token punctuation intact',()=>{
     const url=`https://feedback.example/feedback/${'a'.repeat(43)}.${'b'.repeat(43)}`;
     const body=simpleLeadMessage({customerName:'Sample lead',mobile:'+919876543210'},'Enquiries',url);
-    expect(body).toContain(`*Submit Feedback*\n${url}\n\n`);
+    expect(body).toContain(`*Submit Feedback*\n${url}\nThank you!`);
     expect(body).not.toContain('[Submit Feedback](');
     expect(body.match(/https?:\/\/\S+/)?.[0]).toBe(url);
   });
