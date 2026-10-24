@@ -265,7 +265,8 @@ export class AuthorizedSheetsProvider implements SheetProvider {
     const headers=await googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(`${tabRange(sheet)}!1:1`)}`,token);
     const cells=(verified.valueRanges?.[0]?.valueRange?.values?.[0]||[]).map(String);
     const layout:string[]=headers.values?.[0]||[];
-    if(verified.valueRanges?.length!==1||simpleSourceRows(sheet,[layout,cells])[0]?.stableId!==stableId||!outputColumns([layout],Object.keys(values)).every(c=>(cells[c.index]||'')===values[c.field]))throw new AppError(502,'Google has not confirmed the saved lead fields. The sheet update will retry.');
+    const columns=outputColumns([layout],Object.keys(values));
+    if(verified.valueRanges?.length!==1||simpleSourceRows(sheet,[layout,cells])[0]?.stableId!==stableId||!columns.every(c=>!c.missing&&(cells[c.index]||'')===values[c.field]))throw new AppError(502,'Google has not confirmed the saved lead fields. The sheet update will retry.');
     return observed;
   }
 }

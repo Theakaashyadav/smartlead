@@ -91,6 +91,14 @@ describe('authorized Google Sheets',()=>{
     f.setReadOnly();await expect(verifyGoogleSheetEditor(f.sheet.spreadsheetId,f.credential.id,'legacy')).rejects.toMatchObject({code:'SHEET_READ_ONLY',status:403});
     expect(f.rows[0]).toHaveLength(5);
   });
+  it('keeps the update pending if the output columns disappear before verification',async()=>{
+    const f=await fixture();const request=globalThis.fetch;let written=false;
+    vi.stubGlobal('fetch',vi.fn(async(input:string,init?:RequestInit)=>{
+      if(written&&input.includes('1%3A1'))return Response.json({values:[f.rows[0].slice(0,5)]});
+      const response=await request(input,init);if(input.includes('/values:batchUpdateByDataFilter'))written=true;return response;
+    }));
+    await expect(new AuthorizedSheetsProvider().write(f.sheet,f.lead.stableSourceId,null,{sentStatus:'Sent',sharedTo:'Recipient'})).rejects.toThrow(/not confirmed/);
+  });
   it('preserves external feedback edits instead of overwriting them through the API',async()=>{
     const f=await fixture();f.rows[0].push('Sent Status','Shared To','Feedback','Remark');f.rows[2].push('','','Converted','External remark');
     await expect(new AuthorizedSheetsProvider().write(f.sheet,f.lead.stableSourceId,null,{status:'Interested',feedback:'Application remark'})).rejects.toMatchObject({code:'SYNC_CONFLICT'});
