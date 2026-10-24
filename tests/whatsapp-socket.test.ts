@@ -8,7 +8,8 @@ import { db } from '@/lib/db';
 import { SocketWhatsAppProvider, closeSocketWhatsApp } from '@/lib/whatsapp-socket';
 import { socketAuthState } from '@/lib/whatsapp-socket-auth';
 import { UncertainDelivery, whatsappProvider } from '@/lib/whatsapp';
-import { assignLead, dispatchMessage, synchronizeSheet } from '@/lib/engine';
+import { assignLead, dispatchMessage, synchronizeSheet, writebackLead } from '@/lib/engine';
+import { dispatchLeadSentNotification } from '@/lib/lead-sent-notifications';
 import { decrypt } from '@/lib/security';
 import { SIMPLE_TEMPLATE } from '@/lib/simple-shared';
 import { PublicSheetsProvider } from '@/lib/public-sheets';
@@ -155,6 +156,27 @@ describe('WhatsApp QR login without Chromium',()=>{
     await synchronizeSheet(data.sheet.id);
     for(const message of data.messages)await dispatchMessage(message.id);
     expect(await db.lead.count({where:{sheetId:data.sheet.id}})).toBe(2);expect(f.socket.sendMessage).toHaveBeenCalledTimes(2);
+  });
+  it('sends administrator notifications with a separate receipt after sheet writeback',async()=>{
+    const f=await linked();const data=await source(f.sender.id);const notificationPhone='+919876543218';
+    await db.distributionRule.update({where:{sheetId:data.sheet.id},data:{notificationPhone}});
+    for(const pending of data.messages){
+      await dispatchMessage(pending.id);
+      const sent=await db.message.findUniqueOrThrow({where:{id:pending.id}});
+      expect(sent.status).toBe('SUBMITTED');
+      await writebackLead(sent.leadId,{read:vi.fn(),write:vi.fn(async()=>{})});
+      await dispatchLeadSentNotification(sent.id);
+      const notified=await db.message.findUniqueOrThrow({where:{id:sent.id}});
+      expect(notified).toMatchObject({status:'SUBMITTED',providerMessageId:sent.providerMessageId,notificationStatus:'SUBMITTED',notificationPhone});
+      expect(notified.notificationProviderMessageId).toBeTruthy();
+      expect(notified.notificationProviderMessageId).not.toBe(sent.providerMessageId);
+    }
+    const notifications=f.socket.sendMessage.mock.calls.filter((call:any[])=>call[0]===notificationPhone.slice(1)+'@s.whatsapp.net');
+    expect(notifications.map((call:any[])=>call[1].text)).toEqual(['New Lead Sent to (Employee 1)','New Lead Sent to (Employee 2)']);
+    expect(f.socket.sendMessage).toHaveBeenCalledTimes(4);
+    for(const pending of data.messages)await dispatchLeadSentNotification(pending.id);
+    expect(f.socket.sendMessage).toHaveBeenCalledTimes(4);
+    expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(2);
   });
   it('holds uncertain sends and reconciles only an exact reserved message ID, recipient and body',async()=>{
     const f=await linked();const data=await source(f.sender.id);const message=data.messages[0];

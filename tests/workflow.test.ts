@@ -300,6 +300,27 @@ describe('durable end-to-end workflow',()=>{
     await assignLead(lead.id);const replacement=await db.message.findFirstOrThrow({where:{leadId:lead.id,status:'QUEUED'}});expect(replacement.recipient).toBe(selected[1].phone);
     expect(await db.assignment.count({where:{leadId:lead.id,active:true,isPrimary:true}})).toBe(1);
   });
+  it('saves a separate administrator notification number without changing recipient rotation',async()=>{
+    const {admin}=await fixture();
+    await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
+    await db.sender.create({data:{organizationId:'legacy',id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
+    const recipients=[{name:'Lead recipient',phone:'+919876543210',leadCount:2}];
+    const select=(notificationPhone?:string|null)=>simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients,notificationPhone})}),admin);
+    await select('9876543218');
+    expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({notificationPhone:'+919876543218'});
+    await synchronizeSheet('sheet',new DemoSheetsProvider());const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);
+    const pending=await db.message.findFirstOrThrow({where:{leadId:lead.id,status:'QUEUED'}});
+    const before=await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}});
+    await select('+919876543217');
+    expect(await db.message.findUniqueOrThrow({where:{id:pending.id}})).toMatchObject({status:'QUEUED',recipient:recipients[0].phone});
+    expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({cursor:before.cursor,notificationPhone:'+919876543217'});
+    await select();expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({notificationPhone:'+919876543217'});
+    const state=await simpleAction(['state'],'GET',new Request('http://localhost:3000'),admin) as any;
+    expect(state.sheets[0]).toMatchObject({notificationPhone:'+919876543217',recipients:[{name:'Lead recipient',phone:recipients[0].phone,leadCount:2}]});
+    await expect(select('invalid')).rejects.toThrow();
+    await expect(select(recipients[0].phone)).rejects.toThrow('separately from the lead recipients');
+    await select('');expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({notificationPhone:null});
+  });
   it('rebalances unsent leads when recipients change and preserves rotation on an unchanged save',async()=>{
     const {admin,sender,rows}=await fixture();
     rows.push({stableId:'source-4',row:6,values:{customerName:'Fifth customer',mobile:'+919800000004'}});

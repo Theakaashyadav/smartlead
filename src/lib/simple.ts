@@ -4,7 +4,7 @@ import { AppError, audit, encrypt, opaqueToken, safeUser } from './security';
 import { enqueue, transaction, updateLeadSheetNow } from './engine';
 import { inspectSpreadsheet, verifyGoogleSheetEditor } from './google';
 import { attachAuthorizedSheet, googleOAuthConfiguration, startGoogleAuthorization } from './google-oauth';
-import { phoneSchema, projectNameSchema } from './validation';
+import { phoneSchema, projectNameSchema, notificationPhoneSchema } from './validation';
 import { SIMPLE_OUTPUT_COLUMNS, SIMPLE_TEMPLATE, spreadsheetIdentity } from './simple-shared';
 import type { User } from '@/generated/mongo';
 import { backgroundWhatsApp, nativeWhatsAppLogin } from './whatsapp-native';
@@ -29,16 +29,17 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   if(route==='state'&&method==='GET'){
     const [account,sheets,worker,organization]=await Promise.all([simpleSender(organizationId),db.sheet.findMany({where:{...sheetWhere,organizationId},orderBy:{createdAt:'asc'},include:{rule:{include:{recipients:{orderBy:{position:'asc'},include:{employee:{select:{name:true,phone:true}}}}}},_count:{select:{leads:true}}}}),db.setting.findUnique({where:{key:'simple:worker'}}),db.organization.findUniqueOrThrow({where:{id:organizationId},select:{id:true,name:true}})]);
     const summaries=await Promise.all(sheets.map(async s=>{
-      const [counts,failure,writebacks,writebackError]=await Promise.all([
+      const [counts,failure,writebacks,writebackError,notificationFailure]=await Promise.all([
         db.message.groupBy({by:['status'],where:{lead:{sheetId:s.id}},_count:true}),
         db.message.findFirst({where:{lead:{sheetId:s.id},status:'FAILED'},orderBy:{failedAt:'desc'},select:{failureReason:true}}),
         db.lead.groupBy({by:['writebackStatus'],where:{sheetId:s.id,sourceDeleted:false},_count:true}),
         db.syncLog.findFirst({where:{sheetId:s.id,operation:'WRITEBACK',status:'ERROR'},orderBy:{createdAt:'desc'},select:{details:true}}),
+        db.message.findFirst({where:{lead:{sheetId:s.id},notificationStatus:{in:['QUEUED','FAILED']},notificationFailureReason:{not:null}},orderBy:{notificationLastAttemptAt:'desc'},select:{notificationFailureReason:true}}),
       ]);
       const total=(statuses:string[])=>counts.filter(c=>statuses.includes(c.status)).reduce((sum,c)=>sum+c._count,0);
       const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
       const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
-      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
+      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,notificationPhone:s.rule?.notificationPhone||null,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},sentNotificationError:notificationFailure?.notificationFailureReason||null,writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
@@ -121,9 +122,9 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       if(!sheet)throw new AppError(404,'Sheet not found');
       const leads=await tx.lead.findMany({where:{sheetId:sheet.id},select:{id:true}});
       const leadIds=leads.map(lead=>lead.id);
-      const messages=await tx.message.findMany({where:{leadId:{in:leadIds}},select:{id:true,status:true}});
-      const jobs={organizationId,OR:[{type:'SYNC',entityId:sheet.id},{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:leadIds}},{type:'SEND',entityId:{in:messages.map(m=>m.id)}}]};
-      if(messages.some(m=>m.status==='PROCESSING')||await tx.job.findFirst({where:{...jobs,status:'PROCESSING'},select:{id:true}})){
+      const messages=await tx.message.findMany({where:{leadId:{in:leadIds}},select:{id:true,status:true,notificationStatus:true}});
+      const jobs={organizationId,OR:[{type:'SYNC',entityId:sheet.id},{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:leadIds}},{type:{in:['SEND','NOTIFY']},entityId:{in:messages.map(m=>m.id)}}]};
+      if(messages.some(m=>m.status==='PROCESSING'||m.notificationStatus==='PROCESSING')||await tx.job.findFirst({where:{...jobs,status:'PROCESSING'},select:{id:true}})){
         throw new AppError(409,'This sheet is being updated or sending a message. Pause it, wait a moment, then try deleting again.');
       }
       // Remove queued work and dependent records together, keeping shared
@@ -167,14 +168,16 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='recipients'&&method==='PUT'){
     const sheet=await sheetById(path[1],organizationId);
-    const {recipients}=z.object({recipients:z.array(recipientSchema).min(1,'Select at least one person.').max(100)}).parse(await input());
+    const {recipients,notificationPhone}=z.object({recipients:z.array(recipientSchema).min(1,'Select at least one person.').max(100),notificationPhone:notificationPhoneSchema}).parse(await input());
     if(new Set(recipients.map(r=>r.phone)).size!==recipients.length)throw new AppError(400,'Select each phone number only once.');
+    const effectiveNotificationPhone=notificationPhone===undefined?sheet.rule?.notificationPhone:notificationPhone;
+    if(effectiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveNotificationPhone))throw new AppError(400,'Enter your notification number separately from the lead recipients.');
     const account=await simpleSender(organizationId);if(account?.status!=='CONNECTED')throw new AppError(409,'Connect WhatsApp before starting.');
     await transaction(async tx=>{
       const previous=await tx.ruleRecipient.findMany({where:{ruleId:sheet.rule!.id},orderBy:{position:'asc'},include:{employee:{select:{phone:true}}}});
       const changed=previous.length!==recipients.length||previous.some((r,i)=>r.employee.phone!==recipients[i].phone||(sheet.rule?.mode==='BATCH'?Math.max(1,r.weight):1)!==recipients[i].leadCount);
       const employees=[];
-      for(const {leadCount:_,...person} of recipients)employees.push(await tx.employee.upsert({where:{organizationId_phone:{organizationId,phone:person.phone}},create:{...person,organizationId,projects:[],dailyLimit:1000,capacity:10000},update:{active:true,name:person.name}}));
+      for(const {name,phone} of recipients)employees.push(await tx.employee.upsert({where:{organizationId_phone:{organizationId,phone}},create:{name,phone,organizationId,projects:[],dailyLimit:1000,capacity:10000},update:{active:true,name}}));
       if(changed){
         // Rebuild only leads that have never reached the provider. Otherwise a
         // batch assigned before adding people would keep going to the old list.
@@ -185,7 +188,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
         }
       }
       await tx.ruleRecipient.deleteMany({where:{ruleId:sheet.rule!.id}});
-      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'BATCH',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(changed?{cursor:0}:{}),recipients:{create:employees.map((e,position)=>({employeeId:e.id,position,weight:recipients[position].leadCount}))}}});
+      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'BATCH',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(notificationPhone!==undefined?{notificationPhone:notificationPhone||null}:{}),...(changed?{cursor:0}:{}),recipients:{create:employees.map((e,position)=>({employeeId:e.id,position,weight:recipients[position].leadCount}))}}});
       const unassigned=await tx.lead.findMany({where:{sheetId:sheet.id,sourceDeleted:false,assignments:{none:{active:true}}},select:{id:true},orderBy:{sourceRow:'asc'}});
       for(const lead of unassigned)await enqueue(tx,'ASSIGN',lead.id,`simple:assign:${lead.id}:${opaqueToken()}`);
       await enqueue(tx,'SYNC',sheet.id,`simple:sync:${sheet.id}:${opaqueToken()}`);

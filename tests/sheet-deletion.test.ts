@@ -26,7 +26,7 @@ async function fixture(){
   await db.feedback.create({data:{leadId:lead.id,assignmentId:assignment.id,employeeId:employee.id,status:'New',remarks:'Feedback'}});
   await db.followup.create({data:{leadId:lead.id,employeeId:employee.id,scheduledAt:new Date()}});
   const message=await db.message.create({data:{leadId:lead.id,assignmentId:assignment.id,senderId:sender.id,idempotencyKey:'delete-message',recipient:employee.phone,encryptedBody:'unused'}});
-  for(const [type,entityId]of [['SYNC',sheet.id],['ASSIGN',lead.id],['WRITEBACK',lead.id],['SEND',message.id],['SYNC',keep.id],['CONNECT',sender.id]]){
+  for(const [type,entityId]of [['SYNC',sheet.id],['ASSIGN',lead.id],['WRITEBACK',lead.id],['SEND',message.id],['NOTIFY',message.id],['SYNC',keep.id],['CONNECT',sender.id]]){
     await db.job.create({data:{organizationId:owner.organizationId,key:`${type}:${entityId}`,type,entityId}});
   }
   await db.sheetAccess.create({data:{sheetId:sheet.id,userId:owner.id}});
@@ -66,7 +66,7 @@ describe('delete connected sheets',()=>{
   it('keeps the whole sheet when WhatsApp may be submitting a message',async()=>{
     const f=await fixture();await db.message.update({where:{id:f.message.id},data:{status:'PROCESSING'}});
     await expect(remove(f.owner,f.sheet.id)).rejects.toMatchObject({status:409});
-    expect(await db.sheet.count()).toBe(3);expect(await db.job.count()).toBe(6);expect(await db.assignment.count()).toBe(1);
+    expect(await db.sheet.count()).toBe(3);expect(await db.job.count()).toBe(7);expect(await db.assignment.count()).toBe(1);
   });
   it('deletes an empty connection and returns not found for a repeat or unknown ID',async()=>{
     const f=await fixture();expect(await remove(f.owner,f.keep.id)).toEqual({deleted:true});

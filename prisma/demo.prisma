@@ -153,6 +153,7 @@ model DistributionRule {
   template String
   metaTemplate String?
   metaLanguage String @default("en")
+  notificationPhone String?
   recipients RuleRecipient[]
 }
 
@@ -257,6 +258,15 @@ model Message {
   failedAt DateTime?
   lastAttemptAt DateTime?
   failureReason String?
+  notificationPhone String?
+  notificationName String?
+  notificationStatus String?
+  notificationProviderMessageId String?
+  notificationAttemptCount Int @default(0)
+  notificationLastAttemptAt DateTime?
+  notificationSubmittedAt DateTime?
+  notificationFailureReason String?
+  notificationUncertain Boolean @default(false)
   @@index([status,queuedAt])
 }
 

@@ -11,6 +11,7 @@ import { feedbackBaseURL } from './feedback-url';
 import { organizationSettingKey } from './organizations';
 import { sheetPollSeconds } from './automation-policy';
 import { deliveryValues, queueDeliveryWriteback, sheetAlreadySent, sheetSaysSent, SUCCESSFUL_SEND_STATUSES } from './delivery';
+import { dispatchLeadSentNotification, queueLeadSentNotifications } from './lead-sent-notifications';
 
 const sourceChecks = new Map<string, string>();
 let nextSendAt = 0;
@@ -20,7 +21,7 @@ export async function enqueue(tx:Prisma.TransactionClient, type:string, entityId
     ? await tx.sender.findUniqueOrThrow({where:{id:entityId},select:{organizationId:true}})
     : type==='SYNC'
       ? await tx.sheet.findUniqueOrThrow({where:{id:entityId},select:{organizationId:true}})
-      : type==='SEND'
+      : ['SEND','NOTIFY'].includes(type)
         ? (await tx.message.findUniqueOrThrow({where:{id:entityId},select:{lead:{select:{sheet:{select:{organizationId:true}}}}}})).lead.sheet
         : (await tx.lead.findUniqueOrThrow({where:{id:entityId},select:{sheet:{select:{organizationId:true}}}})).sheet;
   return tx.job.upsert({where:{key},create:{key,type,entityId,organizationId:entity.organizationId},update:{}});
@@ -238,7 +239,12 @@ export async function writebackLead(id:string, provider?:SheetProvider,options:{
   try {
     const observed=await (provider||sheetProvider(lead.sheet)).write(lead.sheet,lead.stableSourceId,lead.metadataId,values);
     const snapshot={...(lead.managedSnapshot as Record<string,string>||{}),...observed,...values,...(simple&&(observed||Object.hasOwn(values,'status'))?{__publicOutputV2:'1'}:{})};
-    const updated=await db.lead.updateMany({where:{id,version:lead.version},data:{writebackStatus:'SYNCED',managedSnapshot:snapshot}});
+    const updated=await transaction(async tx=>{
+      const updated=await tx.lead.updateMany({where:{id,version:lead.version},data:{writebackStatus:'SYNCED',managedSnapshot:snapshot}});
+      const sent=lead.messages.filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
+      await queueLeadSentNotifications(tx,sent.map(message=>message.id),lead.sheet.organizationId);
+      return updated;
+    });
     if(updated.count&&(simple||!options.deliveryOnly))await db.job.updateMany({where:{type:'WRITEBACK',entityId:id,status:{in:['PENDING','DEAD']},createdAt:{lte:startedAt}},data:{status:'COMPLETED',error:null,lockedAt:null,lockToken:null}});
     if(!updated.count){await db.lead.update({where:{id},data:{managedSnapshot:snapshot}});await enqueue(db,'WRITEBACK',id,`writeback:repair:${id}:${opaqueToken()}`);}
     await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'SUCCESS',details:`Managed fields synchronized for lead ${id}.`}});
@@ -260,7 +266,8 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
     if(sheetSaysSent(matches[0].values.sentStatus)){await transaction(tx=>rememberSheetSent(tx,message.leadId,matches[0].values));return;}
   }
   if(simple)await refreshSimpleQueuedMessages(message.lead.sheetId,id,true);
-  const claimData={status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date()};
+  const notificationPhone=message.lead.sheet.rule?.notificationPhone||null;
+  const claimData={status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date(),notificationPhone,notificationName:notificationPhone?message.assignment.employee.name:null,notificationStatus:notificationPhone?'WAITING':null};
   const claimed=simple?await transaction(async tx=>{
     const lead=await tx.lead.findUniqueOrThrow({where:{id:message.leadId},select:{managedSnapshot:true}});
     if(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,message.leadId)){await cancelQueuedLeadMessages(tx,message.leadId);return {count:0};}
@@ -316,6 +323,7 @@ export async function processJob(id:string, candidate?:Job) {
     }
     else if(job.type==='WRITEBACK')await writebackLead(job.entityId,undefined,{deliveryOnly});
     else if(job.type==='SEND')await dispatchMessage(job.entityId);
+    else if(job.type==='NOTIFY')await dispatchLeadSentNotification(job.entityId);
     else if(job.type==='CONNECT'||job.type==='DISCONNECT'||job.type==='CONTACTS'){
       const sender=await db.sender.findUniqueOrThrow({where:{id:job.entityId}});
       const provider=whatsappProvider(sender);
@@ -351,6 +359,7 @@ export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shou
     // A newly created SEND overtakes remaining ASSIGN work in the same batch.
     const candidates=await Promise.all([
       controls.length?db.job.findFirst({where:{...due,type:{in:controls}},orderBy}):null,
+      !types||types.includes('NOTIFY')?db.job.findFirst({where:{...due,type:'NOTIFY'},orderBy}):null,
       !types||types.includes('SEND')?db.job.findFirst({where:{...due,type:'SEND'},orderBy}):null,
       // Start new saves ahead of old failures. Keep one slot in five for due
       // retries so a continuous lead stream still repairs earlier updates.
@@ -359,7 +368,7 @@ export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shou
     ]);
     const job=candidates.find(candidate=>candidate!==null);
     if(!job||!shouldContinue())break;
-    if(job.type==='SEND'&&sendDelay){
+    if(['SEND','NOTIFY'].includes(job.type)&&sendDelay){
       const delay=nextSendAt-Date.now();if(delay>0)await new Promise(resolve=>setTimeout(resolve,delay));
       if(!shouldContinue())break;
       nextSendAt=Date.now()+sendDelay;
@@ -381,6 +390,7 @@ export async function scheduleJobs(simpleOnly=false,maintenance=true) {
   // Jobs interrupted after possible submission are flagged, never automatically resent.
   const stale=new Date(Date.now()-5*60000);
   await db.message.updateMany({where:{status:'PROCESSING',lastAttemptAt:{lt:stale}},data:{status:'FAILED',uncertain:true,failureReason:'Worker stopped during submission; verify provider acceptance before resending.',failedAt:new Date()}});
+  await db.message.updateMany({where:{notificationStatus:'PROCESSING',notificationLastAttemptAt:{lt:stale}},data:{notificationStatus:'FAILED',notificationUncertain:true,notificationFailureReason:'Worker stopped during sent notification submission. Check the linked WhatsApp account before resending.'}});
   await db.job.updateMany({where:{status:'PROCESSING',lockedAt:{lt:stale}},data:{status:'PENDING',lockedAt:null,lockToken:null}});
   await db.authSession.deleteMany({where:{expiresAt:{lt:new Date()}}});
   await db.rateLimit.deleteMany({where:{expiresAt:{lt:new Date()}}});

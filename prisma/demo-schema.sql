@@ -129,6 +129,7 @@ CREATE TABLE "DistributionRule" (
     "template" TEXT NOT NULL,
     "metaTemplate" TEXT,
     "metaLanguage" TEXT NOT NULL DEFAULT 'en',
+    "notificationPhone" TEXT,
     CONSTRAINT "DistributionRule_sheetId_fkey" FOREIGN KEY ("sheetId") REFERENCES "Sheet" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "DistributionRule_senderId_fkey" FOREIGN KEY ("senderId") REFERENCES "Sender" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
@@ -224,6 +225,15 @@ CREATE TABLE "Message" (
     "failedAt" DATETIME,
     "lastAttemptAt" DATETIME,
     "failureReason" TEXT,
+    "notificationPhone" TEXT,
+    "notificationName" TEXT,
+    "notificationStatus" TEXT,
+    "notificationProviderMessageId" TEXT,
+    "notificationAttemptCount" INTEGER NOT NULL DEFAULT 0,
+    "notificationLastAttemptAt" DATETIME,
+    "notificationSubmittedAt" DATETIME,
+    "notificationFailureReason" TEXT,
+    "notificationUncertain" BOOLEAN NOT NULL DEFAULT false,
     CONSTRAINT "Message_leadId_fkey" FOREIGN KEY ("leadId") REFERENCES "Lead" ("id") ON DELETE RESTRICT ON UPDATE CASCADE,
     CONSTRAINT "Message_assignmentId_fkey" FOREIGN KEY ("assignmentId") REFERENCES "Assignment" ("id") ON DELETE RESTRICT ON UPDATE CASCADE,
     CONSTRAINT "Message_senderId_fkey" FOREIGN KEY ("senderId") REFERENCES "Sender" ("id") ON DELETE RESTRICT ON UPDATE CASCADE

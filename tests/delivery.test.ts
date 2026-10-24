@@ -1,13 +1,14 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, databaseTransaction, usingSQLite } from '@/lib/db';
-import { assignLead, dispatchMessage, processJob, saveFeedback, writebackLead } from '@/lib/engine';
+import { assignLead, dispatchMessage, processJob, saveFeedback, scheduleJobs, writebackLead } from '@/lib/engine';
 import { AppError, encrypt } from '@/lib/security';
-import { MetaWhatsAppProvider, UncertainDelivery } from '@/lib/whatsapp';
+import { MetaWhatsAppProvider, UncertainDelivery, type WhatsAppProvider } from '@/lib/whatsapp';
 import { deliveryBackfillLeads, deliveryValues, queueDeliveryWriteback } from '@/lib/delivery';
 import { PublicSheetsProvider } from '@/lib/public-sheets';
 import { GoogleSheetsProvider, type SheetProvider } from '@/lib/google';
 import { clearTestModels } from './database-fixture';
 import { recoverSheetOutputs, recoverUnavailableSheetWrites } from '@/lib/sheet-output-recovery';
+import { dispatchLeadSentNotification } from '@/lib/lead-sent-notifications';
 vi.mock('google-auth-library',()=>({GoogleAuth:class{async getAccessToken(){return 'test-google-token';}},OAuth2Client:class{}}));
 
 beforeEach(async()=>{
@@ -17,18 +18,101 @@ beforeEach(async()=>{
 });
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 afterAll(()=>db.$disconnect());
-async function fixture(){
+async function fixture(notificationPhone?:string){
   const sender=await db.sender.create({data:{organizationId:'legacy',name:'Test WhatsApp',provider:'DEMO',status:'CONNECTED'}});
   const recipients=await Promise.all(['Original recipient','New recipient'].map((name,i)=>db.employee.create({data:{organizationId:'legacy',name,phone:`+91987654321${i}`,projects:[]}})));
-  const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Public leads',project:'Sales',spreadsheetId:'public-delivery-test-sheet',connectionType:'SIMPLE_PUBLIC',columnMapping:{customerName:'Name',mobile:'Phone'},rule:{create:{senderId:sender.id,template:'New lead',enabled:true,recipients:{create:recipients.map((e,position)=>({employeeId:e.id,position}))}}}}});
+  const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Public leads',project:'Sales',spreadsheetId:'public-delivery-test-sheet',connectionType:'SIMPLE_PUBLIC',columnMapping:{customerName:'Name',mobile:'Phone'},rule:{create:{senderId:sender.id,template:'New lead',enabled:true,notificationPhone,recipients:{create:recipients.map((e,position)=>({employeeId:e.id,position}))}}}}});
   const lead=await db.lead.create({data:{sheetId:sheet.id,stableSourceId:'source-a',sourceRow:2,sourceFingerprint:'test',customerName:'Customer',mobile:'+919800000000',project:'Sales'}});
   await assignLead(lead.id);
   const message=await db.message.findFirstOrThrow({where:{leadId:lead.id}});
-  const send=vi.fn(async()=>({id:'provider-success',status:'SUBMITTED' as const}));
+  const send=vi.fn<WhatsAppProvider['sendMessage']>(async()=>({id:'provider-success',status:'SUBMITTED' as const}));
   const provider={sendMessage:send} as never;
   const write=vi.fn<SheetProvider['write']>(async()=>{});
   return {lead,message,recipients,send,provider,write,sheetProvider:{read:vi.fn(),write}};
 }
+
+describe('administrator lead-sent notifications',()=>{
+  const adminPhone='+919876543218';
+  it('sends the unchanged lead first, updates its sheet, then notifies only the administrator once',async()=>{
+    const f=await fixture(adminPhone);
+    await dispatchMessage(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledOnce();
+    expect(f.send.mock.calls[0][0]).toMatchObject({to:f.recipients[0].phone,body:expect.stringContaining('Hello, You got a new lead')});
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'WAITING'});
+    await dispatchLeadSentNotification(f.message.id,f.provider);expect(f.send).toHaveBeenCalledOnce();
+    expect(await db.job.count({where:{type:'NOTIFY'}})).toBe(0);
+    await writebackLead(f.lead.id,f.sheetProvider);
+    expect(f.write.mock.calls[0][3]).toEqual({sentStatus:'Sent',sharedTo:'Original recipient'});
+    expect(await db.job.count({where:{type:'NOTIFY',entityId:f.message.id}})).toBe(1);
+    await Promise.all([dispatchLeadSentNotification(f.message.id,f.provider),dispatchLeadSentNotification(f.message.id,f.provider)]);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.send.mock.calls[1][0]).toMatchObject({to:adminPhone,body:'New Lead Sent to (Original recipient)'});
+    await writebackLead(f.lead.id,f.sheetProvider);
+    await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(await db.message.count({where:{leadId:f.lead.id}})).toBe(1);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'SUBMITTED',notificationUncertain:false});
+  });
+  it('waits for a failed sheet update to succeed without resending the lead',async()=>{
+    const f=await fixture(adminPhone);await dispatchMessage(f.message.id,f.provider);
+    f.write.mockRejectedValueOnce(new AppError(502,'Sheet temporarily unavailable'));
+    await expect(writebackLead(f.lead.id,f.sheetProvider)).rejects.toThrow('Sheet temporarily unavailable');
+    await dispatchLeadSentNotification(f.message.id,f.provider);expect(f.send).toHaveBeenCalledOnce();
+    expect(await db.job.count({where:{type:'NOTIFY'}})).toBe(0);
+    await writebackLead(f.lead.id,f.sheetProvider);await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledTimes(2);
+  });
+  it.each([new AppError(400,'Lead rejected'),new UncertainDelivery('Lead outcome unknown')])('does not notify after a failed or uncertain lead send (%s)',async error=>{
+    const f=await fixture(adminPhone);f.send.mockRejectedValueOnce(error);
+    await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledOnce();expect(await db.job.count({where:{type:'NOTIFY'}})).toBe(0);
+  });
+  it('keeps legacy sheets without an administrator number unchanged',async()=>{
+    const f=await fixture();await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledOnce();expect(await db.job.count({where:{type:'NOTIFY'}})).toBe(0);
+  });
+  it('processes a durable notification job and holds interrupted notification submissions',async()=>{
+    const f=await fixture(adminPhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    const job=await db.job.findFirstOrThrow({where:{type:'NOTIFY'}});
+    await processJob(job.id);
+    expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'COMPLETED'});
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'SUBMITTED'});
+    await db.message.update({where:{id:f.message.id},data:{notificationStatus:'PROCESSING',notificationLastAttemptAt:new Date(Date.now()-10*60000)}});
+    await scheduleJobs(true);
+    await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledOnce();
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'FAILED',notificationUncertain:true});
+  });
+  it('captures the administrator number at submission and keeps it stable while sheet updates retry',async()=>{
+    const f=await fixture(adminPhone);
+    await db.distributionRule.update({where:{sheetId:f.lead.sheetId},data:{notificationPhone:'+919876543217'}});
+    await dispatchMessage(f.message.id,f.provider);
+    await db.distributionRule.update({where:{sheetId:f.lead.sheetId},data:{notificationPhone:'+919876543216'}});
+    await writebackLead(f.lead.id,f.sheetProvider);await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send.mock.calls[1][0]).toMatchObject({to:'+919876543217'});
+  });
+  it('holds uncertain administrator notifications without changing or resending the lead',async()=>{
+    const f=await fixture(adminPhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    f.send.mockRejectedValueOnce(new UncertainDelivery('Unknown notification outcome'));
+    await dispatchLeadSentNotification(f.message.id,f.provider);await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',uncertain:false,notificationStatus:'FAILED',notificationUncertain:true});
+  });
+  it('retries confirmed notification rejections independently and waits for reconnection',async()=>{
+    const f=await fixture(adminPhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    await db.sender.update({where:{id:f.message.senderId},data:{status:'DISCONNECTED'}});
+    await expect(dispatchLeadSentNotification(f.message.id,f.provider)).rejects.toMatchObject({code:'DISCONNECTED'});
+    expect(f.send).toHaveBeenCalledOnce();
+    await db.sender.update({where:{id:f.message.senderId},data:{status:'CONNECTED'}});
+    f.send.mockRejectedValueOnce(new AppError(400,'Notification rejected'));
+    await expect(dispatchLeadSentNotification(f.message.id,f.provider)).rejects.toThrow('Notification rejected');
+    await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledTimes(3);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'SUBMITTED',notificationAttemptCount:2,notificationFailureReason:null});
+  });
+});
 
 describe('Sent Status and Shared To',()=>{
   it('marks a lead only after successful submission and queues a separate sheet job',async()=>{

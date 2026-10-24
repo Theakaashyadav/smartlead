@@ -89,6 +89,11 @@ async function wakePendingSends(session: Session) {
     where: { type: 'SEND', status: 'PENDING', entityId: { in: queued.slice(offset, offset + 500).map(message => message.id) } },
     data: { runAt: new Date() },
   });
+  const notifications=await db.message.findMany({where:{senderId:session.id,notificationStatus:'QUEUED'},select:{id:true}});
+  for(let offset=0;offset<notifications.length;offset+=500)await db.job.updateMany({
+    where:{type:'NOTIFY',status:'PENDING',entityId:{in:notifications.slice(offset,offset+500).map(message=>message.id)}},
+    data:{runAt:new Date()},
+  });
 }
 
 async function warmRecipients(session: Session, socket: WASocket) {
@@ -257,7 +262,9 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
     const { generateMessageIDV2 } = await import('baileys');
     const messageId = generateMessageIDV2(socket.user?.id);
     if (input.messageId) {
-      const claimed = await db.message.updateMany({ where: { id: input.messageId, senderId: this.sender.id, status: 'PROCESSING' }, data: { providerMessageId: providerId(this.sender.id, messageId) } });
+      const claimed = input.purpose==='LEAD_SENT_NOTIFICATION'
+        ? await db.message.updateMany({where:{id:input.messageId,senderId:this.sender.id,notificationStatus:'PROCESSING'},data:{notificationProviderMessageId:providerId(this.sender.id,messageId)}})
+        : await db.message.updateMany({ where: { id: input.messageId, senderId: this.sender.id, status: 'PROCESSING' }, data: { providerMessageId: providerId(this.sender.id, messageId) } });
       if (!claimed.count) throw new AppError(409, 'This notification is no longer pending submission.');
     }
     try {

@@ -178,26 +178,42 @@ test('contact picker saves consecutive lead counts in selection order and center
   await expect(page.locator('.simple-selected-order')).toContainText('Aman (2 leads) → Akash (1 lead) → New person (1 lead) → repeat');
   await expectCentered(page);await page.screenshot({path:'data/recipient-counts-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});await expectCentered(page);await page.screenshot({path:'data/recipient-counts-mobile.png',fullPage:true});
+  await page.getByRole('button',{name:'Next: sent notifications'}).click();
+  await expect(page.getByRole('heading',{name:'Where should sent notifications go?'})).toBeVisible();
+  await expect(page.getByText('Message: New Lead Sent to (Aman)',{exact:false})).toBeVisible();
+  await page.getByLabel('Your notification WhatsApp number',{exact:true}).fill('+919876543218');
+  await expectCentered(page);await page.screenshot({path:'data/sent-notifications-mobile.png',fullPage:true});
+  await page.getByRole('button',{name:'Back',exact:true}).click();
+  await expect(page.getByLabel('Leads per turn for Aman',{exact:true})).toHaveValue('2');
+  await page.getByRole('button',{name:'Next: sent notifications'}).click();
+  await expect(page.getByLabel('Your notification WhatsApp number',{exact:true})).toHaveValue('+919876543218');
+  await page.setViewportSize({width:1440,height:1050});await expectCentered(page);
   await page.getByRole('button',{name:'Save & start sending'}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(saved.recipients.map((p:any)=>p.phone)).toEqual(['+919876543211','+919876543210','+919876543219']);
   expect(saved.recipients.map((p:any)=>p.leadCount)).toEqual([2,1,1]);
+  expect(saved.notificationPhone).toBe('+919876543218');
 });
 
 test('saved phone names replace number labels without losing edited counts and survive reopening the picker',async({page})=>{
   const phone='+919876543210';let contacts=[{name:phone,phone}];
-  const sheet={id:'saved-name-sheet',name:'Saved contacts',worksheetName:'Leads',enabled:false,leadCount:0,recipients:[{name:phone,phone,leadCount:2}],lastSyncError:null};
+  const sheet={id:'saved-name-sheet',name:'Saved contacts',worksheetName:'Leads',enabled:false,leadCount:0,recipients:[{name:phone,phone,leadCount:2}],notificationPhone:'+919876543218',lastSyncError:null};
   const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null},sheets:[sheet]};
   await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
   await page.route('**/api/simple/contacts',route=>route.fulfill({json:{data:{contacts}}}));
   await page.route('**/api/simple/contacts/refresh',route=>route.fulfill({json:{data:{refreshing:true}}}));
-  await page.route('**/api/simple/sheets/saved-name-sheet/recipients',route=>{sheet.recipients=route.request().postDataJSON().recipients;return route.fulfill({json:{data:{started:true}}});});
+  await page.route('**/api/simple/sheets/saved-name-sheet/recipients',route=>{const saved=route.request().postDataJSON();sheet.recipients=saved.recipients;sheet.notificationPhone=saved.notificationPhone;return route.fulfill({json:{data:{started:true}}});});
   await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Edit recipients',exact:true}).click();
   await page.getByLabel(`Leads per turn for ${phone}`,{exact:true}).fill('3');contacts=[{phone,name:'Aman Office'}];
   await expect(page.getByLabel('Leads per turn for Aman Office',{exact:true})).toHaveValue('3',{timeout:10000});
+  await page.getByRole('button',{name:'Next: sent notifications'}).click();
+  await expect(page.getByLabel('Your notification WhatsApp number',{exact:true})).toHaveValue('+919876543218');
+  await page.getByLabel('Your notification WhatsApp number',{exact:true}).fill('+919876543217');
   await page.getByRole('button',{name:'Save & start sending'}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(sheet.recipients).toEqual([{name:'Aman Office',phone,leadCount:3}]);
   await page.getByRole('button',{name:'Edit recipients',exact:true}).click();await expect(page.getByLabel('Leads per turn for Aman Office',{exact:true})).toHaveValue('3');await expectCentered(page);
+  await page.getByRole('button',{name:'Next: sent notifications'}).click();
+  await expect(page.getByLabel('Your notification WhatsApp number',{exact:true})).toHaveValue('+919876543217');
   await page.getByRole('button',{name:'Close dialog'}).click();await page.getByRole('button',{name:'Login & PIN',exact:true}).click();await expectCentered(page);
 });
 

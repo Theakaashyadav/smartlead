@@ -74,7 +74,7 @@ export function startWorkerService({closeDatabase=false}={}){
       };
       // Sheet downloads and history/writeback work cannot hold up ready sends.
       const loops=[
-        loop('send',()=>drainJobs(100,SEND_INTERVAL_MS,undefined,()=>!stopping(),['CONNECT','DISCONNECT','ASSIGN','SEND']),WORKER_IDLE_MS),
+        loop('send',()=>drainJobs(100,SEND_INTERVAL_MS,undefined,()=>!stopping(),['CONNECT','DISCONNECT','ASSIGN','SEND','NOTIFY']),WORKER_IDLE_MS),
         loop('sheets',async()=>{
           const maintenance=Date.now()-maintainedAt>=60000;
           await scheduleJobs(isDemo(),maintenance);if(maintenance)maintainedAt=Date.now();

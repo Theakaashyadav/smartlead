@@ -11,7 +11,7 @@ import { WhatsAppBackgroundLogin } from './whatsapp-background-login';
 import { PhoneLoginSettings } from './phone-login-settings';
 import { ConnectSheet } from './connect-sheet';
 
-type SheetSummary={id:string;name:string;project?:string;worksheetName:string;googleAuthorized?:boolean;appsScriptConnected?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;recipients:Array<WhatsAppContact&{leadCount?:number}>;delivery?:{submitted:number;queued:number;failed:number;error:string|null};writeback?:{pending:number;failed:number;error:string|null}};
+type SheetSummary={id:string;name:string;project?:string;worksheetName:string;googleAuthorized?:boolean;appsScriptConnected?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;notificationPhone?:string|null;recipients:Array<WhatsAppContact&{leadCount?:number}>;delivery?:{submitted:number;queued:number;failed:number;error:string|null};sentNotificationError?:string|null;writeback?:{pending:number;failed:number;error:string|null}};
 type Account={id:string;phone:string|null;status:string;qrCode:string|null;lastError:string|null};
 type State={user:{name:string;email:string|null;phone?:string|null;pinEnabled?:boolean;twoFactor?:boolean};organization:{id:string;name:string};account:Account|null;sheets:SheetSummary[];workerRunning:boolean;workerMessage?:string|null;whatsappLoginMode?:'background'|'browser'|'qr';feedbackError?:string|null;publicSheetWritebackAvailable?:boolean};
 const message=(e:unknown)=>e instanceof Error?e.message:'Please try again.';
@@ -70,9 +70,11 @@ function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onScri
     <div className="simple-sheet-top"><div className="simple-card-icon sheets"><FileSpreadsheet size={24}/></div><div className="simple-sheet-title"><h2>{sheet.name}</h2><p>{sheet.worksheetName}</p></div><span className={`simple-status ${sheet.enabled&&connected?'on':''}`}>{sheet.enabled?(sheet.delivery?.failed?'Some sends need checking':connected?'Sending automatically':'Waiting for WhatsApp'):sheet.recipients.length?'Paused':'Choose recipients'}</span></div>
     <div className="simple-sheet-people"><Users size={17}/><span>{sheet.recipients.length?sheet.recipients.map(p=>`${p.name} (${p.leadCount||1} ${(p.leadCount||1)===1?'lead':'leads'})`).join(' → '):'No recipients selected'}</span>{sheet.recipients.length>1&&<span className="muted">→ repeat</span>}</div>
     <div className="row between" style={{flexWrap:'wrap'}}><span style={{overflowWrap:'anywhere',minWidth:0}}>Project: <strong>{sheet.project||sheet.name}</strong></span><Button disabled={busy} onClick={()=>onProject(sheet)}>Edit project</Button></div>
+    {sheet.notificationPhone&&<p className="muted">Your sent notifications go to {sheet.notificationPhone}.</p>}
     {sheet.lastSyncError&&<p className="alert error">{sheet.lastSyncError}</p>}
     {sheet.delivery&&<p className="muted">{sheet.delivery.submitted} submitted to WhatsApp · {sheet.delivery.queued} queued{sheet.delivery.failed?` · ${sheet.delivery.failed} need checking`:""}</p>}
     {sheet.delivery?.error&&<p role="alert" className="alert error">{sheet.delivery.error}</p>}
+    {sheet.sentNotificationError&&<p role="alert" className="alert error">Sent notification: {sheet.sentNotificationError}</p>}
     {sheet.writeback&&(sheet.writeback.pending+sheet.writeback.failed)>0&&<p role="status" className="muted">{sheet.writeback.pending>0?`${sheet.writeback.pending} lead${sheet.writeback.pending===1?'':'s'} updating Google Sheet.`:''} {sheet.writeback.failed>0?`${sheet.writeback.failed} sheet update${sheet.writeback.failed===1?'':'s'} failed.`:''}</p>}
     {sheet.writeback?.error&&<p role="alert" className="alert error">{sheet.writeback.error}</p>}
     {sheet.writeback&&(sheet.writeback.pending+sheet.writeback.failed)>0&&<Button busy={busy} onClick={()=>onWriteback(sheet)}><RefreshCw size={15}/>Update sheet now</Button>}
@@ -112,6 +114,8 @@ function DeleteSheet({sheet,onClose,onDeleted}:{sheet:SheetSummary;onClose:()=>v
 function RecipientPicker({sheet,connected,onClose,onSaved}:{sheet:SheetSummary;connected:boolean;onClose:()=>void;onSaved:()=>Promise<void>}){
   const [contacts,setContacts]=useState<WhatsAppContact[]>([]);
   const [selected,setSelected]=useState<Array<WhatsAppContact&{leadCount:number|''}>>(()=>sheet.recipients.map(p=>({...p,leadCount:p.leadCount||1})));
+  const [notificationPhone,setNotificationPhone]=useState(sheet.notificationPhone||'');
+  const [step,setStep]=useState<'recipients'|'notifications'>('recipients');
   const [search,setSearch]=useState('');const [phone,setPhone]=useState('');const [name,setName]=useState('');const [busy,setBusy]=useState(false);const [loading,setLoading]=useState(true);const [error,setError]=useState('');
   useEffect(()=>{
     if(!connected){setLoading(false);return;}
@@ -127,11 +131,12 @@ function RecipientPicker({sheet,connected,onClose,onSaved}:{sheet:SheetSummary;c
   },[connected]);
   function toggle(person:WhatsAppContact){setSelected(s=>s.some(p=>p.phone===person.phone)?s.filter(p=>p.phone!==person.phone):[...s,{...person,leadCount:1}]);}
   function addNumber(){const value=phone.trim();if(!/^\+?[\d\s()-]{7,25}$/.test(value)){setError('Enter a valid phone number, including country code.');return;}const digits=value.replace(/\D/g,'');const number=value.startsWith('+')?`+${digits}`:digits.length===10?`+91${digits}`:`+${digits}`;if(selected.some(p=>p.phone===number)){setError('This number is already selected.');return;}const person={name:name.trim()||contacts.find(c=>c.phone===number)?.name||number,phone:number,leadCount:1};setSelected(s=>[...s,person]);setPhone('');setName('');setError('');}
-  async function save(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{await api(`simple/sheets/${sheet.id}/recipients`,'PUT',{recipients:selected.map(({name,phone,leadCount})=>({name,phone,leadCount:Number(leadCount)}))});await onSaved();}catch(e){setError(message(e));}finally{setBusy(false);}}
+  async function save(e:React.FormEvent){e.preventDefault();setError('');if(step==='recipients'){setStep('notifications');return;}setBusy(true);try{await api(`simple/sheets/${sheet.id}/recipients`,'PUT',{recipients:selected.map(({name,phone,leadCount})=>({name,phone,leadCount:Number(leadCount)})),notificationPhone:notificationPhone.trim()||null});await onSaved();}catch(e){setError(message(e));}finally{setBusy(false);}}
   const people=[...contacts,...selected.filter(s=>!contacts.some(c=>c.phone===s.phone))].filter(c=>`${c.name} ${c.phone}`.toLowerCase().includes(search.toLowerCase()));
-  return <Modal title="Who should receive these leads?" description={`${sheet.name} · ${sheet.worksheetName}`} onClose={onClose}>
+  return <Modal title={step==='recipients'?'Who should receive these leads?':'Where should sent notifications go?'} description={`${sheet.name} · ${sheet.worksheetName}`} onClose={busy?()=>{}:onClose}>
     {!connected?<div className="simple-modal-empty"><MessageCircle size={36}/><h3>Connect WhatsApp first</h3><p>Your WhatsApp contacts will appear here after you link your account.</p><Link href="/whatsapp" className="btn primary" onClick={onClose}>Connect WhatsApp<ArrowRight size={16}/></Link></div>:<form className="simple-form" onSubmit={save}>
       {error&&<div role="alert" className="alert error">{error}</div>}
+      {step==='recipients'?<>
       <div className="simple-recipient-search"><Search size={17}/><input aria-label="Search WhatsApp contacts" placeholder="Search name or number" value={search} onChange={e=>setSearch(e.target.value)}/><Button type="button" variant="ghost" aria-label="Refresh contacts" onClick={async()=>{setError('');try{await api('simple/contacts/refresh','POST');}catch(e){setError(message(e));}}}><RefreshCw size={16}/></Button></div>
       <p className="simple-share-note">Names come from the contacts saved on your linked phone. Select people in the order they should receive leads.</p>
       <div className="simple-contact-list">{loading?<p>Loading WhatsApp contacts…</p>:people.length?people.map(person=>{
@@ -143,7 +148,13 @@ function RecipientPicker({sheet,connected,onClose,onSaved}:{sheet:SheetSummary;c
       }):<p>{search?'No matching contacts. Add the number below.':'Your contacts will appear here. You can also add a number below.'}</p>}</div>
       <div className="simple-add-number"><h3>Number not listed? Add it here.</h3><div><input aria-label="Recipient name" placeholder="Name (optional)" value={name} maxLength={100} onChange={e=>setName(e.target.value)}/><input aria-label="Recipient phone number" placeholder="+91 phone number" type="tel" value={phone} onChange={e=>setPhone(e.target.value)}/><Button type="button" onClick={addNumber} disabled={!phone.trim()}><Plus size={16}/>Add</Button></div><small>A new conversation starts automatically when their first lead is sent.</small></div>
       {selected.length>0&&<div className="simple-selected-order"><strong>{selected.length} selected</strong><p>{selected.map(p=>`${p.name} (${p.leadCount||'…'} ${p.leadCount===1?'lead':'leads'})`).join(' → ')} → repeat</p></div>}
-      <Button type="submit" variant="primary" busy={busy} disabled={!selected.length}><Check size={17}/>Save & start sending</Button><p className="simple-fine-print">Each person gets their count of consecutive leads, then the cycle repeats. Leads marked Sent are skipped.</p>
+      <Button type="submit" variant="primary" disabled={!selected.length}>Next: sent notifications<ArrowRight size={17}/></Button><p className="simple-fine-print">Each person gets their count of consecutive leads, then the cycle repeats. Leads marked Sent are skipped.</p>
+      </>:<>
+        <p className="simple-share-note">Enter your WhatsApp number. After a lead is sent to any selected recipient and its Google Sheet is updated, you will receive a notification on this number.</p>
+        <Field label="Your notification WhatsApp number"><input type="tel" maxLength={40} placeholder="+91 phone number (optional)" disabled={busy} value={notificationPhone} onChange={event=>setNotificationPhone(event.target.value)}/></Field>
+        <p className="simple-fine-print">Message: New Lead Sent to ({selected[0]?.name||'Recipient Name'})<br/>The message names the person who received the lead. Leave your number blank to turn off these notifications.</p>
+        <div className="row"><Button type="button" disabled={busy} onClick={()=>{setError('');setStep('recipients');}}><ArrowLeft size={16}/>Back</Button><Button type="submit" variant="primary" busy={busy}><Check size={17}/>Save & start sending</Button></div>
+      </>}
     </form>}
   </Modal>;
 }
