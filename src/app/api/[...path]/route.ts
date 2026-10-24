@@ -20,7 +20,7 @@ import { feedbackBaseURL } from '@/lib/feedback-url';
 import { databaseFailure, safeDatabaseErrorCode } from '@/lib/database-errors';
 import { requireWhatsAppWorker, workerHeartbeatFresh } from '@/lib/worker-status';
 import { SIMPLE_POLL_SECONDS, SEND_INTERVAL_MS } from '@/lib/automation-policy';
-import { finishGoogleAuthorization, startGoogleAuthorization } from '@/lib/google-oauth';
+import { finishGoogleAuthorization, googleAuthorizationUsesPopup, startGoogleAuthorization } from '@/lib/google-oauth';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -250,8 +250,11 @@ async function handler(request:Request,context:Context):Promise<Response> {
     }
     if(route==='integrations/google/callback'){
       await requireUser(['SUPER_ADMIN']);
-      try{return NextResponse.redirect(await finishGoogleAuthorization(user,p));}
-      catch(error){const destination=new URL('/sheets',appUrl());destination.searchParams.set('google','error');destination.searchParams.set('message',error instanceof AppError?error.message:'Google authorization could not be completed. Please try again.');return NextResponse.redirect(destination);}
+      const popup=await googleAuthorizationUsesPopup();let destination:URL;
+      try{destination=new URL(await finishGoogleAuthorization(user,p));}
+      catch(error){destination=new URL('/sheets',appUrl());destination.searchParams.set('google','error');destination.searchParams.set('message',error instanceof AppError?error.message:'Google authorization could not be completed. Please try again.');}
+      if(popup)destination.pathname='/google-complete';
+      return NextResponse.redirect(destination);
     }
     if(route==='events'){
       const encoder=new TextEncoder();let timer:ReturnType<typeof setInterval>;const stream=new ReadableStream({start(controller){controller.enqueue(encoder.encode('event: ready\ndata: {}\n\n'));timer=setInterval(()=>{controller.enqueue(encoder.encode(`event: refresh\ndata: {"at":${Date.now()}}\n\n`));},15000);request.signal.addEventListener('abort',()=>{clearInterval(timer);try{controller.close();}catch{}});},cancel(){clearInterval(timer);}});return new Response(stream,{headers:{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'}});

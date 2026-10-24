@@ -9,6 +9,7 @@ import { detectColumns, spreadsheetIdentity, type WhatsAppContact } from '@/lib/
 import { WhatsAppBrowserLogin } from './whatsapp-browser-login';
 import { WhatsAppBackgroundLogin } from './whatsapp-background-login';
 import { PhoneLoginSettings } from './phone-login-settings';
+import { useGoogleAuthorization } from './google-authorization';
 
 type SheetSummary={id:string;name:string;worksheetName:string;googleAuthorized?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;recipients:WhatsAppContact[];delivery?:{submitted:number;queued:number;failed:number;error:string|null};writeback?:{pending:number;failed:number;error:string|null}};
 type Account={id:string;phone:string|null;status:string;qrCode:string|null;lastError:string|null};
@@ -19,6 +20,7 @@ const message=(e:unknown)=>e instanceof Error?e.message:'Please try again.';
 
 export function SimpleApp(){
   const pathname=usePathname();const router=useRouter();
+  const authorizeGoogle=useGoogleAuthorization();
   const [state,setState]=useState<State|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState(false);
   const [connectOpen,setConnectOpen]=useState(false);const [recipientSheet,setRecipientSheet]=useState<string|null>(null);
   const [googleReturn,setGoogleReturn]=useState<GoogleReturn|null>(null);const [googleNotice,setGoogleNotice]=useState('');
@@ -39,7 +41,7 @@ export function SimpleApp(){
     if(query.has('google'))window.history.replaceState(null,'',window.location.pathname);
   },[]);
   async function action(path:string,method='POST',body?:unknown){setBusy(true);setError('');try{await api(`simple/${path}`,method,body);await reload();}catch(e){setError(message(e));}finally{setBusy(false);}}
-  async function authorizeSheet(sheet:SheetSummary){setBusy(true);setError('');try{const result=await api<{url:string}>('simple/google/authorize','POST',{sheetId:sheet.id});window.location.assign(result.url);}catch(e){setError(message(e));setBusy(false);}}
+  async function authorizeSheet(sheet:SheetSummary){setBusy(true);setError('');try{await authorizeGoogle({sheetId:sheet.id});await reload();setGoogleNotice('Google access updated. Saved lead fields are queued for synchronization.');}catch(e){setError(message(e));}finally{setBusy(false);}}
   const account=state?.account;const connected=account?.status==='CONNECTED';
   const currentSheet=state?.sheets.find(s=>s.id===recipientSheet);
   const section=pathname==='/sheets'?'sheets':pathname==='/whatsapp'?'whatsapp':'dashboard';
@@ -67,7 +69,7 @@ export function SimpleApp(){
         {!state.workerRunning&&(section==='whatsapp'||state.sheets.some(s=>s.enabled)||account&&account.status!=='DISCONNECTED')&&<p role="status" className="simple-worker-note">{state.workerMessage||'WhatsApp connection service is offline. Please try again after it restarts.'}</p>}
       </>}
     </main>
-    {connectOpen&&<ConnectSheet initialAuth={googleReturn} onClose={closeConnect} onConnected={async(id,reauthorized)=>{closeConnect();await reload();if(!reauthorized)setRecipientSheet(id);else setGoogleNotice('Google access updated. Saved lead fields are queued for synchronization.');router.push('/sheets');}}/>}
+    {connectOpen&&<ConnectSheet initialAuth={googleReturn} onAuthorized={setGoogleReturn} onClose={closeConnect} onConnected={async(id,reauthorized)=>{closeConnect();await reload();if(!reauthorized)setRecipientSheet(id);else setGoogleNotice('Google access updated. Saved lead fields are queued for synchronization.');router.push('/sheets');}}/>}
     {deletingSheet&&<DeleteSheet sheet={deletingSheet} onClose={closeDelete} onDeleted={()=>{setState(current=>current?{...current,sheets:current.sheets.filter(sheet=>sheet.id!==deletingSheet.id)}:current);if(recipientSheet===deletingSheet.id)setRecipientSheet(null);setDeletingSheet(null);void reload().catch(e=>setError(message(e)));}}/>}
     {currentSheet&&<RecipientPicker sheet={currentSheet} connected={connected} onClose={closeRecipients} onSaved={async()=>{setRecipientSheet(null);await reload();}}/>}
   </div>;
@@ -105,7 +107,8 @@ function DeleteSheet({sheet,onClose,onDeleted}:{sheet:SheetSummary;onClose:()=>v
   </Modal>;
 }
 
-function ConnectSheet({onClose,onConnected,initialAuth}:{onClose:()=>void;onConnected:(id:string,reauthorized?:boolean)=>Promise<void>;initialAuth:GoogleReturn|null}){
+function ConnectSheet({onClose,onConnected,onAuthorized,initialAuth}:{onClose:()=>void;onConnected:(id:string,reauthorized?:boolean)=>Promise<void>;onAuthorized:(result:GoogleReturn)=>void;initialAuth:GoogleReturn|null}){
+  const authorizeGoogle=useGoogleAuthorization();
   const [url,setUrl]=useState(initialAuth?.url||'');const [info,setInfo]=useState<Inspection|null>(null);const [tabId,setTabId]=useState(0);const [mapping,setMapping]=useState<Record<string,string>>({});const [busy,setBusy]=useState(!!initialAuth);const [error,setError]=useState('');
   const tab=info?.tabs.find(t=>t.id===tabId);
   useEffect(()=>{
@@ -113,12 +116,12 @@ function ConnectSheet({onClose,onConnected,initialAuth}:{onClose:()=>void;onConn
     api<Inspection>('simple/sheets/inspect','POST',initialAuth).then(data=>{if(!active)return;if(!data.tabs.length)throw new Error('This spreadsheet has no tabs.');setInfo(data);const selected=data.tabs.find(t=>t.id===data.gid)||data.tabs[0];setTabId(selected.id);setMapping(detectColumns(selected.headers));}).catch(e=>{if(active)setError(message(e));}).finally(()=>{if(active)setBusy(false);});
     return()=>{active=false;};
   },[initialAuth]);
-  async function authorize(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{spreadsheetIdentity(url);const data=await api<{url:string}>('simple/google/authorize','POST',{url});window.location.assign(data.url);}catch(e){setError(message(e));setBusy(false);}}
+  async function authorize(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{spreadsheetIdentity(url);const data=await authorizeGoogle({url});if(!data.url||!data.credentialId)throw new Error('Google did not return this sheet connection. Please try again.');onAuthorized({url:data.url,credentialId:data.credentialId});}catch(e){setError(message(e));setBusy(false);}}
   async function connect(e:React.FormEvent){e.preventDefault();if(!info||!initialAuth)return;setBusy(true);setError('');try{const data=await api<{id:string;reauthorized?:boolean}>('simple/sheets','POST',{spreadsheetId:info.spreadsheetId,worksheetId:tabId,credentialId:initialAuth.credentialId,columnMapping:mapping});await onConnected(data.id,data.reauthorized);}catch(e){setError(message(e));}finally{setBusy(false);}}
   return <Modal title="Connect Google Sheet" description="Add a sheet, then choose who gets its leads." onClose={onClose}>
     {error&&<div role="alert" className="alert error">{error}</div>}
     {!info?<form className="simple-form" onSubmit={authorize}>
-      <p className="simple-share-note">Paste the sheet link, then authorize the Google account that owns it or has Editor access. Your sheet can stay private.</p>
+      <p className="simple-share-note">Paste the sheet link. A Google popup will let you choose your account and approve spreadsheet access. Your sheet can stay private.</p>
       <Field label="Google Sheets link"><input type="url" required value={url} placeholder="https://docs.google.com/spreadsheets/d/…" onChange={e=>setUrl(e.target.value)} autoFocus/></Field><Button type="submit" variant="primary" busy={busy}>Continue with Google<ArrowRight size={16}/></Button>
     </form>:<form className="simple-form" onSubmit={connect}>
       <div className="simple-found-sheet"><FileSpreadsheet size={22}/><strong>{info.title}</strong><button type="button" onClick={()=>setInfo(null)}>Change</button></div>

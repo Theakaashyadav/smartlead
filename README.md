@@ -26,7 +26,7 @@ Double-click **Start SmartLead.cmd**. It starts both the built application and a
 
 1. Log in. The dashboard has only **Connect Sheets** and **Connect WhatsApp** cards.
 2. Open **Connect WhatsApp** → **Connect WhatsApp** and scan the QR shown in SmartLead. The default socket connection runs without Chromium or a desktop window. Its encrypted saved login is reused when available. After linking, you can close the dashboard; the background worker keeps sending.
-3. Open **Connect Sheets**, paste the link and choose **Continue with Google**. Select an account that owns the spreadsheet or has **Editor** access, then allow Google Sheets access. The app owner must complete the one-time OAuth setup below. Public link sharing is unnecessary.
+3. Open **Connect Sheets**, paste the link and choose **Continue with Google**. A Google popup lets you select an account that owns the spreadsheet or has **Editor** access, then approve Google Sheets access. The app owner completes the one-time OAuth setup below; people connecting sheets never enter client IDs or secrets. Public link sharing is unnecessary.
 4. After authorization, choose the tab and check the automatically detected customer-name and phone columns. SmartLead checks editing permission before connecting and stores sending progress in its MongoDB database.
 5. Select recipients from your linked WhatsApp account. If someone is missing, add their phone number. **Save & start sending** starts the queue. A new conversation starts on the first message to a registered WhatsApp number.
 
@@ -75,6 +75,8 @@ The sheet cards show pending Google Sheet updates and their latest error separat
 Production sheet updates require Google authorization and run without Chromium. The older anonymous browser editor remains available for local development only. Default socket WhatsApp builds skip browser downloads; explicitly selected browser WhatsApp modes still prepare Chromium.
 
 ## One-time Google Cloud setup
+
+This setup belongs to the SmartLead app owner and is shared by all organisations. It powers Google's account-selection and consent popup. Each person then connects their own Google account through that popup. App registration is still required by Google even when users only see a sign-in button. The pasted link selects the spreadsheet; the consent screen requests Sheets access, and users choose its tab and columns after authorizing. The app checks Editor permission before enabling writes. Popup results are accepted only from the window that SmartLead opened on the same origin. Closing or blocking the popup preserves the existing connection and allows a retry.
 
 1. Create or select a project in [Google Cloud Console](https://console.cloud.google.com/) and enable **Google Sheets API** under **APIs & Services → Library**.
 2. Open **Google Auth Platform**. Complete **Branding** with the app name, support email and contact email. Select **External** under **Audience** for personal Gmail accounts and add the Google accounts you will use as **Test users** while testing.

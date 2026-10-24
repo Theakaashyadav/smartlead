@@ -11,6 +11,7 @@ import { SUCCESSFUL_SEND_STATUSES } from './delivery';
 
 const scope='https://www.googleapis.com/auth/spreadsheets';
 const stateCookie='google_oauth_state';
+const popupCookie='google_oauth_popup';
 type Pending={userId:string;organizationId:string;at:number;url?:string;sheetId?:string};
 export function googleOAuthConfiguration(){
   const redirectUri=`${new URL(appUrl()).origin}/api/integrations/google/callback`;
@@ -20,10 +21,11 @@ export function googleOAuthConfiguration(){
 }
 function oauthClient(){
   const config=googleOAuthConfiguration();
-  if(!config.oauthConfigured)throw new AppError(503,config.missing.length?'Google authorization needs one-time setup by the app owner: add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Hostinger and enable Google Sheets API.':`Set GOOGLE_REDIRECT_URI to ${config.redirectUri} in Hostinger.`,'GOOGLE_OAUTH_NOT_CONFIGURED');
+  if(!config.oauthConfigured)throw new AppError(503,'Google sign-in has not been enabled for SmartLead yet. The app owner needs to activate the Google connection.','GOOGLE_OAUTH_NOT_CONFIGURED');
   return new OAuth2Client(process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,config.redirectUri);
 }
-export async function startGoogleAuthorization(user:User,input:{url?:string;sheetId?:string}={}){
+export async function googleAuthorizationUsesPopup(){return (await cookies()).get(popupCookie)?.value==='1';}
+export async function startGoogleAuthorization(user:User,input:{url?:string;sheetId?:string;popup?:boolean}={}){
   const oauth=oauthClient();
   const pending:Pending={userId:user.id,organizationId:user.organizationId,at:Date.now()};
   if(input.sheetId){
@@ -37,7 +39,9 @@ export async function startGoogleAuthorization(user:User,input:{url?:string;shee
   }
   const state=opaqueToken();const fingerprint=hash(`${user.id}:${user.organizationId}:${state}`);
   await db.setting.create({data:{key:`google-oauth:${hash(state)}`,value:pending}});
-  (await cookies()).set(stateCookie,fingerprint,{httpOnly:true,sameSite:'lax',secure:appUrl().startsWith('https://'),path:'/',maxAge:600});
+  const jar=await cookies();const options={httpOnly:true,sameSite:'lax' as const,secure:appUrl().startsWith('https://'),path:'/',maxAge:600};
+  jar.set(stateCookie,fingerprint,options);
+  if(input.popup)jar.set(popupCookie,'1',options);else jar.delete(popupCookie);
   return {url:oauth.generateAuthUrl({access_type:'offline',prompt:'consent select_account',scope:[scope],include_granted_scopes:true,state})};
 }
 export async function attachAuthorizedSheet(user:User,sheetId:string,credentialId:string,worksheetName?:string){
@@ -57,7 +61,7 @@ export async function attachAuthorizedSheet(user:User,sheetId:string,credentialI
   });
 }
 export async function finishGoogleAuthorization(user:User,params:URLSearchParams){
-  const jar=await cookies();const expected=jar.get(stateCookie)?.value;jar.delete(stateCookie);
+  const jar=await cookies();const expected=jar.get(stateCookie)?.value;jar.delete(stateCookie);jar.delete(popupCookie);
   const state=params.get('state')||'';const key=`google-oauth:${hash(state)}`;
   const saved=await db.setting.findUnique({where:{key}});const pending=saved?.value as Pending|undefined;
   if(!expected||expected!==hash(`${user.id}:${user.organizationId}:${state}`)||!pending||pending.userId!==user.id||pending.organizationId!==user.organizationId||Date.now()-pending.at>600000)throw new AppError(403,'Google authorization expired. Start again.','GOOGLE_OAUTH_STATE');

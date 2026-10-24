@@ -2,7 +2,7 @@ import {afterAll,afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {db} from '@/lib/db';
 import {AuthorizedSheetsProvider,googleToken,verifyGoogleSheetEditor} from '@/lib/google';
 import {simpleSourceRows} from '@/lib/public-sheets';
-import {attachAuthorizedSheet,finishGoogleAuthorization,googleOAuthConfiguration,startGoogleAuthorization} from '@/lib/google-oauth';
+import {attachAuthorizedSheet,finishGoogleAuthorization,googleAuthorizationUsesPopup,googleOAuthConfiguration,startGoogleAuthorization} from '@/lib/google-oauth';
 import {assignLead,synchronizeSheet,writebackLead} from '@/lib/engine';
 import {decrypt,encrypt,passwordHash} from '@/lib/security';
 import {simpleAction} from '@/lib/simple';
@@ -131,6 +131,15 @@ describe('authorized Google Sheets',()=>{
 });
 
 describe('Google authorization flow',()=>{
+  it('remembers popup presentation and clears it after consent',async()=>{
+    const f=await fixture();const started=await startGoogleAuthorization(f.user,{popup:true});
+    expect(await googleAuthorizationUsesPopup()).toBe(true);
+    const state=new URL(started.url).searchParams.get('state')!;
+    await finishGoogleAuthorization(f.user,new URLSearchParams({state,code:'popup-code'}));
+    expect(await googleAuthorizationUsesPopup()).toBe(false);
+    await startGoogleAuthorization(f.user,{popup:true});await startGoogleAuthorization(f.user);
+    expect(await googleAuthorizationUsesPopup()).toBe(false);
+  });
   it('binds consent to the pasted link and current organisation and consumes state only once',async()=>{
     const f=await fixture();const url=`https://docs.google.com/spreadsheets/d/${f.sheet.spreadsheetId}/edit#gid=42`;
     const started=await startGoogleAuthorization(f.user,{url});const state=new URL(started.url).searchParams.get('state')!;
@@ -166,7 +175,7 @@ describe('Google authorization flow',()=>{
     const f=await fixture();vi.stubEnv('GOOGLE_CLIENT_SECRET','');expect(googleOAuthConfiguration()).toMatchObject({oauthConfigured:false,missing:['GOOGLE_CLIENT_SECRET']});
     await expect(startGoogleAuthorization(f.user,{sheetId:f.sheet.id})).rejects.toMatchObject({code:'GOOGLE_OAUTH_NOT_CONFIGURED'});
     vi.stubEnv('GOOGLE_CLIENT_SECRET','private-client-secret');vi.stubEnv('GOOGLE_REDIRECT_URI','https://wrong.example/callback');
-    await expect(startGoogleAuthorization(f.user)).rejects.toThrow('http://localhost:3000/api/integrations/google/callback');
+    await expect(startGoogleAuthorization(f.user)).rejects.toMatchObject({code:'GOOGLE_OAUTH_NOT_CONFIGURED'});
   });
   it('requires Google authorization before inspecting or connecting a new sheet',async()=>{
     const f=await fixture();const request=(data:unknown)=>new Request('http://localhost:3000',{method:'POST',body:JSON.stringify(data)});

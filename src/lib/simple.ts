@@ -50,7 +50,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     return {credentials,serviceAccountEmail:email,serviceAccountConfigured,...googleOAuthConfiguration()};
   }
   if(route==='google/authorize'&&method==='POST'){
-    const data=z.object({url:z.string().max(500).optional(),sheetId:z.string().optional()}).refine(value=>!!(value.url||value.sheetId),'Paste a sheet link first.').parse(await input());
+    const data=z.object({url:z.string().max(500).optional(),sheetId:z.string().optional(),popup:z.boolean().optional()}).refine(value=>!!(value.url||value.sheetId),'Paste a sheet link first.').parse(await input());
     return startGoogleAuthorization(user,data);
   }
   if(route==='google/key'&&method==='POST'){

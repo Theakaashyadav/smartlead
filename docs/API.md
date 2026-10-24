@@ -7,7 +7,7 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | GET | /api/health | Database health and configured application origin; failures return 503 with missing variable names and a safe diagnostic reason/code, never credentials, raw errors, or filesystem paths |
 | GET | /api/simple/state | Administrator; connected sheets, recipients, sending counts and feedback-link readiness |
 | GET | /api/simple/google | Administrator; credential labels, OAuth configuration status and expected redirect URI; no secrets |
-| POST | /api/simple/google/authorize | Administrator; `{url}` for a pasted sheet or `{sheetId}` for an existing connection; returns the Google consent URL |
+| POST | /api/simple/google/authorize | Administrator; `{url,popup:true}` for a pasted sheet or `{sheetId,popup:true}` for an existing connection; returns the Google consent URL |
 | POST | /api/simple/sheets/inspect | Administrator; `{url,credentialId}`; Google Sheets API inspection and Editor permission check |
 | POST | /api/simple/sheets | Administrator; `{spreadsheetId,worksheetId,credentialId,columnMapping:{customerName,mobile}}`; existing connections are authorized in place |
 | PUT | /api/simple/sheets/:id/recipients | Administrator; ordered `{recipients:[{name,phone}]}`; starts round-robin sending |
@@ -59,7 +59,7 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | GET | /api/jobs | Super Admin; latest 100 pending/dead-letter/processing jobs |
 | POST | /api/jobs/:id | Super Admin; explicit retry of dead-letter job |
 | GET | /api/integrations/google/connect | Super Admin; OAuth redirect with optional `sheet` URL or `sheetId`; user/organisation-bound, expiring single-use state |
-| GET | /api/integrations/google/callback | Super Admin; validate state, exchange code, encrypt offline credentials, check editing rights and return to Sheets |
+| GET | /api/integrations/google/callback | Super Admin; validate state, exchange code, encrypt offline credentials and check editing rights; popup flows return through `/google-complete`, redirects return to Sheets |
 | GET | /api/events | Authenticated SSE refresh ticks; no customer data broadcast |
 
 Lead/report/dashboard filters: `search`, `sheet`, `employee`, `project`, `status`, `messageStatus`, `from`, `to`. Dates accept ISO timestamps or calendar dates; calendar end dates include the whole day. Pagination: `page`, `limit`. Report types: `leads`, `sheets`, `employees`, `status`, `conversion`, `notifications`, `feedback`, `followups`.
