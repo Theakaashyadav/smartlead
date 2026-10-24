@@ -63,9 +63,8 @@ export async function inspectPublicSpreadsheet(id:string,gid?:number){
   return {title,tabs};
 }
 
-export class PublicSheetsProvider implements SheetProvider{
-  async read(sheet:Sheet):Promise<SourceRow[]>{
-    const rows=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);if(!rows.length)return [];
+export function simpleSourceRows(sheet:Sheet,rows:string[][]):SourceRow[]{
+    if(!rows.length)return [];
     const headers=rows[0].map(h=>h.trim());const mapping={...detectColumns(headers),...sheet.columnMapping as Record<string,string>};
     const original=sheet.columnMapping as Record<string,string>;
     if(!original.leadId)delete mapping.leadId;
@@ -84,8 +83,11 @@ export class PublicSheetsProvider implements SheetProvider{
       seen.add(stableId);result.push({stableId,row:index+1,values:{...values,leadId:stableId},questions:sourceQuestions(headers,rows[index])});
     }
     return result;
-  }
+}
+export class PublicSheetsProvider implements SheetProvider{
+  async read(sheet:Sheet):Promise<SourceRow[]>{return simpleSourceRows(sheet,await publicCSV(sheet.spreadsheetId,sheet.worksheetId));}
   async write(sheet:Sheet,stableId:string,_metadataId:number|null,values:Record<string,string>){
+    if(process.env.NODE_ENV==='production')throw new AppError(401,'Authorize this sheet with Google from its sheet card to save Sent Status, Shared To, Feedback and Remark.','GOOGLE_AUTH_REQUIRED');
     return writePublicSheet(sheet,stableId,values);
   }
 }

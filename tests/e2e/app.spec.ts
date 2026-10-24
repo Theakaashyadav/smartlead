@@ -56,7 +56,7 @@ test('login opens two connection cards and the real local connection pages',asyn
   await expect(page.getByLabel('Google Sheets link')).toBeVisible();
   await expect(page.getByRole('heading',{name:'Connect Google once'})).toHaveCount(0);
   await expect(page.getByLabel('Google service-account key')).toHaveCount(0);
-  await expect(page.getByRole('button',{name:'Continue',exact:true})).toBeEnabled();
+  await expect(page.getByRole('button',{name:'Continue with Google',exact:true})).toBeEnabled();
   await page.getByRole('button',{name:'Close dialog'}).click();
   await page.getByRole('link',{name:'WhatsApp',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Your WhatsApp'})).toBeVisible();
@@ -73,21 +73,41 @@ test('login opens two connection cards and the real local connection pages',asyn
   }
 });
 
-test('a public link detects columns and opens recipient selection without Google setup',async({page})=>{
+test('a pasted sheet link asks for Google authorization before detecting columns',async({page})=>{
   const sheet={id:'public-sheet-test',name:'Public leads',worksheetName:'Incoming',enabled:false,leadCount:0,recipients:[],lastSyncError:null};
   const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null},sheets:[] as typeof sheet[]};
   await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
   await page.route('**/api/simple/contacts',route=>route.fulfill({json:{data:{contacts:[]}}}));
   await page.route('**/api/simple/contacts/refresh',route=>route.fulfill({json:{data:{refreshing:true}}}));
-  let inspected:any;let saved:any;
+  let inspected:any;let saved:any;let authorized:any;
+  await page.route('**/api/simple/google/authorize',route=>{authorized=route.request().postDataJSON();return route.fulfill({json:{data:{url:`/sheets?google=connected&credential=test-credential&sheet=${encodeURIComponent(authorized.url)}`}}});});
   await page.route('**/api/simple/sheets/inspect',route=>{inspected=route.request().postDataJSON();return route.fulfill({json:{data:{spreadsheetId:'public-test-spreadsheet-123456789',title:'Public leads',gid:42,tabs:[{id:0,name:'Other',headers:['Full Name','Phone Number']},{id:42,name:'Incoming',headers:['Name','Phone']}]}}});});
   await page.route('**/api/simple/sheets',route=>{saved=route.request().postDataJSON();state.sheets=[sheet];return route.fulfill({json:{data:{id:sheet.id}}});});
   await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect sheet',exact:true}).first().click();
   const url='https://docs.google.com/spreadsheets/d/public-test-spreadsheet-123456789/edit#gid=42';
-  await page.getByLabel('Google Sheets link').fill(url);await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.getByLabel('Google Sheets link').fill(url);expect(inspected).toBeUndefined();
+  await page.screenshot({path:'data/google-authorization-connect.png',fullPage:true});
+  await page.getByRole('button',{name:'Continue with Google',exact:true}).click();
   await expect(page.getByLabel('Sheet tab')).toHaveValue('42');await expect(page.getByLabel('Customer name column')).toHaveValue('Name');await expect(page.getByLabel('Phone number column')).toHaveValue('Phone');
+  await page.screenshot({path:'data/google-authorization-columns.png',fullPage:true});
   await page.getByRole('dialog').getByRole('button',{name:'Connect sheet',exact:true}).click();await expect(page.getByRole('heading',{name:'Who should receive these leads?'})).toBeVisible();
-  expect(inspected).toEqual({url});expect(saved).toEqual({spreadsheetId:'public-test-spreadsheet-123456789',worksheetId:42,columnMapping:{customerName:'Name',mobile:'Phone'}});
+  expect(authorized).toEqual({url});expect(inspected).toEqual({url,credentialId:'test-credential'});expect(saved).toEqual({spreadsheetId:'public-test-spreadsheet-123456789',worksheetId:42,credentialId:'test-credential',columnMapping:{customerName:'Name',mobile:'Phone'}});
+});
+
+test('an existing sheet offers Google authorization and shows missing setup without losing its connection',async({page})=>{
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:null,sheets:[{id:'existing-sheet',name:'Existing leads',worksheetName:'Leads',googleAuthorized:false,enabled:false,leadCount:9,recipients:[],lastSyncError:null}]};
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
+  let request:any;
+  await page.route('**/api/simple/google/authorize',route=>{request=route.request().postDataJSON();return route.fulfill({status:503,json:{error:{message:'Google sign-in is not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in your hosting environment.'}}});});
+  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Authorize with Google',exact:true}).click();
+  await expect(page.locator('.simple-main').getByRole('alert')).toContainText('Google sign-in is not configured');
+  await expect(page.getByRole('heading',{name:'Existing leads'})).toBeVisible();expect(request).toEqual({sheetId:'existing-sheet'});
+});
+
+test('denied Google consent shows an error without opening a sheet form',async({page})=>{
+  await login(page);await page.goto('/sheets?google=error&message=Google%20access%20was%20not%20approved.');
+  await expect(page.locator('.simple-main').getByRole('alert')).toContainText('Google access was not approved.');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
 test('offline WhatsApp connections show an error and keep the retry button usable',async({page})=>{

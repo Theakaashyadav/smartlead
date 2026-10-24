@@ -1,9 +1,9 @@
 import { GoogleAuth, OAuth2Client } from 'google-auth-library';
 import type { Sheet } from '@/generated/mongo';
 import { db } from './db';
-import { AppError, decrypt, hash, opaqueToken } from './security';
+import { AppError, decrypt, encrypt, hash, opaqueToken } from './security';
 import { MANAGED } from './validation';
-import { PublicSheetsProvider } from './public-sheets';
+import { PublicSheetsProvider, simpleSourceRows } from './public-sheets';
 import { LEGACY_ORGANIZATION } from './organizations';
 import { DELIVERY_COLUMNS, SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
 import { expectedOutputValue, legacyRemarkColumn, nextOutputMove, outputColumns, simpleOutputValues } from './sheet-output';
@@ -25,8 +25,11 @@ export async function googleToken(credentialId?: string|null,organizationId=LEGA
     }
     const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI);
     client.setCredentials(tokens);
-    const result=await client.getAccessToken();
-    if(!result.token) throw new AppError(400,'Reconnect your Google account');
+    let result;
+    try{result=await client.getAccessToken();}catch{throw new AppError(401,'Google access expired or was revoked. Authorize this sheet with Google again.','GOOGLE_AUTH_REQUIRED');}
+    if(!result.token) throw new AppError(401,'Authorize this sheet with Google again.','GOOGLE_AUTH_REQUIRED');
+    const refreshed={...tokens,...client.credentials,refresh_token:client.credentials.refresh_token||tokens.refresh_token};
+    if(JSON.stringify(refreshed)!==JSON.stringify(tokens))await db.googleCredential.updateMany({where:{id:credential.id,organizationId,encryptedValue:credential.encryptedValue},data:{encryptedValue:encrypt(JSON.stringify(refreshed))}});
     return result.token;
   }
   if(organizationId!==LEGACY_ORGANIZATION||!process.env.GOOGLE_SERVICE_ACCOUNT_BASE64) throw new AppError(400,'Connect your organisation\'s Google account or service account first');
@@ -36,14 +39,30 @@ export async function googleToken(credentialId?: string|null,organizationId=LEGA
   if(!token) throw new AppError(400,'Google authorization failed');
   return token;
 }
-async function googleRequest(spreadsheetId: string, suffix: string, token: string, body?: unknown) {
+export async function googleRequest(spreadsheetId: string, suffix: string, token: string, body?: unknown) {
   if(!/^[\w-]+$/.test(spreadsheetId)) throw new AppError(400,'Invalid spreadsheet ID');
   const response=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}${suffix}`,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(30000)});
   if(!response.ok) {
+    if(response.status===401)throw new AppError(401,'Google access expired or was revoked. Authorize this sheet with Google again.','GOOGLE_AUTH_REQUIRED');
+    if(response.status===403){
+      const failure=await response.json().catch(()=>null);
+      if(JSON.stringify(failure).includes('SERVICE_DISABLED')||JSON.stringify(failure).includes('accessNotConfigured'))throw new AppError(503,'Enable Google Sheets API in the Google Cloud project used by this app.','GOOGLE_API_DISABLED');
+      throw new AppError(403,'Your selected Google account needs Editor access to this spreadsheet. Share it with that account as Editor, then authorize again.','SHEET_READ_ONLY');
+    }
     const reason=response.status===403?'Share this spreadsheet with the connected account as Editor':response.status===429?'Google API quota reached; synchronization will retry':response.status===404?'Spreadsheet not found; verify its URL':'Google Sheets is temporarily unavailable';
     throw new AppError(response.status===429?429:502,reason);
   }
   return response.json();
+}
+export async function verifyGoogleSheetEditor(spreadsheetId:string,credentialId:string,organizationId:string){
+  const token=await googleToken(credentialId,organizationId);
+  const key=`smartlead_access_${opaqueToken()}`;
+  // An atomic create/delete proves write permission without changing cells or
+  // leaving application metadata behind on the source spreadsheet.
+  await googleRequest(spreadsheetId,':batchUpdate',token,{requests:[
+    {createDeveloperMetadata:{developerMetadata:{metadataKey:key,metadataValue:'access-check',location:{spreadsheet:true},visibility:'DOCUMENT'}}},
+    {deleteDeveloperMetadata:{dataFilter:{developerMetadataLookup:{metadataKey:key}}}},
+  ]});
 }
 export async function inspectSpreadsheet(spreadsheetId:string, credentialId?:string|null,organizationId=LEGACY_ORGANIZATION) {
   const token=await googleToken(credentialId,organizationId);
@@ -194,7 +213,8 @@ export class GoogleSheetsProvider implements SheetProvider {
     const current=await googleRequest(sheet.spreadsheetId,'/values:batchGetByDataFilter',token,{dataFilters:[filter]});
     if(current.valueRanges?.length!==1) throw new AppError(409,'The original row was deleted or its identity is missing. No cells were updated.');
     const source=current.valueRanges[0].valueRange.values?.[0]||[];
-    if(source[headers.indexOf(map.leadId)]!==stableId) throw new AppError(409,'Source Lead ID changed. No cells were updated.');
+    const identityMatches=sheet.connectionType==='SIMPLE_GOOGLE'?simpleSourceRows(sheet,[headers,source])[0]?.stableId===stableId:source[headers.indexOf(map.leadId)]===stableId;
+    if(!identityMatches) throw new AppError(409,'Source lead identity changed. No cells were updated.');
     const lead=await db.lead.findUnique({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
     const snapshot=(lead?.managedSnapshot||{}) as Record<string,string>;
     const output:Array<string|null>=Array(headers.length).fill(null);
@@ -209,6 +229,44 @@ export class GoogleSheetsProvider implements SheetProvider {
     const written=await googleRequest(sheet.spreadsheetId,'/values:batchUpdateByDataFilter',token,{valueInputOption:'RAW',data:[{dataFilter:filter,values:[output]}]});
     if(written.totalUpdatedRows!==1) throw new AppError(409,'The source row could not be updated safely');
     if(simple)return Object.fromEntries(outputColumns([headers]).map(column=>[column.field,values[column.field]??String(source[column.index]||'')]));
+  }
+}
+
+// OAuth connections retain the public connector's identities, so authorizing an
+// existing connection never imports duplicate leads or resends submitted ones.
+export class AuthorizedSheetsProvider implements SheetProvider {
+  async read(sheet:Sheet){
+    const token=await googleToken(sheet.credentialId,sheet.organizationId);
+    const data=await googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(tabRange(sheet))}`,token);
+    return simpleSourceRows(sheet,(data.values||[]).map((row:unknown[])=>row.map(value=>String(value??''))));
+  }
+  async write(sheet:Sheet,stableId:string,_metadataId:number|null,values:Record<string,string>){
+    const lead=await db.lead.findUnique({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
+    if(!lead||lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'The original lead is no longer available for sheet updates.');
+    const token=await googleToken(sheet.credentialId,sheet.organizationId);
+    const key=`smartlead_oauth_${sheet.organizationId}_${sheet.worksheetId}`;
+    const [data,info]=await Promise.all([
+      googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(tabRange(sheet))}`,token),
+      googleRequest(sheet.spreadsheetId,'?fields=developerMetadata',token),
+    ]);
+    const rows:string[][]=(data.values||[]).map((row:unknown[])=>row.map(value=>String(value??'')));
+    const source=simpleSourceRows(sheet,rows).filter(row=>row.stableId===stableId);
+    if(source.length!==1)throw new AppError(409,'The original lead row was deleted or duplicated. Sheet update stopped.');
+    const tags:Metadata[]=(info.developerMetadata||[]).filter((tag:Metadata)=>tag.metadataKey===key&&tag.metadataValue===stableId&&tag.location.dimensionRange?.sheetId===sheet.worksheetId);
+    if(tags.length>1)throw new AppError(409,'Duplicate row identities found. Review this row before retrying.');
+    let metadataId=tags[0]?.metadataId;
+    if(!metadataId){
+      const tagged=await googleRequest(sheet.spreadsheetId,':batchUpdate',token,{requests:[{createDeveloperMetadata:{developerMetadata:{metadataKey:key,metadataValue:stableId,visibility:'DOCUMENT',location:{dimensionRange:{sheetId:sheet.worksheetId,dimension:'ROWS',startIndex:source[0].row-1,endIndex:source[0].row}}}}}]});
+      metadataId=tagged.replies?.[0]?.createDeveloperMetadata?.developerMetadata?.metadataId;
+    }
+    if(!metadataId)throw new AppError(502,'Google did not confirm the lead row identity. The sheet update will retry.');
+    const observed=await new GoogleSheetsProvider().write(sheet,stableId,metadataId,values);
+    const verified=await googleRequest(sheet.spreadsheetId,'/values:batchGetByDataFilter',token,{dataFilters:[{developerMetadataLookup:{metadataId}}]});
+    const headers=await googleRequest(sheet.spreadsheetId,`/values/${encodeURIComponent(`${tabRange(sheet)}!1:1`)}`,token);
+    const cells=(verified.valueRanges?.[0]?.valueRange?.values?.[0]||[]).map(String);
+    const layout:string[]=headers.values?.[0]||[];
+    if(verified.valueRanges?.length!==1||simpleSourceRows(sheet,[layout,cells])[0]?.stableId!==stableId||!outputColumns([layout],Object.keys(values)).every(c=>(cells[c.index]||'')===values[c.field]))throw new AppError(502,'Google has not confirmed the saved lead fields. The sheet update will retry.');
+    return observed;
   }
 }
 
@@ -229,5 +287,5 @@ export class DemoSheetsProvider implements SheetProvider {
     await db.setting.upsert({where:{key:`demo-source:${sheet.id}`},create:{key:`demo-source:${sheet.id}`,value:JSON.parse(JSON.stringify(rows))},update:{value:JSON.parse(JSON.stringify(rows))}});
   }
 }
-export const sheetProvider=(sheet:Sheet):SheetProvider=>sheet.connectionType==='DEMO'?new DemoSheetsProvider():sheet.connectionType==='SIMPLE_PUBLIC'?new PublicSheetsProvider():new GoogleSheetsProvider();
+export const sheetProvider=(sheet:Sheet):SheetProvider=>sheet.connectionType==='DEMO'?new DemoSheetsProvider():sheet.connectionType==='SIMPLE_GOOGLE'?new AuthorizedSheetsProvider():sheet.connectionType==='SIMPLE_PUBLIC'?new PublicSheetsProvider():new GoogleSheetsProvider();
 export const sourceFingerprint=(values:Record<string,string>)=>hash(JSON.stringify(Object.fromEntries(['customerName','mobile','email','project','location','budget','source','requirement','leadDate'].map(k=>[k,values[k]||'']))));

@@ -6,8 +6,10 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | --- | --- | --- |
 | GET | /api/health | Database health and configured application origin; failures return 503 with missing variable names and a safe diagnostic reason/code, never credentials, raw errors, or filesystem paths |
 | GET | /api/simple/state | Administrator; connected sheets, recipients, sending counts and feedback-link readiness |
-| POST | /api/simple/sheets/inspect | Administrator; `{url}` for a publicly shared Google Sheet; no Google credentials |
-| POST | /api/simple/sheets | Administrator; `{spreadsheetId,worksheetId,columnMapping:{customerName,mobile}}` |
+| GET | /api/simple/google | Administrator; credential labels, OAuth configuration status and expected redirect URI; no secrets |
+| POST | /api/simple/google/authorize | Administrator; `{url}` for a pasted sheet or `{sheetId}` for an existing connection; returns the Google consent URL |
+| POST | /api/simple/sheets/inspect | Administrator; `{url,credentialId}`; Google Sheets API inspection and Editor permission check |
+| POST | /api/simple/sheets | Administrator; `{spreadsheetId,worksheetId,credentialId,columnMapping:{customerName,mobile}}`; existing connections are authorized in place |
 | PUT | /api/simple/sheets/:id/recipients | Administrator; ordered `{recipients:[{name,phone}]}`; starts round-robin sending |
 | POST | /api/auth/login | `{email,password,code?}`; optional authenticator code |
 | POST | /api/auth/logout | Revoke current session |
@@ -56,8 +58,8 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | GET/POST | /api/users | Super Admin; safe profiles / new manager or super administrator with sheet access |
 | GET | /api/jobs | Super Admin; latest 100 pending/dead-letter/processing jobs |
 | POST | /api/jobs/:id | Super Admin; explicit retry of dead-letter job |
-| GET | /api/integrations/google/connect | Super Admin; OAuth redirect and single-use state cookie |
-| GET | /api/integrations/google/callback | Super Admin; validate state, exchange code, encrypt offline credentials |
+| GET | /api/integrations/google/connect | Super Admin; OAuth redirect with optional `sheet` URL or `sheetId`; user/organisation-bound, expiring single-use state |
+| GET | /api/integrations/google/callback | Super Admin; validate state, exchange code, encrypt offline credentials, check editing rights and return to Sheets |
 | GET | /api/events | Authenticated SSE refresh ticks; no customer data broadcast |
 
 Lead/report/dashboard filters: `search`, `sheet`, `employee`, `project`, `status`, `messageStatus`, `from`, `to`. Dates accept ISO timestamps or calendar dates; calendar end dates include the whole day. Pagination: `page`, `limit`. Report types: `leads`, `sheets`, `employees`, `status`, `conversion`, `notifications`, `feedback`, `followups`.
@@ -74,6 +76,6 @@ Feedback example:
 
 A stale version returns 409; refresh the record and review the accepted update before retrying. Feedback can be saved successfully while sheet writeback remains pending/error. Repeated updates create feedback history, not duplicate leads.
 
-For simple public-sheet connections, `GET /api/feedback/:token` includes `simple: true`, the sheet name, ordered source questions and answers, the current lead version and `writebackStatus`. The employee form submits only status, remarks and version. The worker writes **lead_status**, **shared to** (current primary employee name) and **Feedback** to the same source identity. The UI reports a confirmed sheet save only after `writebackStatus` becomes `SYNCED`.
+For simple sheet connections, `GET /api/feedback/:token` includes `simple: true`, the sheet name, ordered source questions and answers, the current lead version and `writebackStatus`. The employee form submits only status, remarks and version. The worker writes **Sent Status**, **Shared To** (confirmed successful recipients), **Feedback** (lead status) and **Remark** to the same source identity. Authorized connections verify the API result before `writebackStatus` becomes `SYNCED`. Existing public connections require Google authorization for production writeback; authorization preserves lead identities and sending history.
 
 Demo-only endpoints: `POST /api/sheets/:id/demo-lead` inserts a fictional source row and processes the workflow; `GET /api/sheets/:id/source` reads that scoped durable source fixture. Demo providers are unavailable for new production connections.

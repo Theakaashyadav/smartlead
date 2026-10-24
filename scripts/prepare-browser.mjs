@@ -7,8 +7,9 @@ import { spawnSync } from 'node:child_process';
 // Prepare the browser during the Linux build, never during a user's request.
 const skip = process.env.PUPPETEER_SKIP_DOWNLOAD;
 const skipDownload = skip !== undefined && !['', '0', 'false', 'off'].includes(skip.toLowerCase());
+const needsBrowser = !!process.env.WHATSAPP_LOGIN_MODE && process.env.WHATSAPP_LOGIN_MODE !== 'socket';
 const installed = [process.env.CHROME_PATH, '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].some(file => file && existsSync(file));
-if (process.platform === 'linux' && !skipDownload && !installed) {
+if (process.platform === 'linux' && needsBrowser && !skipDownload && !installed) {
   const require = createRequire(import.meta.url);
   const cli = path.join(path.dirname(require.resolve('puppeteer/package.json')), 'lib', 'puppeteer', 'node', 'cli.js');
   console.log('Preparing the hosted Chromium browser for SmartLead.');

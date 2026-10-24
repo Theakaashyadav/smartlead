@@ -60,16 +60,18 @@ describe('public Google Sheets links',()=>{
     expect(parseSheetCSV('\uFEFFName,Phone,Notes\r\n"A, B",00123456789,"Line one\nLine ""two"""\r\nC,+919876543210,')).toEqual([['Name','Phone','Notes'],['A, B','00123456789','Line one\nLine "two"'],['C','+919876543210','']]);
     expect(()=>parseSheetCSV('Name,Phone\n"Incomplete')).toThrow(/incomplete/);
   });
-  it('inspects all public tabs and connects without requesting credentials or source edits',async()=>{
+  it('inspects authenticated tabs and connects with Google credentials without changing source cells',async()=>{
     const {admin}=await fixture();
-    const fetcher=vi.fn(async(url:string,_init?:RequestInit)=>new Response(url.endsWith('/htmlview')?html:'Name,Phone\nCustomer,9876543210',{headers:{'content-type':url.endsWith('/htmlview')?'text/html':'text/csv'}}));vi.stubGlobal('fetch',fetcher);
-    const info=await simpleAction(['sheets','inspect'],'POST',new Request('http://localhost:3000',{method:'POST',body:JSON.stringify({url:`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=42`})}),admin) as any;
+    const credential=await db.googleCredential.create({data:{organizationId:'legacy',label:'Google',type:'SERVICE_ACCOUNT',encryptedValue:encrypt('{}')}});
+    const fetcher=vi.fn(async(url:string,init?:RequestInit)=>Response.json(url.includes('/values/')?{values:url.includes('1%3A1')?[['Name','Phone']]:[['Name','Phone'],['Customer','9876543210']]}:init?.body?{replies:[]}:{properties:{title:'Sales & Leads'},sheets:[{properties:{sheetId:42,title:'Incoming'}},{properties:{sheetId:7,title:'Second tab'}}]}));vi.stubGlobal('fetch',fetcher);
+    const info=await simpleAction(['sheets','inspect'],'POST',new Request('http://localhost:3000',{method:'POST',body:JSON.stringify({url:`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=42`,credentialId:credential.id})}),admin) as any;
     expect(info).toMatchObject({title:'Sales & Leads',gid:42,tabs:[{id:42,name:'Incoming',headers:['Name','Phone']},{id:7,name:'Second tab'}]});
-    const result=await simpleAction(['sheets'],'POST',new Request('http://localhost:3000',{method:'POST',body:JSON.stringify({spreadsheetId,worksheetId:42,columnMapping:{customerName:'Name',mobile:'Phone'}})}),admin) as {id:string};
-    const sheet=await db.sheet.findUniqueOrThrow({where:{id:result.id},include:{rule:true}});expect(sheet).toMatchObject({connectionType:'SIMPLE_PUBLIC',credentialId:null,managedColumnsApproved:false,worksheetId:42,worksheetName:'Incoming',rule:{enabled:false}});
+    const result=await simpleAction(['sheets'],'POST',new Request('http://localhost:3000',{method:'POST',body:JSON.stringify({spreadsheetId,worksheetId:42,credentialId:credential.id,columnMapping:{customerName:'Name',mobile:'Phone'}})}),admin) as {id:string};
+    const sheet=await db.sheet.findUniqueOrThrow({where:{id:result.id},include:{rule:true}});expect(sheet).toMatchObject({connectionType:'SIMPLE_GOOGLE',credentialId:credential.id,managedColumnsApproved:false,worksheetId:42,worksheetName:'Incoming',rule:{enabled:false}});
     expect(await synchronizeSheet(sheet.id)).toMatchObject({imported:1});expect(await db.message.count({where:{lead:{sheetId:sheet.id}}})).toBe(0);
-    for(const call of fetcher.mock.calls){expect(call[0]).toMatch(/^https:\/\/docs\.google\.com\/spreadsheets\/d\//);expect(call[1]).toMatchObject({cache:'no-store'});expect(call[1]).not.toHaveProperty('headers.Authorization');expect(call[1]).not.toHaveProperty('method');}
-    expect(await db.googleCredential.count()).toBe(0);
+    for(const call of fetcher.mock.calls){expect(call[0]).toMatch(/^https:\/\/sheets\.googleapis\.com\//);expect(call[1]?.headers).toMatchObject({Authorization:'Bearer test-google-token'});}
+    expect(fetcher.mock.calls.some(call=>call[0].includes('/values:batchUpdate'))).toBe(false);
+    expect(await db.googleCredential.count()).toBe(1);
   });
   it('keeps source identities after edits and reordering, skips repeated phone rows and imports new leads',async()=>{
     await fixture();const sheet=await db.sheet.update({where:{id:'sheet'},data:{spreadsheetId,worksheetId:42,connectionType:'SIMPLE_PUBLIC',managedColumnsApproved:false,columnMapping:{customerName:'Name',mobile:'Phone'}}});

@@ -5,7 +5,7 @@ const config: NextConfig = {
     '/*': ['./data/**/*', '.env.admin-phone', '.env.hostinger', '.env.sheet-preview'],
   },
   outputFileTracingIncludes: {
-    '/*': ['.puppeteerrc.cjs', 'node_modules/.cache/puppeteer/**/*', 'src/generated/mongo/**/*', 'src/generated/demo/**/*'],
+    '/*': ['.puppeteerrc.cjs', ...(process.env.WHATSAPP_LOGIN_MODE && process.env.WHATSAPP_LOGIN_MODE !== 'socket' ? ['node_modules/.cache/puppeteer/**/*'] : []), 'src/generated/mongo/**/*', 'src/generated/demo/**/*'],
   },
   logging: { incomingRequests: false, browserToTerminal: false },
   serverExternalPackages: ['baileys', 'pino', 'whatsapp-rust-bridge', 'whatsapp-web.js', 'puppeteer', 'pdfkit', 'exceljs', 'mongodb'],

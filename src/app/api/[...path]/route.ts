@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
 import { z, ZodError } from 'zod';
-import { OAuth2Client } from 'google-auth-library';
 import { TOTP, Secret } from 'otpauth';
 import QRCode from 'qrcode';
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -22,6 +20,7 @@ import { feedbackBaseURL } from '@/lib/feedback-url';
 import { databaseFailure, safeDatabaseErrorCode } from '@/lib/database-errors';
 import { requireWhatsAppWorker, workerHeartbeatFresh } from '@/lib/worker-status';
 import { SIMPLE_POLL_SECONDS, SEND_INTERVAL_MS } from '@/lib/automation-policy';
+import { finishGoogleAuthorization, startGoogleAuthorization } from '@/lib/google-oauth';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -247,10 +246,12 @@ async function handler(request:Request,context:Context):Promise<Response> {
     if(route==='jobs'&&method==='GET'){await requireUser(['SUPER_ADMIN']);return ok(await db.job.findMany({where:{organizationId:user.organizationId,status:{in:['PENDING','DEAD','PROCESSING']}},orderBy:{createdAt:'desc'},take:100}));}
     if(path[0]==='jobs'&&path[1]&&method==='POST'){await requireUser(['SUPER_ADMIN']);const job=await db.job.findFirst({where:{id:path[1],organizationId:user.organizationId}});if(!job||job.status!=='DEAD')throw new AppError(400,'Only dead-letter jobs can be retried');await db.job.update({where:{id:job.id},data:{status:'PENDING',attempts:0,runAt:new Date(),error:null}});await demoDrain(user.organizationId);return ok({queued:true});}
     if(route==='integrations/google/connect'){
-      await requireUser(['SUPER_ADMIN']);if(!process.env.GOOGLE_CLIENT_ID||!process.env.GOOGLE_CLIENT_SECRET)throw new AppError(400,'Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET before connecting');const state=opaqueToken();(await cookies()).set('google_oauth_state',hash(`${user.id}:${user.organizationId}:${state}`),{httpOnly:true,sameSite:'lax',secure:appUrl().startsWith('https://'),path:'/',maxAge:600});const oauth=new OAuth2Client(process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI);return NextResponse.redirect(oauth.generateAuthUrl({access_type:'offline',prompt:'consent',scope:['https://www.googleapis.com/auth/spreadsheets'],state}));
+      await requireUser(['SUPER_ADMIN']);const result=await startGoogleAuthorization(user,{url:p.get('sheet')||undefined,sheetId:p.get('sheetId')||undefined});return NextResponse.redirect(result.url);
     }
     if(route==='integrations/google/callback'){
-      await requireUser(['SUPER_ADMIN']);const expected=(await cookies()).get('google_oauth_state')?.value;(await cookies()).delete('google_oauth_state');if(!expected||hash(`${user.id}:${user.organizationId}:${p.get('state')||''}`)!==expected||!p.get('code'))throw new AppError(403,'Google authorization expired. Start again.');const oauth=new OAuth2Client(process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI);const {tokens}=await oauth.getToken(p.get('code')!);if(!tokens.refresh_token)throw new AppError(400,'Google did not return offline access. Revoke previous access and reconnect.');await db.googleCredential.create({data:{organizationId:user.organizationId,label:`Google account · ${new Date().toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata'})}`,type:'OAUTH',encryptedValue:encrypt(JSON.stringify(tokens))}});await audit(user.id,'CONNECT_GOOGLE','integration');return NextResponse.redirect(`${appUrl()}/sheets?google=connected`);
+      await requireUser(['SUPER_ADMIN']);
+      try{return NextResponse.redirect(await finishGoogleAuthorization(user,p));}
+      catch(error){const destination=new URL('/sheets',appUrl());destination.searchParams.set('google','error');destination.searchParams.set('message',error instanceof AppError?error.message:'Google authorization could not be completed. Please try again.');return NextResponse.redirect(destination);}
     }
     if(route==='events'){
       const encoder=new TextEncoder();let timer:ReturnType<typeof setInterval>;const stream=new ReadableStream({start(controller){controller.enqueue(encoder.encode('event: ready\ndata: {}\n\n'));timer=setInterval(()=>{controller.enqueue(encoder.encode(`event: refresh\ndata: {"at":${Date.now()}}\n\n`));},15000);request.signal.addEventListener('abort',()=>{clearInterval(timer);try{controller.close();}catch{}});},cancel(){clearInterval(timer);}});return new Response(stream,{headers:{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'}});
