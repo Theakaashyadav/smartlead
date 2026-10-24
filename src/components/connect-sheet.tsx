@@ -4,7 +4,7 @@ import {ArrowRight,Check,Copy,ExternalLink,FileSpreadsheet} from 'lucide-react';
 import {api,Button,Field,Modal,Select} from './ui';
 import {detectColumns,spreadsheetIdentity} from '@/lib/simple-shared';
 
-type Setup={setupId:string;code:string;sheetUrl:string};
+type Setup={setupId:string;code:string;sheetUrl:string;endpoint?:string};
 type Inspection={spreadsheetId:string;title:string;gid?:number;scriptSetupId:string;canRead:boolean;canWrite:boolean;tabs:{id:number;name:string;headers:string[]}[]};
 export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{id:string;name:string}|null;onClose:()=>void;onConnected:(id:string,reauthorized?:boolean)=>Promise<void>}){
   const [url,setUrl]=useState('');const [setup,setSetup]=useState<Setup|null>(null);const [endpoint,setEndpoint]=useState('');const [info,setInfo]=useState<Inspection|null>(null);
@@ -12,7 +12,7 @@ export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{i
   const message=(error:unknown)=>error instanceof Error?error.message:'Please try again.';
   useEffect(()=>{
     if(!initialSheet)return;let active=true;
-    api<Setup>('simple/sheets/script','POST',{sheetId:initialSheet.id}).then(result=>{if(active)setSetup(result);}).catch(error=>{if(active)setError(message(error));}).finally(()=>{if(active)setBusy(false);});
+    api<Setup>('simple/sheets/script','POST',{sheetId:initialSheet.id}).then(result=>{if(active){setSetup(result);setEndpoint(result.endpoint||'');}}).catch(error=>{if(active)setError(message(error));}).finally(()=>{if(active)setBusy(false);});
     return()=>{active=false;};
   },[initialSheet]);
   async function prepare(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{spreadsheetIdentity(url);setSetup(await api<Setup>('simple/sheets/script','POST',{url}));}catch(error){setError(message(error));}finally{setBusy(false);}}
@@ -35,7 +35,7 @@ export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{i
       </ol>
       <div><Button type="button" onClick={copy}>{copied?<Check size={16}/>:<Copy size={16}/>} {copied?'Code copied':'Copy Apps Script code'}</Button></div>
       <Field label="Apps Script code"><textarea readOnly spellCheck={false} rows={10} value={setup.code} className="simple-script-code" onFocus={e=>e.currentTarget.select()}/></Field>
-      <p className="simple-share-note">Keep this code private. It contains the connection key for this sheet. If you replace an earlier script, deploy a new version before checking.</p>
+      <p className="simple-share-note">Keep this code private. It contains the connection key for this sheet. For an existing script, save the code, then choose Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy. Saving alone does not update the live web app.</p>
       <Field label="Apps Script web app URL"><input type="url" required value={endpoint} placeholder="https://script.google.com/macros/s/…/exec" onChange={e=>setEndpoint(e.target.value)}/></Field>
       <Button type="submit" variant="primary" busy={busy}>Check connection<ArrowRight size={16}/></Button>
     </form>:<form className="simple-form" onSubmit={connect}>

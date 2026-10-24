@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { db } from './db';
 import { AppError, audit, encrypt, opaqueToken, safeUser } from './security';
-import { enqueue, transaction } from './engine';
+import { enqueue, transaction, updateLeadSheetNow } from './engine';
 import { inspectSpreadsheet, verifyGoogleSheetEditor } from './google';
 import { attachAuthorizedSheet, googleOAuthConfiguration, startGoogleAuthorization } from './google-oauth';
 import { phoneSchema } from './validation';
@@ -145,6 +145,18 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       await tx.auditLog.create({data:{userId:user.id,action:'DELETE_SHEET',entityType:'sheet',entityId:sheet.id,metadata:{name:sheet.name,leads:leads.length}}});
       return {deleted:true};
     });
+  }
+  if(path[0]==='sheets'&&path[1]&&path[2]==='writeback'&&path.length===3&&method==='POST'){
+    const sheet=await sheetById(path[1],organizationId);
+    const leads=await db.lead.findMany({where:{sheetId:sheet.id,sourceDeleted:false,writebackStatus:{in:['PENDING','ERROR']}},select:{id:true,redactedAt:true},orderBy:{updatedAt:'asc'}});
+    const available=leads.filter(l=>!l.redactedAt);
+    for(const lead of available){
+      const active=await db.job.findFirst({where:{type:'WRITEBACK',entityId:lead.id,status:{in:['PENDING','PROCESSING','DEAD']}},orderBy:{createdAt:'asc'}});
+      if(active)await db.job.updateMany({where:{id:active.id,status:{in:['PENDING','DEAD']}},data:{status:'PENDING',attempts:0,runAt:new Date(),error:null}});
+      else await enqueue(db,'WRITEBACK',lead.id,`writeback:manual:${lead.id}:${opaqueToken()}`);
+    }
+    const writeback=available.length?await updateLeadSheetNow(available[0].id):{status:'SYNCED',error:null};
+    return {attempted:available.length?1:0,remaining:await db.lead.count({where:{sheetId:sheet.id,sourceDeleted:false,writebackStatus:{in:['PENDING','ERROR']}}}),writeback};
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='recipients'&&method==='PUT'){
     const sheet=await sheetById(path[1],organizationId);

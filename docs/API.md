@@ -13,6 +13,7 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | POST | /api/simple/sheets/inspect | Administrator; `{url,credentialId}`; Google Sheets API inspection and Editor permission check |
 | POST | /api/simple/sheets | Administrator; {scriptSetupId,spreadsheetId,worksheetId,columnMapping}; consume a checked setup and create or upgrade the existing connection. Legacy credentialId input remains supported. |
 | PUT | /api/simple/sheets/:id/recipients | Administrator; ordered `{recipients:[{name,phone}]}`; starts round-robin sending |
+| POST | /api/simple/sheets/:id/writeback | Administrator; retry saved output updates for this organisation's sheet; immediately attempt the first waiting lead; never sends WhatsApp messages or resumes distribution |
 | POST | /api/auth/login | `{email,password,code?}`; optional authenticator code |
 | POST | /api/auth/logout | Revoke current session |
 | GET | /api/auth/me | Current safe user profile |

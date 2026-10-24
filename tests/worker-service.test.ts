@@ -20,6 +20,13 @@ beforeEach(async()=>{
 afterEach(async()=>{for(const service of services.splice(0)){service.stop();await service.done;}vi.unstubAllEnvs();});
 afterAll(()=>db.$disconnect());
 describe('worker embedded in the website process',()=>{
+  it('keeps sheet writes running while WhatsApp contacts are still loading',async()=>{
+    vi.stubEnv('WHATSAPP_LOGIN_MODE','socket');let finish!:()=>void;const contacts=new Promise<void>(resolve=>{finish=resolve;});let writes=0,loading=false;
+    mocks.drain.mockImplementation(async(_limit,_delay,_organization,_running,types:string[])=>{if(types?.includes('CONTACTS')){loading=true;await contacts;}if(types?.includes('WRITEBACK'))writes++;return 0;});
+    const service=startWorkerService();services.push(service);
+    try{await vi.waitFor(()=>expect(loading).toBe(true));await vi.waitFor(()=>expect(writes).toBeGreaterThanOrEqual(2));}
+    finally{service.stop();finish();await service.done;}
+  });
   it('keeps the send lane running while a sheet download is still in progress',async()=>{
     vi.stubEnv('WHATSAPP_LOGIN_MODE','socket');
     let finish!:()=>void;const sheetRead=new Promise<void>(resolve=>{finish=resolve;});

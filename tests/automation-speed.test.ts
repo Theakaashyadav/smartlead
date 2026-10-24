@@ -1,10 +1,10 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '@/lib/db';
 import { clearTestModels } from './database-fixture';
-import { drainJobs, scheduleJobs, synchronizeSheet } from '@/lib/engine';
+import { drainJobs, processJob, scheduleJobs, synchronizeSheet } from '@/lib/engine';
 import { sheetPollSeconds } from '@/lib/automation-policy';
 import { DemoWhatsAppProvider } from '@/lib/whatsapp';
-import type { SheetProvider, SourceRow } from '@/lib/google';
+import { DemoSheetsProvider, type SheetProvider, type SourceRow } from '@/lib/google';
 import { SIMPLE_TEMPLATE } from '@/lib/simple-shared';
 
 beforeEach(async()=>{
@@ -25,6 +25,40 @@ async function fixture(){
 }
 
 describe('fast public-sheet lead delivery',()=>{
+  it('starts a new delivery write ahead of a backlog of failing sheet retries',async()=>{
+    const f=await fixture();await synchronizeSheet(f.sheet.id,f.provider,{refreshQueued:false});await db.sheet.update({where:{id:f.sheet.id},data:{connectionType:'DEMO'}});
+    const leads=await db.lead.findMany({where:{sheetId:f.sheet.id},orderBy:{sourceRow:'asc'}});
+    await db.job.create({data:{organizationId:'legacy',type:'WRITEBACK',entityId:leads[0].id,key:'retry-backlog',runAt:new Date(0),error:'Old script failure'}});
+    const fresh=await db.job.create({data:{organizationId:'legacy',type:'WRITEBACK',entityId:leads[1].id,key:'new-delivery',runAt:new Date(Date.now()-1000)}});
+    const write=vi.spyOn(DemoSheetsProvider.prototype,'write').mockResolvedValue(undefined);
+    await drainJobs(1,0,undefined,()=>true,['WRITEBACK']);expect(write.mock.calls[0][1]).toBe(leads[1].stableSourceId);expect((await db.job.findUniqueOrThrow({where:{id:fresh.id}})).status).toBe('COMPLETED');
+  });
+  it('runs waiting output work ahead of an older failed job whose retry became due later',async()=>{
+    const f=await fixture();await synchronizeSheet(f.sheet.id,f.provider,{refreshQueued:false});
+    const leads=await db.lead.findMany({where:{sheetId:f.sheet.id},orderBy:{sourceRow:'asc'}});
+    const old=await db.job.create({data:{organizationId:'legacy',type:'WRITEBACK',entityId:leads[0].id,key:'old-failing-sheet',createdAt:new Date(0),runAt:new Date(Date.now()-1000)}});
+    const waiting=await db.job.create({data:{organizationId:'legacy',type:'WRITEBACK',entityId:leads[1].id,key:'waiting-sheet',runAt:new Date(Date.now()-5000)}});
+    await db.sheet.update({where:{id:f.sheet.id},data:{connectionType:'DEMO'}});
+    const write=vi.spyOn(DemoSheetsProvider.prototype,'write').mockResolvedValue(undefined);
+    await drainJobs(1,0,undefined,()=>true,['WRITEBACK']);
+    expect(write).toHaveBeenCalledOnce();expect(write.mock.calls[0][1]).toBe(leads[1].stableSourceId);
+    expect((await db.job.findUniqueOrThrow({where:{id:waiting.id}})).status).toBe('COMPLETED');
+    expect((await db.job.findUniqueOrThrow({where:{id:old.id}})).status).toBe('PENDING');
+  });
+  it('coalesces competing output jobs and retains full feedback when a delivery job owns the claim',async()=>{
+    const f=await fixture();await synchronizeSheet(f.sheet.id,f.provider,{refreshQueued:false});await db.sheet.update({where:{id:f.sheet.id},data:{connectionType:'DEMO'}});
+    const lead=await db.lead.findFirstOrThrow({where:{sheetId:f.sheet.id}});
+    await db.lead.update({where:{id:lead.id},data:{status:'Interested',lastFeedback:'Save this feedback',writebackStatus:'PENDING'}});
+    const first=await db.job.create({data:{organizationId:'legacy',type:'WRITEBACK',entityId:lead.id,key:'writeback:delivery:coalesce',runAt:new Date(0)}});
+    const second=await db.job.create({data:{organizationId:'legacy',type:'WRITEBACK',entityId:lead.id,key:'writeback:feedback:coalesce',runAt:new Date(0)}});
+    let finish!:()=>void;const waiting=new Promise<void>(resolve=>{finish=resolve;});
+    const write=vi.spyOn(DemoSheetsProvider.prototype,'write').mockImplementation(async()=>{await waiting;});
+    const run=processJob(first.id);
+    try{await vi.waitFor(()=>expect(write).toHaveBeenCalledOnce());expect(await processJob(second.id)).toBe(false);}
+    finally{finish();await run;}
+    expect(write.mock.calls[0][3]).toMatchObject({status:'Interested',feedback:'Save this feedback'});
+    expect(await db.job.count({where:{id:{in:[first.id,second.id]},status:'COMPLETED'}})).toBe(2);
+  });
   it('queues a partially filled Meta row once its phone is available',async()=>{
     const f=await fixture();f.rows.splice(0,f.rows.length,{stableId:'meta-lead-id',row:2,values:{customerName:'Pending Meta lead',mobile:''}});
     await synchronizeSheet(f.sheet.id,f.provider,{skipUnchanged:true,refreshQueued:false});

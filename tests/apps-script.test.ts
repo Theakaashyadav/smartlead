@@ -3,7 +3,8 @@ import {createContext,runInContext} from 'node:vm';
 import {db} from '@/lib/db';
 import {AppsScriptSheetsProvider,appsScriptEndpoint,appsScriptRequest,checkAppsScriptSetup,connectAppsScriptSheet,startAppsScriptSetup} from '@/lib/apps-script';
 import {decrypt,encrypt,passwordHash} from '@/lib/security';
-import {assignLead,synchronizeSheet,writebackLead} from '@/lib/engine';
+import {assignLead,saveFeedback,synchronizeSheet,updateLeadSheetNow,writebackLead} from '@/lib/engine';
+import {simpleAction} from '@/lib/simple';
 import {clearTestModels} from './database-fixture';
 import {simpleSourceRows} from '@/lib/public-sheets';
 
@@ -23,19 +24,20 @@ async function fixture(){
   const setup=await startAppsScriptSetup(user,{url:`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=42`});
   const rows=[['ID','Name','Phone','What is your budget?','lead_status'],['a','Customer A','9876543210','Keep A','New'],['b','Customer B','9876543211','Keep B','New']];
   const tags:any[]=[];const writes:string[]=[];let maxColumns=26;
+  const controls={metadata:true,editable:true,saveError:false};
   function finder(){let key:string|undefined,value:string|undefined;return {withKey(k:string){key=k;return this;},withValue(v:string){value=v;return this;},find(){return tags.filter(t=>(!key||t.key===key)&&(!value||t.value===value));}};}
   function addTag(key:string,value:string,row?:string[]){const tag={key,value,row,getLocation:()=>({getRow:()=>row?{getRow:()=>rows.indexOf(row)+1}:null}),remove:()=>{tags.splice(tags.indexOf(tag),1);}};tags.push(tag);return tag;}
   const tab={getSheetId:()=>42,getName:()=> 'Incoming',getLastColumn:()=>Math.max(...rows.map(r=>r.length)),getMaxRows:()=>100,getMaxColumns:()=>maxColumns,
     getDataRange:()=>({getDisplayValues:()=>rows.map(r=>Array.from({length:tab.getLastColumn()},(_,i)=>r[i]||''))}),createDeveloperMetadataFinder:finder,
     insertColumnsAfter:(_index:number,count:number)=>{maxColumns+=count;},
     moveColumns:(range:any,destination:number)=>{const from=range.column-1;for(const row of rows){while(row.length<tab.getLastColumn())row.push('');const moved=row.splice(from,1);row.splice(destination-1-(destination>range.column?1:0),0,...moved);}},
-    getRange:(r:number,c:number,height=1,width=1)=>({column:c,getRow:()=>r,
+    getRange:(row:number|string,column?:number,height=1,width=1)=>{const r=typeof row==='string'?Number(row.split(':')[0]):row;const c=column||1;return {column:c,getRow:()=>r,canEdit:()=>controls.editable,
       getDisplayValues:()=>Array.from({length:height},(_,i)=>Array.from({length:width},(_,j)=>rows[r-1+i]?.[c-1+j]||'')),
       setValue:(value:string)=>{rows[r-1][c-1]=value;writes.push('value');},
       setValues:(values:string[][])=>{for(let i=0;i<values.length;i++)values[i].forEach((v,j)=>{rows[r-1+i][c-1+j]=v;});},
-      setRichTextValue:(value:{text:string})=>{rows[r-1][c-1]=value.text;writes.push('rich');},clearContent:()=>{rows[r-1][c-1]='';},
-      addDeveloperMetadata:(key:string,value:string)=>addTag(key,value,rows[r-1]),
-    }),
+      setRichTextValue:(value:{text:string})=>{if(controls.saveError)throw new Error('Sensitive source values must not escape');rows[r-1][c-1]=value.text;writes.push('rich');},clearContent:()=>{rows[r-1][c-1]='';},
+      addDeveloperMetadata:(key:string,value:string)=>{if(!controls.metadata)throw new Error('Row metadata is not supported');return addTag(key,value,rows[r-1]);},
+    };},
   };
   const book={getId:()=>spreadsheetId,getName:()=> 'Private script leads',getSheets:()=>[tab],addDeveloperMetadata:(key:string,value:string)=>addTag(key,value),createDeveloperMetadataFinder:finder};
   const context=createContext({SpreadsheetApp:{openById:(id:string)=>{expect(id).toBe(spreadsheetId);return book;},DeveloperMetadataVisibility:{DOCUMENT:'DOCUMENT'},flush:()=>{},newRichTextValue:()=>({text:'',setText(text:string){this.text=text;return this;},build(){return {text:this.text};}})},LockService:{getScriptLock:()=>({tryLock:()=>true,hasLock:()=>true,releaseLock:()=>{}})},Utilities:{getUuid:()=>String(Math.random())},ContentService:{MimeType:{JSON:'json'},createTextOutput:(text:string)=>({text,setMimeType(){return this;}})}});
@@ -46,7 +48,7 @@ async function fixture(){
     context.INPUT=JSON.stringify(body);const reply=runInContext('doPost({postData:{contents:INPUT}})',context);return new Response(reply.text,{headers:{'content-type':'application/json'}});
   }));
   const connect=async()=>{await checkAppsScriptSetup(user,setup.setupId,endpoint);const result=await connectAppsScriptSheet(user,{scriptSetupId:setup.setupId,spreadsheetId,worksheetId:42,columnMapping:mapping});return db.sheet.findUniqueOrThrow({where:{id:result.id}});};
-  return {user,setup,rows,tags,writes,calls,context,connect};
+  return {user,setup,rows,tags,writes,calls,context,connect,controls};
 }
 
 describe('Apps Script connection',()=>{
@@ -70,6 +72,54 @@ describe('Apps Script connection',()=>{
     await provider.write(sheet,lead.stableSourceId,null,{feedback:'First'});f.rows[1][f.rows[0].indexOf('Remark')]='External edit';
     await expect(provider.write(sheet,lead.stableSourceId,null,{feedback:'Replace'})).rejects.toMatchObject({code:'SYNC_CONFLICT'});expect(f.rows[1].at(-1)).toBe('External edit');
     f.rows.splice(1,1);await expect(provider.write(sheet,lead.stableSourceId,null,{feedback:'Deleted'})).rejects.toMatchObject({code:'SYNC_CONFLICT'});
+  });
+  it('saves immediately through the durable job and does not send WhatsApp messages',async()=>{
+    const f=await fixture();const sheet=await f.connect();await synchronizeSheet(sheet.id);
+    const lead=await db.lead.findFirstOrThrow({where:{sheetId:sheet.id,stableSourceId:'public-id:a'}});
+    const employee=await db.employee.create({data:{organizationId:'legacy',name:'Owner',phone:'+919800000001',projects:[]}});
+    const assignment=await db.assignment.create({data:{leadId:lead.id,employeeId:employee.id,isPrimary:true}});
+    await saveFeedback(assignment.id,{status:'Interested',remarks:'Visit tomorrow',version:lead.version});
+    expect(await updateLeadSheetNow(lead.id)).toEqual({status:'SYNCED',error:null});
+    expect(f.rows[1].slice(-4)).toEqual(['','','Interested','Visit tomorrow']);
+    expect(await db.job.count({where:{type:'WRITEBACK',status:'PENDING'}})).toBe(0);expect(await db.message.count()).toBe(0);
+  });
+  it('updates unique source rows even when Google rejects row metadata',async()=>{
+    const f=await fixture();const sheet=await f.connect();await synchronizeSheet(sheet.id);f.controls.metadata=false;
+    const provider=new AppsScriptSheetsProvider();
+    await provider.write(sheet,'public-id:a',null,{sentStatus:'Sent',sharedTo:'Owner',status:'Interested',feedback:'Call tomorrow'});
+    expect(f.rows[1].slice(-4)).toEqual(['Sent','Owner','Interested','Call tomorrow']);
+    [f.rows[1],f.rows[2]]=[f.rows[2],f.rows[1]];
+    await db.lead.update({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:'public-id:a'}},data:{managedSnapshot:{sentStatus:'Sent'}}});
+    await provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'});expect(f.rows[2].at(-4)).toBe('Sent');
+  });
+  it('reports protected output cells and the failing stage without disclosing source data',async()=>{
+    const f=await fixture();const sheet=await f.connect();await synchronizeSheet(sheet.id);const provider=new AppsScriptSheetsProvider();
+    f.controls.editable=false;
+    await expect(provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'})).rejects.toMatchObject({code:'APPS_SCRIPT_PROTECTED'});expect(f.rows[1].at(-4)).not.toBe('Sent');
+    f.controls.editable=true;f.controls.saveError=true;
+    await expect(provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'})).rejects.toMatchObject({code:'APPS_SCRIPT_UPGRADE',message:expect.stringContaining('saving the output cells')});
+    try{await provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'});}catch(error:any){expect(error.message).not.toContain('Sensitive');}
+  });
+  it('reuses an existing connection key when generating repair code and retains its deployment URL',async()=>{
+    const f=await fixture();const sheet=await f.connect();const previous=runInContext('SMARTLEAD_KEY',f.context);
+    const setup=await startAppsScriptSetup(f.user,{sheetId:sheet.id});expect(setup.endpoint).toBe(endpoint);expect(setup.code).toContain(previous);expect(setup.code).toContain('SMARTLEAD_CODE_VERSION = 2');
+  });
+  it('checks output writes before saving a connection and preserves feedback after a failed immediate attempt',async()=>{
+    const f=await fixture();f.controls.editable=false;await expect(f.connect()).rejects.toMatchObject({code:'APPS_SCRIPT_PROTECTED'});expect(await db.sheet.count()).toBe(0);
+    f.controls.editable=true;const sheet=await f.connect();await synchronizeSheet(sheet.id);const lead=await db.lead.findFirstOrThrow({where:{sheetId:sheet.id,stableSourceId:'public-id:a'}});
+    const employee=await db.employee.create({data:{organizationId:'legacy',name:'Owner',phone:'+919800000001',projects:[]}});const assignment=await db.assignment.create({data:{leadId:lead.id,employeeId:employee.id,isPrimary:true}});
+    await saveFeedback(assignment.id,{status:'Interested',remarks:'Preserve this remark',version:lead.version});f.controls.saveError=true;
+    expect(await updateLeadSheetNow(lead.id)).toMatchObject({status:'ERROR',error:expect.stringContaining('saving the output cells')});
+    expect((await db.lead.findUniqueOrThrow({where:{id:lead.id}})).lastFeedback).toBe('Preserve this remark');expect(await db.job.count({where:{type:'WRITEBACK',status:'PENDING'}})).toBe(1);expect(await db.message.count()).toBe(0);
+  });
+  it('retries sheet updates in the requesting organisation and leaves sending paused',async()=>{
+    const f=await fixture();const sheet=await f.connect();await synchronizeSheet(sheet.id);const lead=await db.lead.findFirstOrThrow({where:{sheetId:sheet.id,stableSourceId:'public-id:a'}});
+    await db.lead.update({where:{id:lead.id},data:{writebackStatus:'ERROR'}});
+    await db.job.create({data:{organizationId:'legacy',type:'WRITEBACK',entityId:lead.id,key:'old-failure',status:'DEAD',attempts:8}});
+    const request=()=>new Request('http://localhost',{method:'POST'});
+    await expect(simpleAction(['sheets',sheet.id,'writeback'],'POST',request(),{...f.user,organizationId:'other-org'})).rejects.toMatchObject({status:404});
+    expect(await simpleAction(['sheets',sheet.id,'writeback'],'POST',request(),f.user)).toMatchObject({attempted:1,remaining:0,writeback:{status:'SYNCED'}});
+    expect((await db.distributionRule.findUniqueOrThrow({where:{sheetId:sheet.id}})).enabled).toBe(false);expect(await db.message.count()).toBe(0);
   });
   it('reconnects an existing source without resetting recipients, cursor or successful sends',async()=>{
     const f=await fixture();const employee=await db.employee.create({data:{organizationId:'legacy',name:'Recipient',phone:'+919800000001',projects:[]}});const sender=await db.sender.create({data:{organizationId:'legacy',name:'WhatsApp',provider:'DEMO',status:'CONNECTED'}});

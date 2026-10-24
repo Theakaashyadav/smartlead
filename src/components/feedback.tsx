@@ -19,7 +19,7 @@ function SimpleFeedbackForm({lead,statuses,onSubmit}:{lead:any;statuses:string[]
     <Field label="Feedback (lead status)"><Select aria-label="Feedback (lead status)" value={status} onChange={e=>setStatus(e.target.value)}>{[...new Set([lead.status,...statuses])].map(s=><option key={s}>{s}</option>)}</Select></Field>
     <Field label="Remark"><textarea aria-label="Remark" required minLength={3} maxLength={5000} rows={5} value={remarks} onChange={e=>setRemarks(e.target.value)} placeholder="Add your remark about this lead."/></Field>
     {error&&<div role="alert" className="alert error">{error}</div>}
-    {lead.lastFeedback&&<p role="status" className={`alert ${lead.writebackStatus==='SYNCED'?'success':'info'}`}>{lead.writebackAvailable===false?'Feedback saved in SmartLead. Automatic updates to this Google Sheet are unavailable with this connection.':lead.writebackStatus==='SYNCED'?'Status and feedback saved to Google Sheet.':lead.writebackStatus==='ERROR'?'Feedback saved. The Google Sheet update is waiting to retry.':'Feedback saved. Updating Google Sheet…'}</p>}
+    {lead.lastFeedback&&<p role="status" className={`alert ${lead.writebackStatus==='SYNCED'?'success':'info'}`}>{lead.writebackAvailable===false?'Feedback saved in SmartLead. Automatic updates to this Google Sheet are unavailable with this connection.':lead.writebackStatus==='SYNCED'?'Status and feedback saved to Google Sheet.':lead.writebackStatus==='ERROR'?`Feedback saved. ${lead.writebackError||'The Google Sheet update is waiting to retry.'}`:'Feedback saved. Updating Google Sheet…'}</p>}
     <Button type="submit" variant="primary" busy={busy} className="full">Save status & feedback<ArrowRight size={16}/></Button>
   </form>;
 }

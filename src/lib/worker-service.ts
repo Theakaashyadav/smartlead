@@ -80,7 +80,8 @@ export function startWorkerService({closeDatabase=false}={}){
           await scheduleJobs(isDemo(),maintenance);if(maintenance)maintainedAt=Date.now();
           await drainJobs(10,0,undefined,()=>!stopping(),['SYNC']);
         },WORKER_IDLE_MS),
-        loop('writeback',()=>drainJobs(10,0,undefined,()=>!stopping(),['WRITEBACK','CONTACTS']),1000),
+        loop('writeback',()=>drainJobs(10,0,undefined,()=>!stopping(),['WRITEBACK']),250),
+        loop('contacts',()=>drainJobs(5,0,undefined,()=>!stopping(),['CONTACTS']),1000),
       ];
       try{await Promise.all(loops);}catch(error){controller.abort();await Promise.allSettled(loops);throw error;}
     }finally{clearInterval(heartbeatTimer);await renewing;}

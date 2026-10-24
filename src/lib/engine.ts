@@ -1,5 +1,5 @@
 import type { Prisma, Sheet, Job } from '@/generated/mongo';
-import { db, databaseTransaction } from './db';
+import { db, databaseTransaction, usingSQLite } from './db';
 import { appUrl } from './config';
 import { AppError, audit, decrypt, encrypt, hash, opaqueToken, signedFeedbackToken, verifyFeedbackSignature } from './security';
 import { sheetProvider, sourceFingerprint, type SheetProvider } from './google';
@@ -256,41 +256,67 @@ export async function retryMessage(id:string,userId:string) {
 }
 export async function processJob(id:string, candidate?:Job) {
   const token=opaqueToken();
-  const claimed=await db.job.updateMany({where:{id,status:'PENDING',runAt:{lte:new Date()}},data:{status:'PROCESSING',lockedAt:new Date(),lockToken:token}});
-  if(!claimed.count)return false;
   const job=candidate||await db.job.findUniqueOrThrow({where:{id}});
+  const lock={status:'PROCESSING',lockedAt:new Date(),lockToken:token};
+  let deliveryOnly=job.key.startsWith('writeback:delivery:');
+  const claimed=job.type==='WRITEBACK'?await transaction(async tx=>{
+    const ready=await tx.job.findFirst({where:{id,status:'PENDING',runAt:{lte:new Date()}}});
+    if(!ready||await tx.job.findFirst({where:{type:'WRITEBACK',entityId:job.entityId,status:'PROCESSING'}}))return {count:0};
+    const pending=await tx.job.findMany({where:{type:'WRITEBACK',entityId:job.entityId,status:'PENDING'},select:{key:true}});
+    deliveryOnly=pending.every(item=>item.key.startsWith('writeback:delivery:'));
+    // Coalesce duplicate output jobs under one claim. A feedback request and
+    // the worker must not write two snapshots of this lead at the same time.
+    return tx.job.updateMany({where:{type:'WRITEBACK',entityId:job.entityId,status:'PENDING'},data:lock});
+  }):await db.job.updateMany({where:{id,status:'PENDING',runAt:{lte:new Date()}},data:lock});
+  if(!claimed.count)return false;
+  const ownership=job.type==='WRITEBACK'?{type:'WRITEBACK',entityId:job.entityId,lockToken:token}:{id,lockToken:token};
   try {
     if(job.type==='SYNC')await synchronizeSheet(job.entityId,undefined,{skipUnchanged:true,refreshQueued:false});
     else if(job.type==='ASSIGN'){
       const result=await assignLead(job.entityId);
       if(!result.assigned && result.reason==='No employee has available capacity')throw new AppError(409,result.reason,'CAPACITY');
     }
-    else if(job.type==='WRITEBACK')await writebackLead(job.entityId,undefined,{deliveryOnly:job.key.startsWith('writeback:delivery:')});
+    else if(job.type==='WRITEBACK')await writebackLead(job.entityId,undefined,{deliveryOnly});
     else if(job.type==='SEND')await dispatchMessage(job.entityId);
     else if(job.type==='CONNECT'||job.type==='DISCONNECT'||job.type==='CONTACTS'){
       const sender=await db.sender.findUniqueOrThrow({where:{id:job.entityId}});
       const provider=whatsappProvider(sender);
       if(job.type==='CONNECT')await provider.connect();else if(job.type==='CONTACTS'&&'refreshContacts' in provider)await (provider as import('./whatsapp').WebWhatsAppProvider).refreshContacts();else if(job.type==='DISCONNECT')await provider.disconnect();
     }
-    await db.job.updateMany({where:{id,lockToken:token},data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
+    await db.job.updateMany({where:ownership,data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
   }catch(error){
-    const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED','APPS_SCRIPT_AUTH'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
+    const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED','APPS_SCRIPT_AUTH','APPS_SCRIPT_UPGRADE','APPS_SCRIPT_PROTECTED'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
     const attempts=job.attempts+(paused?0:1);
-    await db.job.updateMany({where:{id,lockToken:token},data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});
+    await db.job.updateMany({where:ownership,data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});
   }
   return true;
+}
+// A saved feedback change gets a first attempt in the request that saved it,
+// rather than waiting behind another sheet's retries. The durable job still
+// owns retries and its atomic claim prevents the worker running this job twice.
+export async function updateLeadSheetNow(leadId:string) {
+  const job=await db.job.findFirst({where:{type:'WRITEBACK',entityId:leadId,status:'PENDING'},orderBy:[{runAt:'asc'},{createdAt:'asc'}]});
+  if(job){await db.job.updateMany({where:{id:job.id,status:'PENDING'},data:{runAt:new Date(0)}});await processJob(job.id);}
+  const lead=await db.lead.findUniqueOrThrow({where:{id:leadId},select:{writebackStatus:true,sheetId:true}});
+  const failure=lead.writebackStatus==='ERROR'?await db.syncLog.findFirst({where:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'ERROR'},orderBy:{createdAt:'desc'},select:{details:true}}):null;
+  return {status:lead.writebackStatus,error:failure?.details||null};
 }
 export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shouldContinue=()=>true,types?:string[]) {
   let processed=0;
   for(let i=0;i<limit&&shouldContinue();i++) {
     const due={status:'PENDING',runAt:{lte:new Date()},...(organizationId?{organizationId}:{}),...(types?{type:{in:types}}:{})};
-    const orderBy=[{createdAt:'asc' as const},{id:'asc' as const}];
+    // Retrying old failures must go behind work that has waited longer to run.
+    // Ordering only by creation time can starve every newer connected sheet.
+    const orderBy=[{runAt:'asc' as const},{createdAt:'asc' as const},{id:'asc' as const}];
     const controls=['CONNECT','DISCONNECT'].filter(type=>!types||types.includes(type));
     // Read independent priorities together so selection costs one network wait.
     // A newly created SEND overtakes remaining ASSIGN work in the same batch.
     const candidates=await Promise.all([
       controls.length?db.job.findFirst({where:{...due,type:{in:controls}},orderBy}):null,
       !types||types.includes('SEND')?db.job.findFirst({where:{...due,type:'SEND'},orderBy}):null,
+      // Start new saves ahead of old failures. Keep one slot in five for due
+      // retries so a continuous lead stream still repairs earlier updates.
+      (!types||types.includes('WRITEBACK'))&&i%5!==4?db.job.findFirst({where:{...due,type:'WRITEBACK',...(usingSQLite?{error:null}:{OR:[{error:null},{error:{isSet:false}}]})},orderBy}):null,
       db.job.findFirst({where:due,orderBy}),
     ]);
     const job=candidates.find(candidate=>candidate!==null);

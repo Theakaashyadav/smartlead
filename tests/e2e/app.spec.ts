@@ -172,6 +172,19 @@ test('sheet cards show queued, submitted and failed sends',async({page})=>{
   await expect(page.getByText('3 submitted to WhatsApp · 2 queued · 1 need checking',{exact:true})).toBeVisible();
   await expect(page.locator('article').getByRole('alert')).toHaveText('This phone number is not registered on WhatsApp.');
 });
+test('sheet update retry shows the script problem and clears waiting only after confirmation',async({page})=>{
+  const error='Apps Script failed while saving the output cells. Reconnect Apps Script and deploy a new version.';
+  const sheet={id:'sheet-retry',name:'Lead updates',worksheetName:'Incoming',enabled:false,appsScriptConnected:true,leadCount:1,recipients:[],lastSyncError:null,writeback:{pending:1,failed:0,error:null as string|null}};
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:null,sheets:[sheet]};
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));let calls=0;
+  await page.route('**/api/simple/sheets/sheet-retry/writeback',route=>{calls++;sheet.writeback=calls===1?{pending:0,failed:1,error}:{pending:0,failed:0,error:null};return route.fulfill({json:{data:{attempted:1,remaining:calls===1?1:0,writeback:{status:calls===1?'ERROR':'SYNCED',error:calls===1?error:null}}}});});
+  await login(page);await page.goto('/sheets');await expect(page.getByText('1 lead updating Google Sheet.',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Update sheet now',exact:true}).click();
+  await expect(page.locator('article').getByRole('alert')).toHaveText(error);await expect(page.getByText('1 sheet update failed.',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Update sheet now',exact:true})).toBeEnabled();
+  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await page.screenshot({path:'data/sheet-update-retry-mobile.png',fullPage:true});
+  await page.getByRole('button',{name:'Update sheet now',exact:true}).click();await expect(page.getByRole('button',{name:'Update sheet now',exact:true})).toHaveCount(0);await expect(page.locator('article').getByRole('alert')).toHaveCount(0);expect(calls).toBe(2);
+});
 
 test('mobile stays simple and unauthenticated users must log in',async({page})=>{
   await page.setViewportSize({width:390,height:844});await login(page);

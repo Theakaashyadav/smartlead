@@ -7,7 +7,7 @@ import { db, databaseHealth, usingSQLite } from '@/lib/db';
 import { isDemo, appUrl } from '@/lib/config';
 import { AppError, audit, checkOrigin, encrypt, hash, loginSession, logoutSession, opaqueToken, passwordHash, rateLimit, requireUser, safeUser, verifyPassword, verifyTotp, signedFeedbackToken } from '@/lib/security';
 import { accessibleLead, accessibleSheet, employeeScope, leadScope, sheetScope } from '@/lib/permissions';
-import { allowedStatuses, assignLead, drainJobs, enqueue, getFeedbackAccess, retryMessage, saveFeedback, synchronizeSheet, transaction } from '@/lib/engine';
+import { allowedStatuses, assignLead, drainJobs, enqueue, getFeedbackAccess, retryMessage, saveFeedback, synchronizeSheet, transaction, updateLeadSheetNow } from '@/lib/engine';
 import { DEFAULT_TEMPLATE, employeeSchema, feedbackSchema, loginSchema, ruleSchema, sheetSchema, STATUSES, validateTemplate } from '@/lib/validation';
 import { leadFilters, leadInclude, workspace } from '@/lib/analytics';
 import { inspectSpreadsheet } from '@/lib/google';
@@ -103,8 +103,9 @@ async function handler(request:Request,context:Context):Promise<Response> {
       await rateLimit(`feedback:${hash(path[1])}`,60,60);
       const access=await getFeedbackAccess(path[1]);
       const writebackAvailable=true;
-      if(method==='GET')return ok({simple:access.assignment.lead.sheet.connectionType.startsWith('SIMPLE_'),lead:{id:access.assignment.lead.id,customerName:access.assignment.lead.customerName,project:access.assignment.lead.project,mobile:access.assignment.lead.mobile,location:access.assignment.lead.location,sheetName:access.assignment.lead.sheet.name,questions:(access.assignment.lead.sourceData as {questions?:unknown[]}|null)?.questions||[],source:access.assignment.lead.source,status:access.assignment.lead.status,lastFeedback:access.assignment.lead.lastFeedback,writebackStatus:access.assignment.lead.writebackStatus,writebackAvailable,updatedAt:access.assignment.lead.updatedAt,nextFollowupAt:access.assignment.lead.nextFollowupAt,version:access.assignment.lead.version},employee:{name:access.assignment.employee.name},statuses:await allowedStatuses(access.assignment.lead.sheetId)});
-      if(method==='POST'){await saveFeedback(access.assignmentId,await body(request),undefined,access.id);if(access.assignment.lead.sheet.connectionType!=='SIMPLE_PUBLIC')await demoDrain(access.assignment.lead.sheet.organizationId);return ok({message:writebackAvailable?'Feedback saved. Google Sheet update queued.':'Feedback saved in SmartLead. Automatic updates to this public Google Sheet are unavailable with this connection.'});}
+      const writebackFailure=method==='GET'&&access.assignment.lead.writebackStatus==='ERROR'?await db.job.findFirst({where:{type:'WRITEBACK',entityId:access.assignment.leadId,status:{in:['PENDING','DEAD']}},orderBy:{runAt:'desc'},select:{error:true}}):null;
+      if(method==='GET')return ok({simple:access.assignment.lead.sheet.connectionType.startsWith('SIMPLE_'),lead:{id:access.assignment.lead.id,customerName:access.assignment.lead.customerName,project:access.assignment.lead.project,mobile:access.assignment.lead.mobile,location:access.assignment.lead.location,sheetName:access.assignment.lead.sheet.name,questions:(access.assignment.lead.sourceData as {questions?:unknown[]}|null)?.questions||[],source:access.assignment.lead.source,status:access.assignment.lead.status,lastFeedback:access.assignment.lead.lastFeedback,writebackStatus:access.assignment.lead.writebackStatus,writebackAvailable,writebackError:writebackFailure?.error||null,updatedAt:access.assignment.lead.updatedAt,nextFollowupAt:access.assignment.lead.nextFollowupAt,version:access.assignment.lead.version},employee:{name:access.assignment.employee.name},statuses:await allowedStatuses(access.assignment.lead.sheetId)});
+      if(method==='POST'){await saveFeedback(access.assignmentId,await body(request),undefined,access.id);const writeback=await updateLeadSheetNow(access.assignment.leadId);return ok({message:writeback.status==='SYNCED'?'Status and feedback saved to Google Sheet.':'Feedback saved. '+(writeback.error||'Google Sheet update is in progress.'),writeback});}
     }
     const user=await requireUser();
     await rateLimit(`api:${user.id}`,300,60);
@@ -181,7 +182,7 @@ async function handler(request:Request,context:Context):Promise<Response> {
     if(path[0]==='leads'&&path[1]){
       const lead=await accessibleLead(user,path[1]);
       if(path[2]==='feedback'&&method==='POST'){
-        const assignment=lead.assignments.find(a=>a.isPrimary);if(!assignment)throw new AppError(400,'Assign an accountable owner first');await saveFeedback(assignment.id,await body(request),user.id);await demoDrain(user.organizationId);return ok({message:'Lead feedback submitted successfully.'});
+        const assignment=lead.assignments.find(a=>a.isPrimary);if(!assignment)throw new AppError(400,'Assign an accountable owner first');await saveFeedback(assignment.id,await body(request),user.id);const writeback=await updateLeadSheetNow(lead.id);return ok({message:'Lead feedback submitted successfully.',writeback});
       }
       if(path[2]==='feedback-link'&&method==='POST'){
         const assignment=lead.assignments.find(a=>a.isPrimary);if(!assignment)throw new AppError(400,'Assign an accountable owner first');const raw=signedFeedbackToken();await db.feedbackToken.create({data:{assignmentId:assignment.id,tokenHash:hash(raw),expiresAt:new Date(Date.now()+7*86400000)}});await audit(user.id,'ISSUE_FEEDBACK_LINK','lead',lead.id);return ok({url:`${appUrl()}/feedback/${raw}`});

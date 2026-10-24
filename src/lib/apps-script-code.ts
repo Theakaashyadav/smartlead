@@ -8,6 +8,7 @@ var SMARTLEAD_SHEET_ID = ${JSON.stringify(spreadsheetId)};
 var SMARTLEAD_KEY = ${JSON.stringify(token)};
 `+String.raw`
 var SMARTLEAD_PROTOCOL = 'smartlead-apps-script-v1';
+var SMARTLEAD_CODE_VERSION = 2;
 var SMARTLEAD_OUTPUTS = {sentStatus:'Sent Status',sharedTo:'Shared To',status:'Feedback',feedback:'Remark'};
 
 function doGet() {
@@ -27,19 +28,21 @@ function doPost(e) {
       var key = 'smartlead_check_' + Utilities.getUuid();
       try { book.addDeveloperMetadata(key, 'access-check'); }
       finally { book.createDeveloperMetadataFinder().withKey(key).find().forEach(function(tag){tag.remove();}); }
-      data = {title:book.getName(),canRead:true,canWrite:true,challenge:request.challenge,
+      data = {title:book.getName(),codeVersion:SMARTLEAD_CODE_VERSION,canRead:true,canWrite:true,challenge:request.challenge,
         tabs:book.getSheets().map(function(tab){return {id:tab.getSheetId(),name:tab.getName(),headers:tab.getRange(1,1,1,Math.max(1,tab.getLastColumn())).getDisplayValues()[0].map(function(value){return value.trim();})};})};
     } else {
       var tab = book.getSheets().filter(function(item){return item.getSheetId() === request.worksheetId;})[0];
       if (!tab) return smartLeadReply_({ok:false,code:'TAB'});
       if (request.action === 'read') data = {rows:tab.getDataRange().getDisplayValues()};
+      else if (request.action === 'prepare') data = smartLeadPrepare_(tab,request);
       else if (request.action === 'write') data = smartLeadWrite_(tab,request);
       else return smartLeadReply_({ok:false,code:'REQUEST'});
     }
     return smartLeadReply_({ok:true,data:data});
   } catch (error) {
-    var known = ['SOURCE','CONFLICT','REQUEST','VERIFY'];
-    return smartLeadReply_({ok:false,code:known.indexOf(error.message)>=0?error.message:'SCRIPT'});
+    var known = ['SOURCE','CONFLICT','REQUEST','VERIFY','PROTECTED'];
+    var stage = request && request._stage;
+    return smartLeadReply_({ok:false,code:known.indexOf(error.message)>=0?error.message:'SCRIPT',stage:['SOURCE','LAYOUT','PERMISSION','SAVE','VERIFY'].indexOf(stage)>=0?stage:undefined});
   } finally { if (lock && lock.hasLock()) lock.releaseLock(); }
 }
 function smartLeadReply_(result) {
@@ -66,13 +69,18 @@ function smartLeadFindRow_(tab,request) {
   var matches=[];
   for(var i=1;i<rows.length;i++)if(smartLeadMatches_(headers,rows[i],request.identity))matches.push(i+1);
   if(matches.length!==1)throw new Error('SOURCE');
-  var tags=tab.createDeveloperMetadataFinder().withKey(request.metadataKey).withValue(request.stableId).find();
+  // Unique source identity is always required. Row metadata is an extra guard;
+  // a metadata service failure must not block that verified source identity.
+  var tags=[];
+  try { tags=tab.createDeveloperMetadataFinder().withKey(request.metadataKey).withValue(request.stableId).find(); }
+  catch (metadataError) { tags=[]; }
   if(tags.length>1)throw new Error('SOURCE');
   if(tags.length){
     var range=tags[0].getLocation().getRow();
     if(!range || range.getRow()!==matches[0])throw new Error('SOURCE');
   }else{
-    tab.getRange(matches[0],1,1,tab.getMaxColumns()).addDeveloperMetadata(request.metadataKey,request.stableId,SpreadsheetApp.DeveloperMetadataVisibility.DOCUMENT);
+    try { tab.getRange(matches[0]+':'+matches[0]).addDeveloperMetadata(request.metadataKey,request.stableId,SpreadsheetApp.DeveloperMetadataVisibility.DOCUMENT); }
+    catch (metadataError) { /* The unique original source identity is still verified before and after saving. */ }
   }
   return matches[0];
 }
@@ -101,9 +109,15 @@ function smartLeadWrite_(tab,request) {
   var values=request.values,snapshot=request.snapshot||{};
   if(!values || !Object.keys(values).length || Object.keys(values).some(function(field){return !Object.prototype.hasOwnProperty.call(SMARTLEAD_OUTPUTS,field) || typeof values[field]!=='string';}))throw new Error('REQUEST');
   // Resolve the original lead before changing the output layout.
-  smartLeadFindRow_(tab,request);
+  request._stage='SOURCE';smartLeadFindRow_(tab,request);
+  request._stage='LAYOUT';
   var headers=smartLeadLayout_(tab),rowNumber=smartLeadFindRow_(tab,request);
   var row=tab.getRange(rowNumber,1,1,headers.length).getDisplayValues()[0];
+  request._stage='PERMISSION';
+  Object.keys(values).forEach(function(field){
+    if(!tab.getRange(rowNumber,smartLeadColumn_(headers,SMARTLEAD_OUTPUTS[field])+1).canEdit())throw new Error('PROTECTED');
+  });
+  request._stage='SAVE';
   Object.keys(values).forEach(function(field){
     var actual=row[smartLeadColumn_(headers,SMARTLEAD_OUTPUTS[field])]||'';
     var expected=field==='status'&&!snapshot.__publicOutputV2&&!actual?'':snapshot[field];
@@ -117,12 +131,30 @@ function smartLeadWrite_(tab,request) {
     else cell.clearContent();
   });
   SpreadsheetApp.flush();
+  request._stage='VERIFY';
   var checkedHeaders=tab.getRange(1,1,1,tab.getLastColumn()).getDisplayValues()[0];
   var checkedRow=tab.getRange(rowNumber,1,1,checkedHeaders.length).getDisplayValues()[0];
   if(!smartLeadMatches_(checkedHeaders,checkedRow,request.identity))throw new Error('VERIFY');
   Object.keys(values).forEach(function(field){var index=smartLeadColumn_(checkedHeaders,SMARTLEAD_OUTPUTS[field]);if(index<0 || (checkedRow[index]||'')!==values[field])throw new Error('VERIFY');});
   var observed={};Object.keys(SMARTLEAD_OUTPUTS).forEach(function(field){observed[field]=checkedRow[smartLeadColumn_(checkedHeaders,SMARTLEAD_OUTPUTS[field])]||'';});
   return {values:observed};
+}
+function smartLeadPrepare_(tab,request) {
+  request._stage='LAYOUT';var headers=smartLeadLayout_(tab);
+  request._stage='PERMISSION';
+  Object.keys(SMARTLEAD_OUTPUTS).forEach(function(field){
+    if(!tab.getRange(1,smartLeadColumn_(headers,SMARTLEAD_OUTPUTS[field])+1,tab.getMaxRows(),1).canEdit())throw new Error('PROTECTED');
+  });
+  // Exercise the same write method on the managed headings. Customer rows and
+  // their existing output values remain untouched during connection checking.
+  request._stage='SAVE';
+  Object.keys(SMARTLEAD_OUTPUTS).forEach(function(field){
+    tab.getRange(1,smartLeadColumn_(headers,SMARTLEAD_OUTPUTS[field])+1).setRichTextValue(SpreadsheetApp.newRichTextValue().setText(SMARTLEAD_OUTPUTS[field]).build());
+  });
+  SpreadsheetApp.flush();request._stage='VERIFY';
+  var checked=tab.getRange(1,1,1,tab.getLastColumn()).getDisplayValues()[0];
+  Object.keys(SMARTLEAD_OUTPUTS).forEach(function(field){if(smartLeadColumn_(checked,SMARTLEAD_OUTPUTS[field])<0)throw new Error('VERIFY');});
+  return {canWriteOutputs:true};
 }
 `;
 }

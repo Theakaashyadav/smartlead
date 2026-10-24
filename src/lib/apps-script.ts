@@ -14,7 +14,7 @@ const protocol='smartlead-apps-script-v1';
 const settingsSchema=z.object({token:z.string().min(32),spreadsheetId:z.string().regex(/^[\w-]+$/),gid:z.number().optional(),sheetId:z.string().optional(),endpoint:z.string().optional(),identityStyle:z.enum(['PUBLIC','RAW_ID']).optional()});
 type Settings=z.infer<typeof settingsSchema>;
 type Pending={userId:string;organizationId:string;createdAt:number;encrypted:string};
-const inspectionSchema=z.object({title:z.string(),canRead:z.literal(true),canWrite:z.literal(true),challenge:z.string(),tabs:z.array(z.object({id:z.number().int().nonnegative(),name:z.string(),headers:z.array(z.string())}))});
+const inspectionSchema=z.object({title:z.string(),codeVersion:z.literal(2),canRead:z.literal(true),canWrite:z.literal(true),challenge:z.string(),tabs:z.array(z.object({id:z.number().int().nonnegative(),name:z.string(),headers:z.array(z.string())}))});
 export function appsScriptEndpoint(value:string){
   let url:URL;try{url=new URL(value.trim());}catch{throw new AppError(400,'Paste the Apps Script web app URL ending in /exec.');}
   if(url.origin!=='https://script.google.com'||url.username||url.password||url.search||url.hash||!/^\/(?:macros\/s|a\/macros\/[\w.-]+\/s)\/[\w-]{20,}\/exec$/.test(url.pathname))throw new AppError(400,'Use the deployed Google Apps Script web app URL ending in /exec, not the editor or /dev link.');
@@ -22,15 +22,16 @@ export function appsScriptEndpoint(value:string){
 }
 export async function appsScriptRequest(settings:Settings,action:string,data:Record<string,unknown>={}){
   const endpoint=appsScriptEndpoint(settings.endpoint||'');
+  const signal=AbortSignal.timeout(30000);
   let response:Response;
   try{
-    response=await fetch(endpoint,{method:'POST',redirect:'manual',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,action,spreadsheetId:settings.spreadsheetId,token:settings.token}),signal:AbortSignal.timeout(45000)});
+    response=await fetch(endpoint,{method:'POST',redirect:'manual',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,action,spreadsheetId:settings.spreadsheetId,token:settings.token}),signal});
     // ContentService redirects its response to a one-time Google content URL.
     // The private key stays in the initial POST and is never forwarded.
     for(let i=0;response.status>=300&&response.status<400&&i<3;i++){
       const location=response.headers.get('location');const next=location?new URL(location,endpoint):null;
       if(!next||next.origin!=='https://script.googleusercontent.com'||next.username||next.password)throw new AppError(400,'Deploy the script as a Web app, Execute as Me, with access set to Anyone. Copy its /exec URL.','APPS_SCRIPT_DEPLOYMENT');
-      response=await fetch(next,{redirect:'manual',signal:AbortSignal.timeout(45000)});
+      response=await fetch(next,{redirect:'manual',cache:'no-store',signal});
     }
   }catch(error){if(error instanceof AppError)throw error;throw new AppError(502,'The Apps Script connection could not be reached. Check its deployment URL and try again.','APPS_SCRIPT_UNAVAILABLE');}
   if(!response.ok)throw new AppError(502,'Apps Script is unavailable. Check that the web app is deployed with access set to Anyone.','APPS_SCRIPT_DEPLOYMENT');
@@ -40,6 +41,12 @@ export async function appsScriptRequest(settings:Settings,action:string,data:Rec
   let result:any;try{result=JSON.parse(text);}catch{throw new AppError(400,'Apps Script did not return connection data. Use a Web app deployment, Execute as Me, with access set to Anyone.','APPS_SCRIPT_DEPLOYMENT');}
   if(result?.protocol!==protocol||result.spreadsheetId!==settings.spreadsheetId)throw new AppError(409,'This script belongs to a different sheet or uses an old connection code. Copy the code for this sheet and deploy a new version.','APPS_SCRIPT_SOURCE');
   if(result.ok!==true){
+    if(result.code==='SCRIPT'){
+      const stages:Record<string,string>={SOURCE:'locating the source row',LAYOUT:'preparing output columns',PERMISSION:'checking output permissions',SAVE:'saving the output cells',VERIFY:'verifying the saved cells'};
+      const stage=stages[String(result.stage)];
+      throw new AppError(409,`Apps Script failed${stage?' while '+stage:''}. Reconnect Apps Script, paste the latest code, then deploy a new version before checking the connection. If it still fails, check protection on the four output columns.`,'APPS_SCRIPT_UPGRADE');
+    }
+    if(result.code==='PROTECTED')throw new AppError(403,'The script account cannot edit the output cells. Remove protection from Sent Status, Shared To, Feedback and Remark, or deploy as a Google account allowed to edit those cells.','APPS_SCRIPT_PROTECTED');
     const errors:Record<string,[number,string,string]>={AUTH:[401,'The script connection key does not match. Paste the latest code, then deploy a new version.','APPS_SCRIPT_AUTH'],SOURCE:[409,'The original lead row is missing, duplicated or changed. No lead update was confirmed.','SYNC_CONFLICT'],CONFLICT:[409,'A managed sheet value was edited outside SmartLead. Review the conflict before retrying.','SYNC_CONFLICT'],TAB:[409,'The selected sheet tab no longer exists. Reconnect its Apps Script.','APPS_SCRIPT_SOURCE'],BUSY:[429,'The sheet script is busy. Its update will retry.','APPS_SCRIPT_BUSY'],VERIFY:[502,'Apps Script has not confirmed the saved lead fields. The update will retry.','APPS_SCRIPT_VERIFY'],SCRIPT:[403,'The script could not access or update this sheet. Check its authorization, protected cells and deployment permissions.','SHEET_READ_ONLY']};
     const [status,message,code]=errors[String(result.code)]||[502,'The script returned an invalid request response. Copy the current code and deploy a new version.','APPS_SCRIPT_DEPLOYMENT'];
     throw new AppError(status,message,code);
@@ -48,7 +55,7 @@ export async function appsScriptRequest(settings:Settings,action:string,data:Rec
 }
 async function inspect(settings:Settings){
   const challenge=opaqueToken();const parsed=inspectionSchema.safeParse(await appsScriptRequest(settings,'check',{challenge}));
-  if(!parsed.success||parsed.data.challenge!==challenge)throw new AppError(502,'Apps Script did not confirm both read and write access. Deploy the current code and check again.','APPS_SCRIPT_VERIFY');
+  if(!parsed.success||parsed.data.challenge!==challenge)throw new AppError(502,'Deploy the latest Apps Script code as a new version, then check the connection again. The deployed code did not confirm the current connection check.','APPS_SCRIPT_VERIFY');
   if(!parsed.data.tabs.length||settings.gid!==undefined&&!parsed.data.tabs.some(t=>t.id===settings.gid))throw new AppError(400,'The selected sheet tab was not found. Check the sheet link.');
   return {...parsed.data,spreadsheetId:settings.spreadsheetId,gid:settings.gid};
 }
@@ -65,13 +72,17 @@ export async function startAppsScriptSetup(user:User,input:{url?:string;sheetId?
     const sheet=await db.sheet.findFirst({where:{id:input.sheetId,organizationId:user.organizationId,connectionType:{startsWith:'SIMPLE_'}}});
     if(!sheet)throw new AppError(404,'Sheet not found');
     settings={spreadsheetId:sheet.spreadsheetId,gid:sheet.worksheetId,sheetId:sheet.id,token:opaqueToken()};
+    if(sheet.connectionType==='SIMPLE_APPS_SCRIPT'&&sheet.credentialId){
+      const previous=await scriptSettings(sheet);
+      settings={...previous,gid:sheet.worksheetId,sheetId:sheet.id};
+    }
   }else{
     let identity:ReturnType<typeof spreadsheetIdentity>;try{identity=spreadsheetIdentity(input.url||'');}catch{throw new AppError(400,'Paste a valid Google Sheets link.');}
     settings={spreadsheetId:identity.id,gid:identity.gid,token:opaqueToken()};
   }
   const setupId=opaqueToken();const pending:Pending={userId:user.id,organizationId:user.organizationId,createdAt:Date.now(),encrypted:encrypt(JSON.stringify(settings))};
   await db.setting.create({data:{key:`apps-script:${setupId}`,value:{...pending}}});
-  return {setupId,code:appsScriptCode(settings.spreadsheetId,settings.token),sheetUrl:`https://docs.google.com/spreadsheets/d/${settings.spreadsheetId}/edit${settings.gid===undefined?'':`#gid=${settings.gid}`}`};
+  return {setupId,code:appsScriptCode(settings.spreadsheetId,settings.token),endpoint:settings.endpoint,sheetUrl:`https://docs.google.com/spreadsheets/d/${settings.spreadsheetId}/edit${settings.gid===undefined?'':`#gid=${settings.gid}`}`};
 }
 export async function checkAppsScriptSetup(user:User,id:string,endpoint:string){
   const {record,pending,settings}=await pendingSetup(user,id);settings.endpoint=appsScriptEndpoint(endpoint);
@@ -86,6 +97,8 @@ export async function connectAppsScriptSheet(user:User,input:{scriptSetupId:stri
   if(settings.sheetId&&settings.gid!==input.worksheetId)throw new AppError(409,'Select the original tab to reconnect this sheet.');
   const info=await inspect(settings);const tab=info.tabs.find(t=>t.id===input.worksheetId);
   if(!tab)throw new AppError(400,'Choose a sheet tab.');
+  const outputCheck=await appsScriptRequest(settings,'prepare',{worksheetId:tab.id});
+  if(outputCheck?.canWriteOutputs!==true)throw new AppError(502,'Apps Script did not confirm it can save the four output columns. Deploy the latest code and check again.','APPS_SCRIPT_VERIFY');
   const mapping=Object.fromEntries(Object.entries(input.columnMapping).filter(([key,value])=>['customerName','mobile','project','email','location','budget','source','requirement','leadDate','leadId'].includes(key)&&value));
   const sender=await db.sender.findFirst({where:{organizationId:user.organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
   const result=await transaction(async tx=>{
