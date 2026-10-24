@@ -4,7 +4,7 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 
 | Method | Endpoint | Access / behavior |
 | --- | --- | --- |
-| GET | /api/health | Database health, configured application origin and automation policy (`skipAlreadySentLeads: true`); failures return 503 with missing variable names and a safe diagnostic reason/code, never credentials, raw errors, or filesystem paths |
+| GET | /api/health | Database health, configured application origin and automation policy (`skipAlreadySentLeads: true`, `recipientLeadCounts: true`); failures return 503 with missing variable names and a safe diagnostic reason/code, never credentials, raw errors, or filesystem paths |
 | GET | /api/simple/state | Administrator; connected sheets, recipients, sending counts and feedback-link readiness |
 | GET | /api/simple/google | Administrator; credential labels, OAuth configuration status and expected redirect URI; no secrets |
 | POST | /api/simple/google/authorize | Administrator; `{url,popup:true}` for a pasted sheet or `{sheetId,popup:true}` for an existing connection; returns the Google consent URL |
@@ -13,7 +13,7 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | POST | /api/simple/sheets/inspect | Administrator; `{url,credentialId}`; Google Sheets API inspection and Editor permission check |
 | POST | /api/simple/sheets | Administrator; {scriptSetupId,spreadsheetId,worksheetId,columnMapping,project}; consume a checked setup and create or upgrade the existing connection. The UI requires the project name; older API callers may omit it to retain the existing project or default to the sheet title. Legacy credentialId input remains supported. |
 | PUT | /api/simple/sheets/:id/project | Administrator; {project}; set the project name for this organisation's sheet and future/queued messages, without editing the Google Sheet or resending delivered messages |
-| PUT | /api/simple/sheets/:id/recipients | Administrator; ordered `{recipients:[{name,phone}]}`; starts round-robin sending |
+| PUT | /api/simple/sheets/:id/recipients | Administrator; ordered `{recipients:[{name,phone,leadCount}]}`; `leadCount` is an integer from 1 to 1000 (default 1); starts consecutive-count rotation |
 | POST | /api/simple/sheets/:id/writeback | Administrator; retry saved output updates for this organisation's sheet; immediately attempt the first waiting lead; never sends WhatsApp messages or resumes distribution |
 | POST | /api/auth/login | `{email,password,code?}`; optional authenticator code |
 | POST | /api/auth/logout | Revoke current session |

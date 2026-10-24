@@ -1,5 +1,5 @@
 'use client';
-import { type ReactNode, useEffect, useRef } from 'react';
+import { type ReactNode, useEffect, useId, useRef } from 'react';
 import { X, LoaderCircle, Search, Inbox, ArrowUpRight, ChevronDown } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -9,9 +9,10 @@ export function Badge({children,tone}:{children:ReactNode;tone?:string}){const t
 export function Avatar({name,small=false,index=0}:{name:string;small?:boolean;index?:number}){return <span className={cn('avatar',small&&'small',`avatar-${index%5}`)}>{name.split(' ').slice(0,2).map(s=>s[0]).join('')}</span>;}
 export function Empty({title='Nothing here yet',description='Your records will appear here as your workspace gets going.',action}:{title?:string;description?:string;action?:ReactNode}){return <div className="empty"><div className="empty-icon"><Inbox size={26}/></div><h3>{title}</h3><p>{description}</p>{action}</div>;}
 export function Modal({title,description,children,onClose,wide=false}:{title:string;description?:string;children:ReactNode;onClose:()=>void;wide?:boolean}){
-  const ref=useRef<HTMLDialogElement>(null);
-  useEffect(()=>{const d=ref.current;d?.showModal();const escape=(e:Event)=>{e.preventDefault();onClose();};d?.addEventListener('cancel',escape);return()=>{d?.removeEventListener('cancel',escape);d?.close();};},[onClose]);
-  return <dialog ref={ref} className={cn('modal',wide&&'wide')} onClick={e=>{if(e.target===e.currentTarget)onClose();}}><div className="modal-header"><div><h2>{title}</h2>{description&&<p>{description}</p>}</div><Button variant="ghost" onClick={onClose} aria-label="Close dialog"><X size={19}/></Button></div><div className="modal-body">{children}</div></dialog>;
+  const ref=useRef<HTMLDialogElement>(null);const closeRef=useRef(onClose);const titleId=useId();
+  useEffect(()=>{closeRef.current=onClose;},[onClose]);
+  useEffect(()=>{const d=ref.current;d?.showModal();const escape=(e:Event)=>{e.preventDefault();closeRef.current();};d?.addEventListener('cancel',escape);return()=>{d?.removeEventListener('cancel',escape);d?.close();};},[]);
+  return <dialog ref={ref} aria-labelledby={titleId} className={cn('modal',wide&&'wide')} onClick={e=>{if(e.target===e.currentTarget)onClose();}}><div className="modal-header"><div><h2 id={titleId}>{title}</h2>{description&&<p>{description}</p>}</div><Button variant="ghost" onClick={onClose} aria-label="Close dialog"><X size={19}/></Button></div><div className="modal-body">{children}</div></dialog>;
 }
 export function Field({label,children,hint}:{label:string;children:ReactNode;hint?:string}){return <label className="field"><span>{label}</span>{children}{hint&&<small>{hint}</small>}</label>;}
 export function Select(props:React.SelectHTMLAttributes<HTMLSelectElement>){return <div className="select-wrap"><select {...props}/><ChevronDown size={14}/></div>;}

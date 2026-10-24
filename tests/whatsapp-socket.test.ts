@@ -21,6 +21,7 @@ beforeEach(async()=>{
   mocks.make.mockImplementation((options:any)=>{
     const socket={options,ev:new EventEmitter(),user:{id:'919876543210:1@s.whatsapp.net'},
       end:vi.fn(),logout:vi.fn().mockResolvedValue(undefined),
+      authState:{keys:{set:vi.fn().mockResolvedValue(undefined)}},resyncAppState:vi.fn().mockResolvedValue(undefined),
       signalRepository:{lidMapping:{getPNForLID:vi.fn().mockResolvedValue('919876543212@s.whatsapp.net')}},
       onWhatsApp:vi.fn(async(number:string)=>[{exists:true,jid:`${number}@s.whatsapp.net`}]),
       sendMessage:vi.fn(async(_to:string,_body:unknown,opts:any)=>({key:{id:opts.messageId}})),
@@ -95,6 +96,36 @@ describe('WhatsApp QR login without Chromium',()=>{
     const f=await linked();
     f.socket.ev.emit('contacts.upsert',[{id:'919876543211@s.whatsapp.net',name:'First'},{id:'123@g.us',name:'Group'},{id:f.socket.user.id,name:'Self'},{id:'123@lid',name:'Second'}]);
     await vi.waitFor(async()=>expect((await f.provider.refreshContacts()).map(c=>c.phone).sort()).toEqual(['+919876543211','+919876543212']));
+  });
+  it('recovers saved phone names on refresh and keeps them through profile updates and restarts',async()=>{
+    const f=await linked();const phone='+919876543211';
+    f.socket.ev.emit('contacts.upsert',[{id:phone.slice(1)+'@s.whatsapp.net',notify:'Profile nickname'}]);
+    f.socket.resyncAppState.mockImplementation(async()=>{f.socket.ev.emit('contacts.upsert',[{id:phone.slice(1)+'@s.whatsapp.net',name:'Aman Office'}]);});
+    expect(await f.provider.refreshContacts()).toContainEqual({phone,name:'Aman Office',nameSource:'saved'});
+    expect(f.socket.authState.keys.set).toHaveBeenCalledWith({'app-state-sync-version':{'critical_unblock_low':null}});
+    f.socket.ev.emit('contacts.update',[{id:phone.slice(1)+'@s.whatsapp.net',notify:'New profile nickname'}]);
+    expect(await f.provider.refreshContacts()).toContainEqual({phone,name:'Aman Office',nameSource:'saved'});
+    expect(f.socket.authState.keys.set).toHaveBeenCalledOnce();
+    await closeSocketWhatsApp();await f.provider.connect();const restored=mocks.instances.at(-1);
+    restored.ev.emit('connection.update',{connection:'open'});await vi.waitFor(async()=>expect(await f.provider.getConnectionStatus()).toBe('CONNECTED'));
+    restored.ev.emit('contacts.update',[{id:phone.slice(1)+'@s.whatsapp.net',notify:'Another nickname'}]);
+    expect(await f.provider.refreshContacts()).toContainEqual({phone,name:'Aman Office',nameSource:'saved'});expect(restored.authState.keys.set).not.toHaveBeenCalled();
+  });
+  it('retains an unresolved saved name until its phone mapping arrives, including across a restart',async()=>{
+    const f=await linked();f.socket.signalRepository.lidMapping.getPNForLID.mockResolvedValue(undefined);
+    f.socket.ev.emit('contacts.upsert',[{id:'123@lid',name:'Saved on phone'}]);
+    await vi.waitFor(async()=>expect((await db.setting.findUniqueOrThrow({where:{key:`whatsapp-contacts:${f.sender.id}`}})).value).toMatchObject({pendingContacts:[{id:'123@lid',name:'Saved on phone'}]}));
+    await closeSocketWhatsApp();await f.provider.connect();const restored=mocks.instances.at(-1);restored.signalRepository.lidMapping.getPNForLID.mockResolvedValue(undefined);
+    restored.ev.emit('connection.update',{connection:'open'});await vi.waitFor(async()=>expect(await f.provider.getConnectionStatus()).toBe('CONNECTED'));
+    restored.ev.emit('contacts.update',[{id:'123@lid',notify:'Different nickname'}]);
+    restored.ev.emit('lid-mapping.update',{lid:'123@lid',pn:'919876543212@s.whatsapp.net'});
+    expect(await f.provider.refreshContacts()).toContainEqual({phone:'+919876543212',name:'Saved on phone',nameSource:'saved'});
+  });
+  it('keeps cached contacts if the phone contact refresh fails',async()=>{
+    const f=await linked();f.socket.ev.emit('contacts.upsert',[{id:'919876543211@s.whatsapp.net',name:'Saved contact'}]);
+    f.socket.resyncAppState.mockRejectedValue(new Error('Temporary sync failure'));
+    await expect(f.provider.refreshContacts()).rejects.toThrow('Temporary sync failure');
+    expect((await db.setting.findUniqueOrThrow({where:{key:`whatsapp-contacts:${f.sender.id}`}})).value).toMatchObject({contacts:[{name:'Saved contact',nameSource:'saved'}]});
   });
   it('restores authentication after a worker restart without logging out the linked device',async()=>{
     const f=await linked();await closeSocketWhatsApp();

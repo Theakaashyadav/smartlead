@@ -15,6 +15,13 @@ input,textarea,select,.field{min-width:0}.form-grid,.mapping-grid{grid-template-
 .nav-item{font-size:11.5px}.main-content th{font-size:9px}.main-content td{font-size:11px}.main-content .person-cell b,.main-content .stacked-cell b{font-size:11px}.main-content .person-cell small,.main-content .stacked-cell small{font-size:9px}.stat-top{font-size:11px}.stat-caption{font-size:9px}.badge{font-size:10px}.panel-heading p{font-size:11px}.source-bar-label{font-size:10px}.chart-legend>div{font-size:9px}@media(max-width:760px){.stat-top{font-size:10px}.stat-caption{font-size:8px}.panel-heading p{font-size:10px}.source-bar-label{font-size:9px}.chart-legend>div{font-size:8px}}
 .simple-original-login{width:100%;max-width:440px;background:#f3f8f4;border:1px solid #dfeae1;border-radius:13px;padding:25px 20px;margin:5px 0 8px}.simple-original-login strong{font-size:19px;color:#276e48}.simple-original-login p{font-size:13px;color:#6e8976;margin:13px 0}.simple-original-login small{font-size:11px;color:#8ca391;line-height:1.8}
 /* Organisation identity remains visible on every connection page. */
+.modal{position:fixed;inset:0;margin:auto;height:fit-content;max-height:calc(100dvh - 32px);overflow-y:auto}
+.simple-contact-choice{display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer}
+.simple-contact-details{display:grid;gap:4px;flex:1;min-width:0}
+.simple-recipient-count{display:grid;gap:5px;flex:0 0 78px;cursor:default}
+.simple-recipient-count>span{font-size:10px;color:#607c68;white-space:nowrap}
+.simple-recipient-count input:not([type=checkbox]){min-height:36px;padding:7px 8px;text-align:center}
+@media(max-width:480px){.simple-contact-choice{gap:8px}.simple-contact-choice .simple-contact-avatar{display:none}.simple-recipient-count{flex-basis:67px}.simple-contact-order{flex-shrink:0}}
 .simple-organization{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:28px;padding-bottom:16px;border-bottom:1px solid #e5e7eb;color:#334155;font-size:14px}
 .simple-organization span{font-size:13px;color:#64748b}
 .simple-login-switch{font-size:14px;margin-top:22px}

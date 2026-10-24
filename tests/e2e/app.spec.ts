@@ -1,5 +1,9 @@
 ﻿import { test, expect } from '@playwright/test';
 async function login(page:any){await page.goto('/login');await page.getByRole('button',{name:'Log in',exact:true}).click();await expect(page).toHaveURL(/dashboard/);await expect(page.getByRole('heading',{name:'Your leads. Sent automatically.'})).toBeVisible();}
+async function expectCentered(page:any){
+  const box=await page.getByRole('dialog').boundingBox();const viewport=page.viewportSize();
+  expect(box).not.toBeNull();expect(Math.abs(box.x+box.width/2-viewport.width/2)).toBeLessThanOrEqual(2);expect(Math.abs(box.y+box.height/2-viewport.height/2)).toBeLessThanOrEqual(2);
+}
 
 test('two organisation owners create separate accounts and keep their connections when switching logins',async({page,browser})=>{
   const suffix=Date.now().toString().slice(-9);const phone=`9${suffix}`,otherPhone=`8${suffix}`,pin='4826';
@@ -118,7 +122,7 @@ test('an existing sheet project can be changed without reconnecting its script',
   await page.route('**/api/simple/sheets/script',route=>{scriptOpened=true;return route.abort();});
   await page.route('**/api/simple/sheets/project-sheet/project',route=>{saved=route.request().postDataJSON();sheet.project=saved.project;return route.fulfill({json:{data:{project:sheet.project}}});});
   await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Edit project',exact:true}).click();
-  await expect(page.getByLabel('Project name',{exact:true})).toHaveValue('Old project');await page.getByLabel('Project name',{exact:true}).fill('Corbett Meadows');
+  await expect(page.getByRole('textbox',{name:'Project name',exact:true})).toHaveValue('Old project');await page.getByRole('textbox',{name:'Project name',exact:true}).fill('Corbett Meadows');
   await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await page.screenshot({path:'data/project-name-mobile.png',fullPage:true});
   await page.getByRole('button',{name:'Save project name',exact:true}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('article')).toContainText('Project: Corbett Meadows');await expect(page.getByRole('heading',{name:'Meta sheet title',exact:true})).toBeVisible();expect(saved).toEqual({project:'Corbett Meadows'});expect(scriptOpened).toBe(false);
@@ -154,7 +158,7 @@ test('WhatsApp connect shows progress then the worker QR code without opening an
   expect(connections).toBe(1);expect(windows).toBe(0);
 });
 
-test('contact picker preserves selection order and accepts a new-conversation number',async({page})=>{
+test('contact picker saves consecutive lead counts in selection order and centers on desktop and mobile',async({page})=>{
   const contacts=[{name:'Akash',phone:'+919876543210'},{name:'Aman',phone:'+919876543211'}];
   const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null},sheets:[{id:'sheet-test',name:'My leads',worksheetName:'Sheet1',enabled:false,leadCount:0,recipients:[],lastSyncError:null}]};
   await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
@@ -165,15 +169,36 @@ test('contact picker preserves selection order and accepts a new-conversation nu
   await login(page);await page.goto('/sheets');
   await page.getByRole('button',{name:'Choose recipients'}).click();
   await page.getByRole('checkbox',{name:/Aman/}).check();
+  await page.getByLabel('Leads per turn for Aman',{exact:true}).fill('2');
   await page.getByRole('checkbox',{name:/Akash/}).check();
   await page.getByLabel('Recipient name',{exact:true}).fill('New person');
   await page.getByLabel('Recipient phone number').fill('+919876543219');
   await page.getByRole('button',{name:'Add',exact:true}).click();
   await expect(page.getByText('3 selected',{exact:true})).toBeVisible();
-  await expect(page.locator('.simple-selected-order')).toContainText('Aman → Akash → New person → repeat');
+  await expect(page.locator('.simple-selected-order')).toContainText('Aman (2 leads) → Akash (1 lead) → New person (1 lead) → repeat');
+  await expectCentered(page);await page.screenshot({path:'data/recipient-counts-desktop.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});await expectCentered(page);await page.screenshot({path:'data/recipient-counts-mobile.png',fullPage:true});
   await page.getByRole('button',{name:'Save & start sending'}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(saved.recipients.map((p:any)=>p.phone)).toEqual(['+919876543211','+919876543210','+919876543219']);
+  expect(saved.recipients.map((p:any)=>p.leadCount)).toEqual([2,1,1]);
+});
+
+test('saved phone names replace number labels without losing edited counts and survive reopening the picker',async({page})=>{
+  const phone='+919876543210';let contacts=[{name:phone,phone}];
+  const sheet={id:'saved-name-sheet',name:'Saved contacts',worksheetName:'Leads',enabled:false,leadCount:0,recipients:[{name:phone,phone,leadCount:2}],lastSyncError:null};
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null},sheets:[sheet]};
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
+  await page.route('**/api/simple/contacts',route=>route.fulfill({json:{data:{contacts}}}));
+  await page.route('**/api/simple/contacts/refresh',route=>route.fulfill({json:{data:{refreshing:true}}}));
+  await page.route('**/api/simple/sheets/saved-name-sheet/recipients',route=>{sheet.recipients=route.request().postDataJSON().recipients;return route.fulfill({json:{data:{started:true}}});});
+  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Edit recipients',exact:true}).click();
+  await page.getByLabel(`Leads per turn for ${phone}`,{exact:true}).fill('3');contacts=[{phone,name:'Aman Office'}];
+  await expect(page.getByLabel('Leads per turn for Aman Office',{exact:true})).toHaveValue('3',{timeout:10000});
+  await page.getByRole('button',{name:'Save & start sending'}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(sheet.recipients).toEqual([{name:'Aman Office',phone,leadCount:3}]);
+  await page.getByRole('button',{name:'Edit recipients',exact:true}).click();await expect(page.getByLabel('Leads per turn for Aman Office',{exact:true})).toHaveValue('3');await expectCentered(page);
+  await page.getByRole('button',{name:'Close dialog'}).click();await page.getByRole('button',{name:'Login & PIN',exact:true}).click();await expectCentered(page);
 });
 
 test('sheet cards show queued, submitted and failed sends',async({page})=>{

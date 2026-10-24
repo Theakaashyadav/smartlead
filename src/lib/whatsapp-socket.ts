@@ -6,7 +6,7 @@ import { db, databaseTransaction } from './db';
 import { queueDeliveryWriteback } from './delivery';
 import { AppError, decrypt } from './security';
 import { phoneSchema } from './validation';
-import type { WhatsAppContact } from './simple-shared';
+import { mergeWhatsAppContact, type WhatsAppContact } from './simple-shared';
 import { clearSocketAuth, socketAuthState } from './whatsapp-socket-auth';
 import { UncertainDelivery, type SendInput, type WhatsAppProvider } from './whatsapp';
 import { redactSessionLogs } from './session-log-redaction';
@@ -17,6 +17,7 @@ type Session = {
   opening?: Promise<void>; retry?: ReturnType<typeof setTimeout>;
   events: Promise<void>; background: Promise<void>; warming?: Promise<void>;
   contacts: Map<string, WhatsAppContact>; recipients: Map<string, { jid: string; expiresAt: number }>;
+  pendingContacts: Map<string, Partial<Contact>>; contactMappings: Map<string,string>; namesHydrated: boolean; refreshingContacts?: Promise<void>;
 };
 const sessions = new Map<string, Session>();
 const logger = pino({ level: 'silent' });
@@ -39,15 +40,23 @@ async function fail(session: Session) {
 
 async function saveContacts(session: Session, contacts: Partial<Contact>[]) {
   for (const contact of contacts) {
-    let jid = contact.phoneNumber || contact.id;
-    if (jid?.endsWith('@lid')) jid = await session.socket?.signalRepository.lidMapping.getPNForLID(jid) || undefined;
+    const id=contact.id||contact.lid||contact.phoneNumber;
+    if(!id||(!id.endsWith('@lid')&&!phoneFromJid(contact.phoneNumber||id)))continue;
+    session.pendingContacts.set(id,{...session.pendingContacts.get(id),...Object.fromEntries(Object.entries(contact).filter(([,value])=>value!==undefined))});
+    if(contact.lid&&phoneFromJid(contact.phoneNumber||contact.id))session.contactMappings.set(contact.lid,(contact.phoneNumber||contact.id)!);
+  }
+  for(const [id,contact] of session.pendingContacts){
+    let jid = contact.phoneNumber || contact.id || contact.lid;
+    if (jid?.endsWith('@lid')) {const lid=jid;jid=session.contactMappings.get(lid)||await session.socket?.signalRepository.lidMapping.getPNForLID(lid)||undefined;if(jid)session.contactMappings.set(lid,jid);}
     const phone = phoneFromJid(jid);
-    if (!phone || phone === phoneFromJid(session.socket?.user?.id)) continue;
+    if (!phone) continue;
+    session.pendingContacts.delete(id);
+    if(phone === phoneFromJid(session.socket?.user?.id))continue;
     const previous = session.contacts.get(phone);
-    session.contacts.set(phone, { phone, name: contact.name || contact.notify || contact.verifiedName || previous?.name || phone });
+    session.contacts.set(phone,mergeWhatsAppContact(previous,phone,contact.name,contact.notify||contact.verifiedName));
   }
   const key = `whatsapp-contacts:${session.id}`;
-  const value = { contacts: [...session.contacts.values()].sort((a, b) => a.name.localeCompare(b.name)), updatedAt: new Date().toISOString(), error: null };
+  const value = { contacts: [...session.contacts.values()].sort((a, b) => a.name.localeCompare(b.name)), pendingContacts:[...session.pendingContacts.values()],nameSyncVersion:session.namesHydrated?2:1,updatedAt: new Date().toISOString(), error: null };
   await db.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
 }
 
@@ -126,6 +135,7 @@ async function open(session: Session) {
   }));
   socket.ev.on('contacts.upsert', contacts => handle(() => saveContacts(session, contacts), true));
   socket.ev.on('contacts.update', contacts => handle(() => saveContacts(session, contacts), true));
+  socket.ev.on('lid-mapping.update', mapping => handle(async()=>{session.contactMappings.set(mapping.lid,mapping.pn);await saveContacts(session,[]);},true));
   socket.ev.on('messaging-history.set', event => handle(async () => {
     await saveContacts(session, event.contacts); await reconcile(session, event.messages);
   }, true));
@@ -184,13 +194,16 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
   async connect() {
     const existing = sessions.get(this.sender.id);
     if (existing && !existing.stopped) { await existing.opening; return; }
-    const session: Session = { id: this.sender.id, stopped: false, connected: false, attempts: 0, events: Promise.resolve(), background: Promise.resolve(), contacts: new Map(), recipients: new Map() };
+    const session: Session = { id: this.sender.id, stopped: false, connected: false, attempts: 0, events: Promise.resolve(), background: Promise.resolve(), contacts: new Map(), recipients: new Map(),pendingContacts:new Map(),contactMappings:new Map(),namesHydrated:false };
     sessions.set(this.sender.id, session);
     session.opening = (async () => {
       await update(session.id, { status: 'CONNECTING', qrCode: null, lastError: null });
       const cached = await db.setting.findUnique({ where: { key: `whatsapp-contacts:${session.id}` } });
-      const contacts = (cached?.value as { contacts?: WhatsAppContact[] } | undefined)?.contacts || [];
+      const value=cached?.value as {contacts?:WhatsAppContact[];pendingContacts?:Partial<Contact>[];nameSyncVersion?:number}|undefined;
+      const contacts = value?.contacts || [];
       for (const contact of contacts) session.contacts.set(contact.phone, contact);
+      for(const contact of value?.pendingContacts||[])if(contact.id)session.pendingContacts.set(contact.id,contact);
+      session.namesHydrated=value?.nameSyncVersion===2;
       await open(session);
     })();
     try { await session.opening; } catch (error) { await fail(session); throw error; }
@@ -212,7 +225,19 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
     if (!session?.connected) throw new AppError(409, 'WhatsApp is disconnected', 'DISCONNECTED');
     await session.background;
     if (!session.connected) throw new AppError(409, 'WhatsApp is reconnecting; leads remain queued.', 'DISCONNECTED');
-    await saveContacts(session, []);
+    if(!session.refreshingContacts){
+      const socket=session.socket!;
+      session.refreshingContacts=(async()=>{
+        // Rebuild only the local contact replication cursor once to recover saved
+        // phone names missed by older versions. This never edits phone contacts.
+        if(!session.namesHydrated)await socket.authState.keys.set({'app-state-sync-version':{'critical_unblock_low':null}});
+        await socket.resyncAppState(['critical_unblock_low'],false);
+        await session.background;
+        if(!session.connected||session.socket!==socket)throw new AppError(409,'WhatsApp is reconnecting; refresh contacts again.','DISCONNECTED');
+        session.namesHydrated=true;await saveContacts(session,[]);
+      })().finally(()=>{session.refreshingContacts=undefined;});
+    }
+    await session.refreshingContacts;
     return [...session.contacts.values()];
   }
   async sendMessage(input: SendInput) {

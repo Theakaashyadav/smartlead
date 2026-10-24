@@ -16,7 +16,7 @@ import { checkAppsScriptSetup, connectAppsScriptSheet, startAppsScriptSetup } fr
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
 const sheetWhere={connectionType:{startsWith:'SIMPLE_'}};
-const recipientSchema=z.object({name:z.string().trim().min(1).max(100),phone:phoneSchema});
+const recipientSchema=z.object({name:z.string().trim().min(1).max(100),phone:phoneSchema,leadCount:z.number().int().min(1).max(1000).default(1)});
 async function sheetById(id:string,organizationId:string) {
   const sheet=await db.sheet.findFirst({where:{id,organizationId,...sheetWhere},include:{rule:true}});
   if(!sheet)throw new AppError(404,'Sheet not found');return sheet;
@@ -38,7 +38,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       const total=(statuses:string[])=>counts.filter(c=>statuses.includes(c.status)).reduce((sum,c)=>sum+c._count,0);
       const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
       const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
-      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
+      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
@@ -172,9 +172,9 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     const account=await simpleSender(organizationId);if(account?.status!=='CONNECTED')throw new AppError(409,'Connect WhatsApp before starting.');
     await transaction(async tx=>{
       const previous=await tx.ruleRecipient.findMany({where:{ruleId:sheet.rule!.id},orderBy:{position:'asc'},include:{employee:{select:{phone:true}}}});
-      const changed=previous.length!==recipients.length||previous.some((r,i)=>r.employee.phone!==recipients[i].phone);
+      const changed=previous.length!==recipients.length||previous.some((r,i)=>r.employee.phone!==recipients[i].phone||(sheet.rule?.mode==='BATCH'?Math.max(1,r.weight):1)!==recipients[i].leadCount);
       const employees=[];
-      for(const person of recipients)employees.push(await tx.employee.upsert({where:{organizationId_phone:{organizationId,phone:person.phone}},create:{...person,organizationId,projects:[],dailyLimit:1000,capacity:10000},update:{active:true,name:person.name}}));
+      for(const {leadCount:_,...person} of recipients)employees.push(await tx.employee.upsert({where:{organizationId_phone:{organizationId,phone:person.phone}},create:{...person,organizationId,projects:[],dailyLimit:1000,capacity:10000},update:{active:true,name:person.name}}));
       if(changed){
         // Rebuild only leads that have never reached the provider. Otherwise a
         // batch assigned before adding people would keep going to the old list.
@@ -185,7 +185,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
         }
       }
       await tx.ruleRecipient.deleteMany({where:{ruleId:sheet.rule!.id}});
-      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'ROUND_ROBIN',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(changed?{cursor:0}:{}),recipients:{create:employees.map((e,position)=>({employeeId:e.id,position}))}}});
+      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'BATCH',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(changed?{cursor:0}:{}),recipients:{create:employees.map((e,position)=>({employeeId:e.id,position,weight:recipients[position].leadCount}))}}});
       const unassigned=await tx.lead.findMany({where:{sheetId:sheet.id,sourceDeleted:false,assignments:{none:{active:true}}},select:{id:true},orderBy:{sourceRow:'asc'}});
       for(const lead of unassigned)await enqueue(tx,'ASSIGN',lead.id,`simple:assign:${lead.id}:${opaqueToken()}`);
       await enqueue(tx,'SYNC',sheet.id,`simple:sync:${sheet.id}:${opaqueToken()}`);

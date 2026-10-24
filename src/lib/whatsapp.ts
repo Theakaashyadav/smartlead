@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { EncryptedAuthStore } from './whatsapp-archives';
 import QRCode from 'qrcode';
 import { phoneSchema } from './validation';
-import type { WhatsAppContact } from './simple-shared';
+import { mergeWhatsAppContact, type WhatsAppContact } from './simple-shared';
 import { nativeWhatsAppLogin, NativeWhatsAppProvider } from './whatsapp-native';
 import { installWhatsAppCompatibility } from './whatsapp-compat';
 import { socketWhatsApp } from './whatsapp-mode';
@@ -111,8 +111,9 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
         return app.require('WAWebCollections').Chat.getModelsArray().filter(c=>/@(c\.us|lid)$/.test(c.id._serialized)).map(c=>({id:c.id._serialized,name:c.name||c.formattedTitle||'',number:c.id.user}));
       })]);
       if(contacts.status==='rejected'&&chats.status==='rejected')throw contacts.reason;
-      const people=new Map<string,WhatsAppContact>();
-      const records=[...(contacts.status==='fulfilled'?contacts.value:[]).filter(c=>!c.isGroup&&!c.isMe&&c.isWAContact!==false).map(c=>({id:c.id._serialized,name:c.name||c.pushname||'',number:c.number})),...(chats.status==='fulfilled'?chats.value||[]:[])];
+      const previous=await db.setting.findUnique({where:{key:`whatsapp-contacts:${this.sender.id}`}});
+      const people=new Map<string,WhatsAppContact>(((previous?.value as {contacts?:WhatsAppContact[]})?.contacts||[]).map(c=>[c.phone,c]));
+      const records=[...(chats.status==='fulfilled'?chats.value||[]:[]).map(c=>({...c,savedName:''})),...(contacts.status==='fulfilled'?contacts.value:[]).filter(c=>!c.isGroup&&!c.isMe&&c.isWAContact!==false).map(c=>({id:c.id._serialized,name:c.pushname||'',savedName:c.name||'',number:c.number}))];
       const lids=[...new Set(records.filter(r=>r.id.endsWith('@lid')).map(r=>r.id))];
       const numbers=new Map<string,string>();
       for(let i=0;i<lids.length;i+=20){
@@ -122,7 +123,7 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
       for(const record of records){
         const raw=record.id.endsWith('@lid')?numbers.get(record.id)?.split('@')[0]:record.id.endsWith('@c.us')?record.number:undefined;
         if(!raw)continue;const number=phoneSchema.safeParse(`+${raw}`);if(!number.success||number.data===`+${client.info?.wid?.user}`)continue;
-        if(!people.has(number.data))people.set(number.data,{phone:number.data,name:(record.name||number.data).slice(0,100)});
+        people.set(number.data,mergeWhatsAppContact(people.get(number.data),number.data,record.savedName,record.name));
       }
       const value={contacts:[...people.values()].sort((a,b)=>a.name.localeCompare(b.name)),updatedAt:new Date().toISOString(),error:null};
       await db.setting.upsert({where:{key:`whatsapp-contacts:${this.sender.id}`},create:{key:`whatsapp-contacts:${this.sender.id}`,value},update:{value}});

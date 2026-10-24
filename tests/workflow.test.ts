@@ -136,7 +136,7 @@ describe('original WhatsApp Web login',()=>{
     registerWebClient(sender.id,client as unknown as import('whatsapp-web.js').Client);
     try{
       const contacts=await new WebWhatsAppProvider(sender).refreshContacts();
-      expect(contacts).toEqual([{phone:'+919876543212',name:'Recent chat'},{phone:'+919876543211',name:'Saved contact'}]);expect(client.getChats).not.toHaveBeenCalled();
+      expect(contacts).toEqual([{phone:'+919876543212',name:'Recent chat',nameSource:'profile'},{phone:'+919876543211',name:'Saved contact',nameSource:'saved'}]);expect(client.getChats).not.toHaveBeenCalled();
       const cached=await db.setting.findUniqueOrThrow({where:{key:'whatsapp-contacts:contacts'}});expect(cached.value).toMatchObject({contacts,error:null});
     }finally{registerWebClient(sender.id,null);}
   });
@@ -144,7 +144,7 @@ describe('original WhatsApp Web login',()=>{
     const sender=await db.sender.create({data:{organizationId:'legacy',id:'contacts-fallback',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const client={getState:async()=> 'CONNECTED',info:{wid:{user:'919876543210'}},getContacts:async()=>[{id:{_serialized:'919876543211@c.us'},number:'919876543211',name:'Saved contact'}],pupPage:{evaluate:vi.fn().mockRejectedValue(new Error('Chats still syncing'))}};
     registerWebClient(sender.id,client as unknown as import('whatsapp-web.js').Client);
-    try{expect(await new WebWhatsAppProvider(sender).refreshContacts()).toEqual([{phone:'+919876543211',name:'Saved contact'}]);}
+    try{expect(await new WebWhatsAppProvider(sender).refreshContacts()).toEqual([{phone:'+919876543211',name:'Saved contact',nameSource:'saved'}]);}
     finally{registerWebClient(sender.id,null);}
   });
   it('waits for native login, attaches to the same page, and leaves the browser open on detach',async()=>{

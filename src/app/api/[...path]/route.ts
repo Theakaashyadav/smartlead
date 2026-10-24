@@ -45,7 +45,7 @@ async function handler(request:Request,context:Context):Promise<Response> {
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
       const workerRunning=workerHeartbeatFresh(worker?.value);
       const failure=!workerRunning?await db.setting.findUnique({where:{key:'simple:worker-error'}}):null;
-      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning,workerManager:process.env.SMARTLEAD_EXTERNAL_WORKER==='true'?'external':'nextjs',workerDiagnostic:failure?.value||null,automation:{publicSheetPollSeconds:SIMPLE_POLL_SECONDS,minimumSendIntervalMs:SEND_INTERVAL_MS,skipAlreadySentLeads:true}});
+      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning,workerManager:process.env.SMARTLEAD_EXTERNAL_WORKER==='true'?'external':'nextjs',workerDiagnostic:failure?.value||null,automation:{publicSheetPollSeconds:SIMPLE_POLL_SECONDS,minimumSendIntervalMs:SEND_INTERVAL_MS,skipAlreadySentLeads:true,recipientLeadCounts:true}});
     }
     if(route==='webhooks/whatsapp'){
       if(method==='GET'){

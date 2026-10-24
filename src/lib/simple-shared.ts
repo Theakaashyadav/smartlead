@@ -1,4 +1,10 @@
-export type WhatsAppContact = {name:string;phone:string};
+export type WhatsAppContact = {name:string;phone:string;nameSource?:'saved'|'profile'|'number'};
+export function mergeWhatsAppContact(previous:WhatsAppContact|undefined,phone:string,savedName?:string|null,profileName?:string|null):WhatsAppContact{
+  const meaningful=(value?:string|null)=>{const text=value?.trim().slice(0,100);return text&&text.replace(/\D/g,'')!==phone.replace(/\D/g,'')?text:undefined;};
+  const saved=meaningful(savedName)||((previous?.nameSource==='saved'||!previous?.nameSource)?meaningful(previous?.name):undefined);
+  const profile=meaningful(profileName)||meaningful(previous?.name);
+  return {phone,name:saved||profile||phone,nameSource:saved?'saved':profile?'profile':'number'};
+}
 export const SIMPLE_TEMPLATE = "Hello, You got a new lead\nProject – *{{project_name}}*\nHere's what we know:\nName: *{{customer_name}}*\nPhone: *{{mobile_number}}*\nCity: *{{location}}*\n*Submit Feedback*\n{{feedback_link}}\nThank you!";
 export const DELIVERY_COLUMNS={sentStatus:'Sent Status',sharedTo:'Shared To'};
 export const SIMPLE_OUTPUT_COLUMNS={...DELIVERY_COLUMNS,status:'Feedback',feedback:'Remark'};
