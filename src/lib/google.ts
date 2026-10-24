@@ -7,6 +7,7 @@ import { PublicSheetsProvider, simpleSourceRows } from './public-sheets';
 import { LEGACY_ORGANIZATION } from './organizations';
 import { DELIVERY_COLUMNS, SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
 import { expectedOutputValue, legacyRemarkColumn, nextOutputMove, outputColumns, simpleOutputValues } from './sheet-output';
+import { AppsScriptSheetsProvider } from './apps-script';
 
 type Metadata = {metadataId:number;metadataKey:string;metadataValue:string;location:{dimensionRange?:{sheetId:number;startIndex:number;endIndex:number}}};
 export type SourceRow = {stableId:string;row:number;metadataId?:number;values:Record<string,string>;questions?:Array<{question:string;answer:string}>};
@@ -288,5 +289,5 @@ export class DemoSheetsProvider implements SheetProvider {
     await db.setting.upsert({where:{key:`demo-source:${sheet.id}`},create:{key:`demo-source:${sheet.id}`,value:JSON.parse(JSON.stringify(rows))},update:{value:JSON.parse(JSON.stringify(rows))}});
   }
 }
-export const sheetProvider=(sheet:Sheet):SheetProvider=>sheet.connectionType==='DEMO'?new DemoSheetsProvider():sheet.connectionType==='SIMPLE_GOOGLE'?new AuthorizedSheetsProvider():sheet.connectionType==='SIMPLE_PUBLIC'?new PublicSheetsProvider():new GoogleSheetsProvider();
+export const sheetProvider=(sheet:Sheet):SheetProvider=>sheet.connectionType==='DEMO'?new DemoSheetsProvider():sheet.connectionType==='SIMPLE_APPS_SCRIPT'?new AppsScriptSheetsProvider():sheet.connectionType==='SIMPLE_GOOGLE'?new AuthorizedSheetsProvider():sheet.connectionType==='SIMPLE_PUBLIC'?new PublicSheetsProvider():new GoogleSheetsProvider();
 export const sourceFingerprint=(values:Record<string,string>)=>hash(JSON.stringify(Object.fromEntries(['customerName','mobile','email','project','location','budget','source','requirement','leadDate'].map(k=>[k,values[k]||'']))));

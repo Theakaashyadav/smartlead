@@ -58,6 +58,7 @@ describe('Sent Status and Shared To',()=>{
     const f=await fixture();await dispatchMessage(f.message.id,f.provider);
     vi.spyOn(PublicSheetsProvider.prototype,'write').mockRejectedValue(new AppError(502,'Google temporarily unavailable'));
     const job=await db.job.findFirstOrThrow({where:{key:{startsWith:'writeback:delivery:'}}});
+    await db.job.update({where:{id:job.id},data:{runAt:new Date(0)}});
     await processJob(job.id);await dispatchMessage(f.message.id,f.provider);
     expect(f.send).toHaveBeenCalledOnce();expect((await db.message.findUniqueOrThrow({where:{id:f.message.id}})).status).toBe('SUBMITTED');
     expect(await db.job.findUnique({where:{id:job.id}})).toMatchObject({status:'PENDING',attempts:1});
@@ -74,7 +75,7 @@ describe('Sent Status and Shared To',()=>{
   it('keeps read-only sheet updates retryable and saves them after sharing is corrected',async()=>{
     const f=await fixture();await dispatchMessage(f.message.id,f.provider);
     const job=await db.job.findFirstOrThrow({where:{key:{startsWith:'writeback:delivery:'}}});
-    await db.job.update({where:{id:job.id},data:{attempts:7}});
+    await db.job.update({where:{id:job.id},data:{attempts:7,runAt:new Date(0)}});
     const write=vi.spyOn(PublicSheetsProvider.prototype,'write').mockRejectedValueOnce(new AppError(403,'Sheet is read-only','SHEET_READ_ONLY')).mockResolvedValue({});
     await processJob(job.id);
     expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'PENDING',attempts:7,error:'Sheet is read-only'});

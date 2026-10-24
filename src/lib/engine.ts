@@ -64,7 +64,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
       const data={customerName:row.values.customerName||'Unnamed lead',mobile,email:row.values.email||null,project:row.values.project||sheet.project,location:row.values.location||null,budget:row.values.budget||null,source:row.values.source||null,requirement:row.values.requirement||null,sourceRow:row.row,metadataId:row.metadataId||null,sourceFingerprint:fingerprint,sourceData:{questions:row.questions||[]},sourceDeleted:false};
       if(!existing) {
         await transaction(async tx=>{
-          const publicSheet=['SIMPLE_PUBLIC','SIMPLE_GOOGLE'].includes(sheet.connectionType);
+          const publicSheet=['SIMPLE_PUBLIC','SIMPLE_GOOGLE','SIMPLE_APPS_SCRIPT'].includes(sheet.connectionType);
           const managedSnapshot={...Object.fromEntries(Object.keys(MANAGED_FIELDS).map(k=>[k,row.values[k]||''])),...(publicSheet?{__publicFeedbackInitialized:'1'}:{})};
           const lead=await tx.lead.upsert({where:{sheetId_stableSourceId:{sheetId:id,stableSourceId:row.stableId}},create:{...data,managedSnapshot,...(publicSheet?{status:row.values.status||'New',lastFeedback:row.values.feedback||null}:{}),sheetId:id,stableSourceId:row.stableId,leadDate:Number.isNaN(date.getTime())?new Date():date},update:{...data}});
           if(parsed.success) await enqueue(tx,'ASSIGN',lead.id,`assign:${lead.id}`);
@@ -75,7 +75,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
         const snapshot=(existing.managedSnapshot||{}) as Record<string,string>;
         // Adopt pre-existing public-sheet output values once when upgrading from
         // the read-only sender. Subsequent external edits remain conflicts.
-        const initialize=['SIMPLE_PUBLIC','SIMPLE_GOOGLE'].includes(sheet.connectionType)&&!snapshot.__publicFeedbackInitialized;
+        const initialize=['SIMPLE_PUBLIC','SIMPLE_GOOGLE','SIMPLE_APPS_SCRIPT'].includes(sheet.connectionType)&&!snapshot.__publicFeedbackInitialized;
         const hasFeedback=initialize?await db.feedback.count({where:{leadId:existing.id}}):0;
         const baseline=initialize?{managedSnapshot:{...snapshot,status:row.values.status||'',assignedEmployee:row.values.assignedEmployee||'',sentStatus:row.values.sentStatus||'',sharedTo:row.values.sharedTo||'',feedback:row.values.feedback||'',__publicFeedbackInitialized:'1'},...(!hasFeedback?{status:row.values.status||existing.status,lastFeedback:row.values.feedback||existing.lastFeedback}:{}),version:{increment:1}}:{};
         // A connector can fill a row in stages. Queue it when its phone first
@@ -274,7 +274,7 @@ export async function processJob(id:string, candidate?:Job) {
     }
     await db.job.updateMany({where:{id,lockToken:token},data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
   }catch(error){
-    const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
+    const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED','APPS_SCRIPT_AUTH'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
     const attempts=job.attempts+(paused?0:1);
     await db.job.updateMany({where:{id,lockToken:token},data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});
   }

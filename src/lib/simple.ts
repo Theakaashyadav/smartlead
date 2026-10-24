@@ -12,6 +12,7 @@ import { feedbackBaseURL } from './feedback-url';
 import { LEGACY_ORGANIZATION } from './organizations';
 import { requireWhatsAppWorker, workerHeartbeatFresh, workerOfflineMessage } from './worker-status';
 import { SIMPLE_POLL_SECONDS, sheetPollSeconds } from './automation-policy';
+import { checkAppsScriptSetup, connectAppsScriptSheet, startAppsScriptSetup } from './apps-script';
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
 const sheetWhere={connectionType:{startsWith:'SIMPLE_'}};
@@ -37,7 +38,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       const total=(statuses:string[])=>counts.filter(c=>statuses.includes(c.status)).reduce((sum,c)=>sum+c._count,0);
       const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
       const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
-      return {id:s.id,name:s.name,worksheetName:s.worksheetName,googleAuthorized:s.connectionType!=='SIMPLE_PUBLIC'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
+      return {id:s.id,name:s.name,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,recipients:s.rule?.recipients.map(r=>r.employee)||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
@@ -82,6 +83,14 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     const account=await simpleSender(organizationId);if(account?.status!=='CONNECTED')throw new AppError(409,'Connect WhatsApp first.');
     await enqueue(db,'CONTACTS',account.id,`simple:contacts:${account.id}:${Math.floor(Date.now()/10000)}`);return {refreshing:true};
   }
+  if(route==='sheets/script'&&method==='POST'){
+    const data=z.object({url:z.string().max(500).optional(),sheetId:z.string().optional()}).refine(value=>!!(value.url||value.sheetId),'Paste a sheet link first.').parse(await input());
+    return startAppsScriptSetup(user,data);
+  }
+  if(route==='sheets/script/check'&&method==='POST'){
+    const data=z.object({setupId:z.string(),endpoint:z.string().max(1000)}).parse(await input());
+    return checkAppsScriptSetup(user,data.setupId,data.endpoint);
+  }
   if(route==='sheets/inspect'&&method==='POST'){
     const data=z.object({url:z.string().max(500),credentialId:z.string().min(1,'Authorize with Google first.')}).parse(await input());
     let identity:ReturnType<typeof spreadsheetIdentity>;try{identity=spreadsheetIdentity(data.url);}catch(e){throw new AppError(400,(e as Error).message);}
@@ -91,7 +100,9 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     return {...info,spreadsheetId:identity.id,gid:identity.gid};
   }
   if(route==='sheets'&&method==='POST'){
-    const data=z.object({spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),credentialId:z.string().min(1,'Authorize with Google first.'),columnMapping:z.record(z.string(),z.string())}).parse(await input());
+    const body=await input();
+    if(body.scriptSetupId){const data=z.object({scriptSetupId:z.string(),spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),columnMapping:z.record(z.string(),z.string())}).parse(body);return connectAppsScriptSheet(user,data);}
+    const data=z.object({spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),credentialId:z.string().min(1,'Connect this sheet with Apps Script first.'),columnMapping:z.record(z.string(),z.string())}).parse(body);
     const info=await inspectSpreadsheet(data.spreadsheetId,data.credentialId,organizationId);const tab=info.tabs.find((t:{id:number})=>t.id===data.worksheetId);
     if(!tab)throw new AppError(400,'Choose a sheet tab.');
     await verifyGoogleSheetEditor(data.spreadsheetId,data.credentialId,organizationId);

@@ -87,7 +87,7 @@ export function simpleSourceRows(sheet:Sheet,rows:string[][]):SourceRow[]{
 export class PublicSheetsProvider implements SheetProvider{
   async read(sheet:Sheet):Promise<SourceRow[]>{return simpleSourceRows(sheet,await publicCSV(sheet.spreadsheetId,sheet.worksheetId));}
   async write(sheet:Sheet,stableId:string,_metadataId:number|null,values:Record<string,string>){
-    if(process.env.NODE_ENV==='production')throw new AppError(401,'Authorize this sheet with Google from its sheet card to save Sent Status, Shared To, Feedback and Remark.','GOOGLE_AUTH_REQUIRED');
+    if(process.env.NODE_ENV==='production')throw new AppError(401,'Connect Apps Script from this sheet card to save Sent Status, Shared To, Feedback and Remark.','APPS_SCRIPT_AUTH');
     return writePublicSheet(sheet,stableId,values);
   }
 }

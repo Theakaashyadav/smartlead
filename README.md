@@ -16,7 +16,7 @@ SmartLead now uses MongoDB by default. This installation starts with an empty `s
 
 You and your friend sign in with different email addresses and connect your own WhatsApp and sheets. On one browser, sign out before changing accounts; separate browser profiles can stay signed in simultaneously. For access from another computer, both users need a reachable hosted installation (see Production installation); `127.0.0.1` only works on the computer running SmartLead.
 
-The server-level Google service account remains available to the original organisation only. Each organisation can authorize its own Google account. New sheet connections use the Google Sheets API and support private sheets.
+The server-level Google service account remains available to the original organisation only. New connections use a private Apps Script web app for each spreadsheet; no Google OAuth client configuration is needed for this flow. Existing Google API connections continue to work.
 
 ## Run locally with MongoDB
 
@@ -26,8 +26,8 @@ Double-click **Start SmartLead.cmd**. It starts both the built application and a
 
 1. Log in. The dashboard has only **Connect Sheets** and **Connect WhatsApp** cards.
 2. Open **Connect WhatsApp** → **Connect WhatsApp** and scan the QR shown in SmartLead. The default socket connection runs without Chromium or a desktop window. Its encrypted saved login is reused when available. After linking, you can close the dashboard; the background worker keeps sending.
-3. Open **Connect Sheets**, paste the link and choose **Continue with Google**. A Google popup lets you select an account that owns the spreadsheet or has **Editor** access, then approve Google Sheets access. The app owner completes the one-time OAuth setup below; people connecting sheets never enter client IDs or secrets. Public link sharing is unnecessary.
-4. After authorization, choose the tab and check the automatically detected customer-name and phone columns. SmartLead checks editing permission before connecting and stores sending progress in its MongoDB database.
+3. Open **Connect Sheets**, paste the link and choose **Continue**. Copy the generated Apps Script code into the spreadsheet’s **Extensions → Apps Script** editor and save it.
+4. Deploy it as a **Web app**, **Execute as: Me**, **Who has access: Anyone**. Authorize the script in Google, paste the deployment’s **/exec** URL into SmartLead, then select **Check connection**. After read and write access is confirmed, choose the tab and name/phone columns. The sheet can stay private.
 5. Select recipients from your linked WhatsApp account. If someone is missing, add their phone number. **Save & start sending** starts the queue. A new conversation starts on the first message to a registered WhatsApp number.
 
 Existing rows are sent when you start. Public sheets check for new rows every **five seconds**, including existing connections previously configured for one minute. Authenticated Google Sheets API connections retain their configured polling interval. Sending runs sequentially in the background; the round-robin cursor and source IDs persist across restarts. You can edit recipients or pause a sheet from its card. It displays real connections rather than the fictional seed sources.
@@ -38,7 +38,7 @@ For Meta ads, these timings start **after the lead becomes visible in Google She
 
 Every new message includes the sheet name, its questions and answers in source order, the lead's name, phone and city, and a private feedback link. After WhatsApp accepts a send, the worker appends **Sent Status** and **Shared To** after the last used sheet column and writes **Sent** plus the recipient's name on that lead's original row. Queued, rejected, cancelled, and uncertain sends remain unmarked. If a lead was shared with several people, only successful recipients are listed; changing its assignment does not replace that history with an unsent recipient. The existing lead status remains separate from this sending status.
 
-Employees open the private feedback link without an administrator login, select a lead status and enter a remark. The last four used columns are **Sent Status → Shared To → Feedback → Remark**. **Feedback** holds the selected lead status; **Remark** holds the submitted text. Both are saved in SmartLead first and then written to the original source row. Existing source cells and manual edits are preserved. The previous `lead_status` source column is retained; an old free-text `Feedback` column is renamed `Remark` during the upgrade. Authorized connections use the Google Sheets API and verify the saved fields before reporting success. Sheet update failures retry separately and never resend a WhatsApp message. Authorizing an existing sheet queues confirmed successful sends and saved feedback for repair.
+Employees open the private feedback link without an administrator login, select a lead status and enter a remark. The last four used columns are **Sent Status → Shared To → Feedback → Remark**. **Feedback** holds the selected lead status; **Remark** holds the submitted text. Both are saved in SmartLead first and then written to the original source row. Existing source cells and manual edits are preserved. The previous `lead_status` source column is retained; an old free-text `Feedback` column is renamed `Remark` during the upgrade. Apps Script and existing Sheets API connections verify the saved fields before reporting success. Sheet update failures retry separately and never resend a WhatsApp message. Connecting Apps Script on an existing sheet queues confirmed successful sends and saved feedback for repair.
 
 Managed Node runners can reserve standard input for their own socket. SmartLead handles the resulting `open EEXIST` stdin getter before loading Puppeteer, so importing the browser library does not fail. Other input errors remain visible. Runtime sheet-editor failures include a stage and sanitized stack frames in the application log.
 
@@ -70,29 +70,24 @@ Lead 1 goes to selected person 1, lead 2 to person 2, and so on before repeating
 
 Link-based imports use a mapped Lead ID when present. Otherwise they identify each lead by its normalized phone number plus lead date, when available. Reordering rows or editing a customer's name does not resend that lead. Repeated rows with the same phone and date are imported once; use distinct Lead IDs or dates when separate leads share a phone number. Authorizing an existing public connection preserves these identities, recipients, sending history and rotation. API writeback attaches row metadata to follow moved rows; deleted source leads and external edits to managed output cells stop writeback for review.
 
-The sheet cards show pending Google Sheet updates and their latest error separately from imports and WhatsApp delivery. For an existing public sheet, select **Authorize with Google** on its card. The selected Google account must have **Editor** access to save Sent Status, Shared To, Feedback and Remark. Reconnect Google if consent expires or is revoked. Saved feedback remains in the app while authorization is repaired. OAuth cannot grant ownership or increase an account's Google permissions.
+The sheet cards show pending updates and their latest error separately from imports and WhatsApp delivery. Select **Connect Apps Script** on an existing sheet card to install the connector without replacing its lead identities, recipients, sending history or rotation. Select **Reconnect Apps Script** to replace a deployment or connection key. Saved feedback stays in SmartLead while a connection is repaired.
 
-Production sheet updates require Google authorization and run without Chromium. The older anonymous browser editor remains available for local development only. Default socket WhatsApp builds skip browser downloads; explicitly selected browser WhatsApp modes still prepare Chromium.
+Production sheet updates use Apps Script or an existing authorized Sheets API connection and run without Chromium. The older anonymous browser editor remains available for local development only. Default socket WhatsApp builds skip browser downloads; explicitly selected browser WhatsApp modes still prepare Chromium.
 
-## One-time Google Cloud setup
+## Connect a sheet with Apps Script
 
-This setup belongs to the SmartLead app owner and is shared by all organisations. It powers Google's account-selection and consent popup. Each person then connects their own Google account through that popup. App registration is still required by Google even when users only see a sign-in button. The pasted link selects the spreadsheet; the consent screen requests Sheets access, and users choose its tab and columns after authorizing. The app checks Editor permission before enabling writes. Popup results are accepted only from the window that SmartLead opened on the same origin. Closing or blocking the popup preserves the existing connection and allows a retry.
+1. Paste the spreadsheet link in **Connect sheet**, then click **Continue**.
+2. Copy the generated code. Open that spreadsheet and choose **Extensions → Apps Script**. Replace Code.gs with the code and save.
+3. Choose **Deploy → New deployment**, select **Web app**, set **Execute as: Me** and **Who has access: Anyone**, then authorize and deploy.
+4. Copy the **Web app URL** ending in **/exec**. Paste it in SmartLead and select **Check connection**.
+5. SmartLead checks the spreadsheet identity and verifies read/write permission by adding and removing temporary developer metadata. It does not modify source cells during this check.
+6. After confirmation, select the tab and mapped name/phone columns and connect. Choose recipients to start a new connection. Existing connections retain their recipients and sending history.
 
-1. Create or select a project in [Google Cloud Console](https://console.cloud.google.com/) and enable **Google Sheets API** under **APIs & Services → Library**.
-2. Open **Google Auth Platform**. Complete **Branding** with the app name, support email and contact email. Select **External** under **Audience** for personal Gmail accounts and add the Google accounts you will use as **Test users** while testing.
-3. In **Data Access**, add `https://www.googleapis.com/auth/spreadsheets`. This allows spreadsheet editing with the signed-in account's existing rights.
-4. Open **Clients → Create client → Web application**. Add this exact **Authorized redirect URI** for the current live site:
+Saving code alone does not publish a callable endpoint. Use the deployed /exec URL, not the script editor address or /dev test URL. If code changes, publish a new deployment version before checking again. A Google Workspace policy that prevents Anyone access must be resolved with its administrator before this connector can be called by the hosting server. See [Google’s Apps Script deployment guide](https://developers.google.com/apps-script/guides/web).
 
-   ```text
-   https://lightslategray-oryx-425713.hostingersite.com/api/integrations/google/callback
-   ```
+The web app executes under the Google account that deployed it. The script is restricted to its configured spreadsheet and requires its private connection key for every data request. The key is included in the generated code and stored encrypted in SmartLead. It is sent in the POST body, never in a URL or forwarded to another host. Keep the code private. Only the four managed output fields can be written; source cells and conflicting external edits are preserved. Rows are checked by source identity and developer metadata, and literal text writes prevent remarks from becoming formulas. Deployment checks expire after 24 hours if setup is not completed; a connected script keeps working until access, its key or deployment changes.
 
-5. In the Hostinger website's environment variables, set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` from that client, and `GOOGLE_REDIRECT_URI` to the URI above. Set `APP_URL=https://lightslategray-oryx-425713.hostingersite.com`. Apply the settings and redeploy/restart. Keep the client secret private.
-6. Open the live site's **Sheets** page and select **Authorize with Google** on the existing connection, or paste a link under **Connect sheet**. Choose the owner/Editor account and allow Sheets access.
-
-For another domain, use its HTTPS origin in both `APP_URL` and the Google redirect URI. `GOOGLE_REDIRECT_URI` may be omitted to derive it from `APP_URL`; an explicitly configured mismatch is rejected. Authorization state expires after ten minutes and is bound to the current user and organisation. Background access tokens are refreshed and stored encrypted.
-
-Google's **External / Testing** status expires refresh tokens for Sheets access after seven days. For ongoing use, configure the production consent screen and complete any verification Google requires. See [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server) and [consent-screen setup](https://developers.google.com/workspace/guides/configure-oauth-consent).
+Existing Google OAuth/service-account connections remain supported through the legacy API. They are separate from this default Apps Script flow.
 
 ## Feedback links: local testing and Hostinger
 
@@ -144,11 +139,11 @@ For the optional fictional SQLite demo in a separate checkout, set `DATABASE_PRO
 
 ## Production installation
 
-The hosted installation runs the website, WhatsApp connection, sheet polling, automatic sending, and feedback form on Hostinger. It needs no running local PC, local browser, tunnel, or Windows launcher. Your phone is needed to approve the initial WhatsApp linking QR. MongoDB can remain on your existing Atlas cluster. Complete the Google Cloud setup above for sheet access.
+The hosted installation runs the website, WhatsApp connection, sheet polling, automatic sending, and feedback form on Hostinger. It needs no running local PC, local browser, tunnel or Windows launcher. Your phone is needed to approve WhatsApp linking. MongoDB can remain on your existing Atlas cluster. Install and deploy the generated Apps Script for each spreadsheet.
 
 **Managed hosting without a VPS:** use `WHATSAPP_LOGIN_MODE=socket` (the default). This uses the Baileys WhatsApp connection to provide QR login and sending directly from Node.js without Chromium. The QR connection was verified on this Hostinger account independently of the application. Accounts must be linked once through this transport; existing browser profiles cannot be converted. Credentials and Signal keys are encrypted in MongoDB and restored after a worker restart. Preserve `ENCRYPTION_KEY`. Contacts arrive during WhatsApp synchronization; missing recipients can be added by phone number.
 
-Google Sheets imports, recipient rotation, sending, delivery updates and the hosted feedback form run without a local PC. Authorized sheet connections use the Sheets API. With socket WhatsApp login, builds skip Chromium downloads and production sheet updates need no browser processes or libraries. Existing public connections can continue importing until authorized; their sheet cards explain that Google authorization is required for updates.
+Google Sheets imports, recipient rotation, sending, delivery updates and feedback run without a local PC. New sheet connections use Apps Script. Socket WhatsApp login and sheet updates need no hosted browser. Existing public connections keep importing until their Apps Script is connected.
 
 ### Managed Hostinger Node.js deployment
 
@@ -156,7 +151,7 @@ Google Sheets imports, recipient rotation, sending, delivery updates and the hos
 2. In the website's Environment variables, keep its existing `MONGODB_URI`, `MONGODB_DATABASE=smartlead`, `SESSION_SECRET`, and `ENCRYPTION_KEY`. Set `DATABASE_PROVIDER=mongodb`, `DEMO_MODE=false`, `APP_URL` to the exact public HTTPS origin, and **`WHATSAPP_LOGIN_MODE=socket`**. Keep `PUBLIC_FEEDBACK_URL` empty for feedback on the same domain. Local `.env` and `.env.worker` files are not uploaded and do not change the host's configuration.
 3. On Hostinger's `hbuilds` deployment layout, the embedded worker automatically uses the domain's `smartlead-data` directory outside replaceable versions. Optionally set `SMARTLEAD_DATA_DIR` to another writable **persistent directory on the server**. Leave the individual WhatsApp directory overrides empty unless explicitly using persistent locations. Retain this directory and the same encryption key when redeploying.
 4. Allow the hosting server's outgoing IP in Atlas. On an existing installation, keep its database and keys. On a new installation, run `npm run db:setup` once to initialize SmartLead collections and indexes; this does not seed users or import local data.
-5. Socket WhatsApp login needs outbound HTTPS and WebSocket access. Set the Google OAuth client variables described above and enable Google Sheets API. Each organisation then authorizes an owner/Editor Google account from its sheet card.
+5. Socket WhatsApp login needs outbound HTTPS and WebSocket access. New sheet connections need outbound HTTPS to script.google.com and script.googleusercontent.com. Each spreadsheet owner installs, authorizes and deploys its generated connector; Google OAuth client variables are unnecessary for Apps Script.
 6. Apply the environment settings and redeploy. Runtime logs should show `hosted_worker_starting`, followed by `SmartLead worker started`. Check `https://your-domain/api/health` for `status: ok`, `database: mongodb`, **`workerManager: nextjs`**, and **`workerRunning: true`**. If startup fails, `workerDiagnostic` reports the safe reason. Then connect WhatsApp and scan the live QR on the hosted page.
 
 The embedded worker automatically retries failures with a bounded delay, without stopping the website or disconnecting its shared database. A database lease allows one active worker across web instances; overlapping deployments wait for the previous worker to release ownership. The worker restores saved connections after acquiring its lease. Socket login and authorized sheet updates do not launch Chromium. Development and build processes never start production automation. `SMARTLEAD_EXTERNAL_WORKER=true` opts out when a separate service manages the worker; `npm start`, `npm run start:web`, Docker, and the Windows launcher set this automatically where appropriate. Hostinger must keep the server process running and restart it after server reboots.

@@ -5,43 +5,30 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, FileSpreadsheet, LogOut, MessageCircle, Pause, Play, Plus, RefreshCw, Search, Trash2, Users, X } from 'lucide-react';
 import { api, Button, Field, Modal, Select } from './ui';
-import { detectColumns, spreadsheetIdentity, type WhatsAppContact } from '@/lib/simple-shared';
+import { type WhatsAppContact } from '@/lib/simple-shared';
 import { WhatsAppBrowserLogin } from './whatsapp-browser-login';
 import { WhatsAppBackgroundLogin } from './whatsapp-background-login';
 import { PhoneLoginSettings } from './phone-login-settings';
-import { useGoogleAuthorization } from './google-authorization';
+import { ConnectSheet } from './connect-sheet';
 
-type SheetSummary={id:string;name:string;worksheetName:string;googleAuthorized?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;recipients:WhatsAppContact[];delivery?:{submitted:number;queued:number;failed:number;error:string|null};writeback?:{pending:number;failed:number;error:string|null}};
+type SheetSummary={id:string;name:string;worksheetName:string;googleAuthorized?:boolean;appsScriptConnected?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;recipients:WhatsAppContact[];delivery?:{submitted:number;queued:number;failed:number;error:string|null};writeback?:{pending:number;failed:number;error:string|null}};
 type Account={id:string;phone:string|null;status:string;qrCode:string|null;lastError:string|null};
 type State={user:{name:string;email:string|null;phone?:string|null;pinEnabled?:boolean;twoFactor?:boolean};organization:{id:string;name:string};account:Account|null;sheets:SheetSummary[];workerRunning:boolean;workerMessage?:string|null;whatsappLoginMode?:'background'|'browser'|'qr';feedbackError?:string|null;publicSheetWritebackAvailable?:boolean};
-type Inspection={spreadsheetId:string;title:string;gid?:number;tabs:{id:number;name:string;headers:string[]}[]};
-type GoogleReturn={url:string;credentialId:string};
 const message=(e:unknown)=>e instanceof Error?e.message:'Please try again.';
 
 export function SimpleApp(){
   const pathname=usePathname();const router=useRouter();
-  const authorizeGoogle=useGoogleAuthorization();
   const [state,setState]=useState<State|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState(false);
   const [connectOpen,setConnectOpen]=useState(false);const [recipientSheet,setRecipientSheet]=useState<string|null>(null);
-  const [googleReturn,setGoogleReturn]=useState<GoogleReturn|null>(null);const [googleNotice,setGoogleNotice]=useState('');
+  const [scriptSheet,setScriptSheet]=useState<SheetSummary|null>(null);const [connectionNotice,setConnectionNotice]=useState('');
   const [loginSettings,setLoginSettings]=useState(false);
   const [deletingSheet,setDeletingSheet]=useState<SheetSummary|null>(null);
   const closeDelete=useCallback(()=>setDeletingSheet(null),[]);
-  const closeConnect=useCallback(()=>{setConnectOpen(false);setGoogleReturn(null);},[]);const closeRecipients=useCallback(()=>setRecipientSheet(null),[]);
+  const closeConnect=useCallback(()=>{setConnectOpen(false);setScriptSheet(null);},[]);const closeRecipients=useCallback(()=>setRecipientSheet(null),[]);
   const reload=useCallback(async()=>{const result=await api<State>('simple/state');setState(result);return result;},[]);
   useEffect(()=>{let active=true;const refresh=()=>api<State>('simple/state').then(s=>{if(active)setState(s);}).catch(e=>{if(active)setError(message(e));});refresh();const timer=setInterval(refresh,5000);return()=>{active=false;clearInterval(timer);};},[]);
-  useEffect(()=>{
-    const query=new URLSearchParams(window.location.search);
-    if(query.get('google')==='error')setError(query.get('message')||'Google authorization was not completed. Please try again.');
-    if(query.get('google')==='connected'){
-      setGoogleNotice('Google access confirmed. Sheet updates use your authorized Google account.');
-      const url=query.get('sheet');const credentialId=query.get('credential');
-      if(url&&credentialId){setGoogleReturn({url,credentialId});setConnectOpen(true);}
-    }
-    if(query.has('google'))window.history.replaceState(null,'',window.location.pathname);
-  },[]);
   async function action(path:string,method='POST',body?:unknown){setBusy(true);setError('');try{await api(`simple/${path}`,method,body);await reload();}catch(e){setError(message(e));}finally{setBusy(false);}}
-  async function authorizeSheet(sheet:SheetSummary){setBusy(true);setError('');try{await authorizeGoogle({sheetId:sheet.id});await reload();setGoogleNotice('Google access updated. Saved lead fields are queued for synchronization.');}catch(e){setError(message(e));}finally{setBusy(false);}}
+  function connectScript(sheet:SheetSummary){setScriptSheet(sheet);setConnectOpen(true);}
   const account=state?.account;const connected=account?.status==='CONNECTED';
   const currentSheet=state?.sheets.find(s=>s.id===recipientSheet);
   const section=pathname==='/sheets'?'sheets':pathname==='/whatsapp'?'whatsapp':'dashboard';
@@ -51,17 +38,17 @@ export function SimpleApp(){
       {state&&<div className="simple-organization" aria-label="Current organisation"><strong>{state.organization.name}</strong><span>{state.user.name} · {state.user.phone?.replace(/^\+91(?=\d{10}$)/,'')||state.user.email}</span><Button variant="ghost" onClick={()=>setLoginSettings(true)}>Login & PIN</Button></div>}
       {state&&loginSettings&&<PhoneLoginSettings user={state.user} onClose={()=>setLoginSettings(false)} onSaved={reload}/>}
       {error&&<div role="alert" className="alert error">{error}<button onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
-      {googleNotice&&<p role="status" className="alert info">{googleNotice}</p>}
+      {connectionNotice&&<p role="status" className="alert info">{connectionNotice}</p>}
       {!state?<p className="simple-loading">Loading your workspace…</p>:<>
         {section==='dashboard'&&<><div className="simple-intro"><span className="simple-kicker">SHEETS → WHATSAPP</span><h1>Your leads. Sent automatically.</h1><p>Connect your sheets, link WhatsApp, and choose who receives each lead.</p></div><div className="simple-cards">
           <Link href="/sheets" className="simple-connect-card"><div className="simple-card-icon sheets"><FileSpreadsheet size={30}/></div><h2>Connect Sheets</h2><p>Add one or more Google Sheets.<br/>Choose recipients for each sheet.</p><div className="simple-card-bottom"><span>{state.sheets.length?`${state.sheets.length} sheet${state.sheets.length===1?'':'s'} connected`:'No sheets connected'}</span><ArrowRight size={22}/></div></Link>
           <Link href="/whatsapp" className="simple-connect-card"><div className="simple-card-icon whatsapp"><MessageCircle size={30}/></div><h2>Connect WhatsApp</h2><p>Scan one QR code to link your account.<br/>Use its contacts to send your leads.</p><div className="simple-card-bottom"><span className={connected?'simple-connected':''}>{connected?`Connected ${account?.phone||''}`:'Link your WhatsApp account'}</span><ArrowRight size={22}/></div></Link>
-        </div><div className="simple-how"><span>1. Connect</span><ArrowRight size={15}/><span>2. Choose people</span><ArrowRight size={15}/><span>3. Leads go out, one by one</span></div>{state.sheets.length>0&&<section className="simple-dashboard-sheets" aria-label="Connected sheets"><div className="simple-page-heading"><h2>Your connected sheets</h2><Link className="inline-link" href="/sheets">Manage sheets<ArrowRight size={15}/></Link></div><SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onGoogle={authorizeSheet} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet}/></section>}</>}
+        </div><div className="simple-how"><span>1. Connect</span><ArrowRight size={15}/><span>2. Choose people</span><ArrowRight size={15}/><span>3. Leads go out, one by one</span></div>{state.sheets.length>0&&<section className="simple-dashboard-sheets" aria-label="Connected sheets"><div className="simple-page-heading"><h2>Your connected sheets</h2><Link className="inline-link" href="/sheets">Manage sheets<ArrowRight size={15}/></Link></div><SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onScript={connectScript} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet}/></section>}</>}
         {section==='sheets'&&<><div className="simple-page-heading"><div><Link className="simple-back" href="/dashboard"><ArrowLeft size={15}/>Dashboard</Link><h1>Your Google Sheets</h1><p>Each new lead goes to the next selected person, then the order repeats.</p></div><Button variant="primary" onClick={()=>setConnectOpen(true)}><Plus size={17}/>{state.sheets.length?'Connect another sheet':'Connect sheet'}</Button></div>
           {!connected&&<Link className="simple-connect-notice" href="/whatsapp"><MessageCircle size={19}/><span>Connect WhatsApp to see your contacts and start sending.</span><ArrowRight size={18}/></Link>}
           {state.feedbackError&&<p role="alert" className="alert info">{state.feedbackError} Your leads remain queued.</p>}
           {state.publicSheetWritebackAvailable===false&&state.sheets.length>0&&<p className="alert info">Feedback is saved in SmartLead. Automatic feedback updates to public Google Sheets are unavailable with this connection.</p>}
-          {!state.sheets.length?<div className="simple-empty"><FileSpreadsheet size={42}/><h2>Connect your first sheet</h2><p>Paste a Google Sheets link. You can add more sheets whenever you need.</p><Button variant="primary" onClick={()=>setConnectOpen(true)}><Plus size={16}/>Connect sheet</Button></div>:<SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onGoogle={authorizeSheet} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet}/>}
+          {!state.sheets.length?<div className="simple-empty"><FileSpreadsheet size={42}/><h2>Connect your first sheet</h2><p>Paste a Google Sheets link. You can add more sheets whenever you need.</p><Button variant="primary" onClick={()=>setConnectOpen(true)}><Plus size={16}/>Connect sheet</Button></div>:<SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onScript={connectScript} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet}/>}
         </>}
         {section==='whatsapp'&&<><div className="simple-page-heading"><div><Link className="simple-back" href="/dashboard"><ArrowLeft size={15}/>Dashboard</Link><h1>Your WhatsApp</h1><p>One account for all your connected sheets.</p></div></div><section className="simple-whatsapp-panel">
           {state.whatsappLoginMode==='background'||state.whatsappLoginMode==='qr'?<WhatsAppBackgroundLogin account={account} busy={busy} workerRunning={state.workerRunning} onConnect={()=>action('whatsapp/connect')} onDisconnect={()=>action('whatsapp/disconnect')}/>:<WhatsAppBrowserLogin account={account} busy={busy} workerRunning={state.workerRunning} onConnect={()=>action('whatsapp/connect')} onDisconnect={()=>action('whatsapp/disconnect')}/>}
@@ -69,13 +56,13 @@ export function SimpleApp(){
         {!state.workerRunning&&(section==='whatsapp'||state.sheets.some(s=>s.enabled)||account&&account.status!=='DISCONNECTED')&&<p role="status" className="simple-worker-note">{state.workerMessage||'WhatsApp connection service is offline. Please try again after it restarts.'}</p>}
       </>}
     </main>
-    {connectOpen&&<ConnectSheet initialAuth={googleReturn} onAuthorized={setGoogleReturn} onClose={closeConnect} onConnected={async(id,reauthorized)=>{closeConnect();await reload();if(!reauthorized)setRecipientSheet(id);else setGoogleNotice('Google access updated. Saved lead fields are queued for synchronization.');router.push('/sheets');}}/>}
+    {connectOpen&&<ConnectSheet initialSheet={scriptSheet} onClose={closeConnect} onConnected={async(id,reauthorized)=>{closeConnect();await reload();if(!reauthorized)setRecipientSheet(id);else setConnectionNotice('Apps Script connected. Saved lead fields are queued for synchronization.');router.push('/sheets');}}/>}
     {deletingSheet&&<DeleteSheet sheet={deletingSheet} onClose={closeDelete} onDeleted={()=>{setState(current=>current?{...current,sheets:current.sheets.filter(sheet=>sheet.id!==deletingSheet.id)}:current);if(recipientSheet===deletingSheet.id)setRecipientSheet(null);setDeletingSheet(null);void reload().catch(e=>setError(message(e)));}}/>}
     {currentSheet&&<RecipientPicker sheet={currentSheet} connected={connected} onClose={closeRecipients} onSaved={async()=>{setRecipientSheet(null);await reload();}}/>}
   </div>;
 }
 
-function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onGoogle}:{sheets:SheetSummary[];connected:boolean;busy:boolean;onRecipients:(id:string)=>void;onToggle:(sheet:SheetSummary)=>void;onDelete:(sheet:SheetSummary)=>void;onGoogle:(sheet:SheetSummary)=>void}){
+function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onScript}:{sheets:SheetSummary[];connected:boolean;busy:boolean;onRecipients:(id:string)=>void;onToggle:(sheet:SheetSummary)=>void;onDelete:(sheet:SheetSummary)=>void;onScript:(sheet:SheetSummary)=>void}){
   return <div className="simple-sheet-list">{sheets.map(sheet=><article className="simple-sheet" key={sheet.id}>
     <div className="simple-sheet-top"><div className="simple-card-icon sheets"><FileSpreadsheet size={24}/></div><div className="simple-sheet-title"><h2>{sheet.name}</h2><p>{sheet.worksheetName}</p></div><span className={`simple-status ${sheet.enabled&&connected?'on':''}`}>{sheet.enabled?(sheet.delivery?.failed?'Some sends need checking':connected?'Sending automatically':'Waiting for WhatsApp'):sheet.recipients.length?'Paused':'Choose recipients'}</span></div>
     <div className="simple-sheet-people"><Users size={17}/><span>{sheet.recipients.length?sheet.recipients.map(p=>p.name).join(' → '):'No recipients selected'}</span>{sheet.recipients.length>1&&<span className="muted">→ repeat</span>}</div>
@@ -84,7 +71,7 @@ function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onGoog
     {sheet.delivery?.error&&<p role="alert" className="alert error">{sheet.delivery.error}</p>}
     {sheet.writeback&&(sheet.writeback.pending+sheet.writeback.failed)>0&&<p role="status" className="muted">{sheet.writeback.pending+sheet.writeback.failed} lead{sheet.writeback.pending+sheet.writeback.failed===1?'':'s'} waiting for Google Sheet updates.</p>}
     {sheet.writeback?.error&&<p role="alert" className="alert error">{sheet.writeback.error}</p>}
-    <div className="row"><Button disabled={busy} onClick={()=>onGoogle(sheet)}>{sheet.googleAuthorized?'Reconnect Google':'Authorize with Google'}</Button><span className="muted">{sheet.googleAuthorized?'Google authorized':'Authorize Google to save lead updates to this sheet.'}</span></div>
+    <div className="row"><Button disabled={busy} onClick={()=>onScript(sheet)}>{sheet.appsScriptConnected?'Reconnect Apps Script':'Connect Apps Script'}</Button><span className="muted">{sheet.appsScriptConnected?'Apps Script connected':'Connect Apps Script to save lead updates to this sheet.'}</span></div>
     <div className="simple-sheet-bottom"><span className="muted">{sheet.leadCount} lead{sheet.leadCount===1?'':'s'} imported{sheet.enabled?` · Checks for new leads every ${sheet.pollInterval||5} seconds`:''}</span><div className="row"><Button onClick={()=>onRecipients(sheet.id)}><Users size={15}/>{sheet.recipients.length?'Edit recipients':'Choose recipients'}</Button>{sheet.recipients.length>0&&<Button busy={busy} onClick={()=>onToggle(sheet)}>{sheet.enabled?<Pause size={15}/>:<Play size={15}/>} {sheet.enabled?'Pause':'Resume'}</Button>}<Button variant="danger" disabled={busy} aria-label={`Delete ${sheet.name}`} onClick={()=>onDelete(sheet)}><Trash2 size={15}/>Delete sheet</Button></div></div>
   </article>)}</div>;
 }
@@ -104,33 +91,6 @@ function DeleteSheet({sheet,onClose,onDeleted}:{sheet:SheetSummary;onClose:()=>v
       {error&&<p role="alert" className="alert error">{error}</p>}
       <div className="row"><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="danger" busy={busy} onClick={remove}><Trash2 size={16}/>Delete sheet</Button></div>
     </div>
-  </Modal>;
-}
-
-function ConnectSheet({onClose,onConnected,onAuthorized,initialAuth}:{onClose:()=>void;onConnected:(id:string,reauthorized?:boolean)=>Promise<void>;onAuthorized:(result:GoogleReturn)=>void;initialAuth:GoogleReturn|null}){
-  const authorizeGoogle=useGoogleAuthorization();
-  const [url,setUrl]=useState(initialAuth?.url||'');const [info,setInfo]=useState<Inspection|null>(null);const [tabId,setTabId]=useState(0);const [mapping,setMapping]=useState<Record<string,string>>({});const [busy,setBusy]=useState(!!initialAuth);const [error,setError]=useState('');
-  const tab=info?.tabs.find(t=>t.id===tabId);
-  useEffect(()=>{
-    if(!initialAuth)return;let active=true;
-    api<Inspection>('simple/sheets/inspect','POST',initialAuth).then(data=>{if(!active)return;if(!data.tabs.length)throw new Error('This spreadsheet has no tabs.');setInfo(data);const selected=data.tabs.find(t=>t.id===data.gid)||data.tabs[0];setTabId(selected.id);setMapping(detectColumns(selected.headers));}).catch(e=>{if(active)setError(message(e));}).finally(()=>{if(active)setBusy(false);});
-    return()=>{active=false;};
-  },[initialAuth]);
-  async function authorize(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{spreadsheetIdentity(url);const data=await authorizeGoogle({url});if(!data.url||!data.credentialId)throw new Error('Google did not return this sheet connection. Please try again.');onAuthorized({url:data.url,credentialId:data.credentialId});}catch(e){setError(message(e));setBusy(false);}}
-  async function connect(e:React.FormEvent){e.preventDefault();if(!info||!initialAuth)return;setBusy(true);setError('');try{const data=await api<{id:string;reauthorized?:boolean}>('simple/sheets','POST',{spreadsheetId:info.spreadsheetId,worksheetId:tabId,credentialId:initialAuth.credentialId,columnMapping:mapping});await onConnected(data.id,data.reauthorized);}catch(e){setError(message(e));}finally{setBusy(false);}}
-  return <Modal title="Connect Google Sheet" description="Add a sheet, then choose who gets its leads." onClose={onClose}>
-    {error&&<div role="alert" className="alert error">{error}</div>}
-    {!info?<form className="simple-form" onSubmit={authorize}>
-      <p className="simple-share-note">Paste the sheet link. A Google popup will let you choose your account and approve spreadsheet access. Your sheet can stay private.</p>
-      <Field label="Google Sheets link"><input type="url" required value={url} placeholder="https://docs.google.com/spreadsheets/d/…" onChange={e=>setUrl(e.target.value)} autoFocus/></Field><Button type="submit" variant="primary" busy={busy}>Continue with Google<ArrowRight size={16}/></Button>
-    </form>:<form className="simple-form" onSubmit={connect}>
-      <div className="simple-found-sheet"><FileSpreadsheet size={22}/><strong>{info.title}</strong><button type="button" onClick={()=>setInfo(null)}>Change</button></div>
-      <p className="simple-share-note">Google authorization confirmed with editing access.</p>
-      {info.tabs.length>1&&<Field label="Sheet tab"><Select value={tabId} onChange={e=>{const id=Number(e.target.value);setTabId(id);setMapping(detectColumns(info.tabs.find(t=>t.id===id)!.headers));}}>{info.tabs.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</Select></Field>}
-      <div className="simple-column-fields">{[['customerName','Customer name column'],['mobile','Phone number column']].map(([key,label])=><Field key={key} label={label}><Select required value={mapping[key]||''} onChange={e=>setMapping(m=>({...m,[key]:e.target.value}))}><option value="">Choose column</option>{tab?.headers.filter(Boolean).map((h,i)=><option key={`${h}-${i}`} value={h}>{h}</option>)}</Select></Field>)}</div>
-      <p className="simple-share-note">Existing leads will start sending when you choose recipients.</p>
-      <Button type="submit" variant="primary" busy={busy} disabled={!mapping.customerName||!mapping.mobile}>Connect sheet<ArrowRight size={16}/></Button>
-    </form>}
   </Modal>;
 }
 
