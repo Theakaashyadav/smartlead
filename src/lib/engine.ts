@@ -2,7 +2,7 @@ import type { Prisma, Sheet, Job } from '@/generated/mongo';
 import { db, databaseTransaction, usingSQLite } from './db';
 import { appUrl, isDemo } from './config';
 import { AppError, audit, decrypt, encrypt, hash, opaqueToken, signedFeedbackToken, verifyFeedbackSignature } from './security';
-import { sheetProvider, sourceFingerprint, type SheetProvider } from './google';
+import { sheetProvider, sourceFingerprint, type SheetProvider, type SourceRow } from './google';
 import { CLOSED, DEFAULT_TEMPLATE, phoneSchema, feedbackSchema, STATUSES, VARIABLES, MANAGED as MANAGED_FIELDS } from './validation';
 import { chooseRecipients } from './distribution';
 import { UncertainDelivery, whatsappProvider, type WhatsAppProvider } from './whatsapp';
@@ -10,7 +10,7 @@ import { simpleLeadMessage } from './simple-shared';
 import { feedbackBaseURL } from './feedback-url';
 import { organizationSettingKey } from './organizations';
 import { sheetPollSeconds } from './automation-policy';
-import { deliveryValues, queueDeliveryWriteback, sheetAlreadySent, sheetSaysSent, SUCCESSFUL_SEND_STATUSES } from './delivery';
+import { currentDeliveryMessages, deliveryGeneration, deliveryValues, queueDeliveryWriteback, sheetAlreadySent, sheetSaysSent, SUCCESSFUL_SEND_STATUSES } from './delivery';
 import { dispatchLeadSentNotification, queueLeadSentNotifications } from './lead-sent-notifications';
 
 const sourceChecks = new Map<string, string>();
@@ -40,8 +40,8 @@ async function cancelQueuedLeadMessages(tx:Prisma.TransactionClient,leadId:strin
   await tx.message.updateMany({where:{id:{in:pending.map(m=>m.id)},status:'QUEUED'},data:{status:'CANCELLED',failureReason:reason}});
   await tx.job.updateMany({where:{type:'SEND',entityId:{in:pending.map(m=>m.id)},status:'PENDING'},data:{status:'COMPLETED',error:null,lockedAt:null,lockToken:null}});
 }
-async function hasSubmittedLead(tx:Prisma.TransactionClient,leadId:string){
-  return !!await tx.message.findFirst({where:{leadId,status:{in:SUCCESSFUL_SEND_STATUSES},uncertain:false},select:{id:true}});
+async function hasSubmittedLead(tx:Prisma.TransactionClient,leadId:string,snapshot:unknown){
+  return !!await tx.message.findFirst({where:{leadId,assignment:{generation:{gte:deliveryGeneration(snapshot)}},status:{in:SUCCESSFUL_SEND_STATUSES},uncertain:false},select:{id:true}});
 }
 async function rememberSheetSent(tx:Prisma.TransactionClient,leadId:string,values:Record<string,string>){
   const lead=await tx.lead.findUniqueOrThrow({where:{id:leadId},select:{managedSnapshot:true}});
@@ -49,7 +49,33 @@ async function rememberSheetSent(tx:Prisma.TransactionClient,leadId:string,value
   if(snapshot.__sourceSent!=='1'||snapshot.sentStatus!==values.sentStatus||snapshot.sharedTo!==(values.sharedTo||''))await tx.lead.update({where:{id:leadId},data:{managedSnapshot:{...snapshot,sentStatus:values.sentStatus,sharedTo:values.sharedTo||'',__sourceSent:'1'},version:{increment:1}}});
   await cancelQueuedLeadMessages(tx,leadId);
 }
-export async function synchronizeSheet(id:string, provider?:SheetProvider, options:{skipUnchanged?:boolean;refreshQueued?:boolean}={}) {
+// A recipient save explicitly adopts the current sheet markers as a new send
+// cycle. Old receipts stay intact, but cannot mark this cycle as already sent.
+export async function restartUnsentSheetLeads(tx:Prisma.TransactionClient,sheet:Sheet,rows:SourceRow[]){
+  const byId=new Map(rows.map(row=>[row.stableId,row]));
+  const leads=await tx.lead.findMany({where:{sheetId:sheet.id,sourceDeleted:false},include:{assignments:{select:{generation:true}}},orderBy:{sourceRow:'asc'}});
+  const unsent=leads.filter(lead=>!lead.redactedAt&&byId.has(lead.stableSourceId)&&!sheetSaysSent(byId.get(lead.stableSourceId)!.values.sentStatus)&&phoneSchema.safeParse(lead.mobile).success);
+  const ids=unsent.map(lead=>lead.id);
+  if(!ids.length)return 0;
+  if(await tx.message.findFirst({where:{lead:{sheetId:sheet.id},OR:[{status:'PROCESSING'},{notificationStatus:'PROCESSING'}]},select:{id:true}})||await tx.job.findFirst({where:{status:'PROCESSING',OR:[{type:'SYNC',entityId:sheet.id},{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:leads.map(lead=>lead.id)}}]},select:{id:true}}))throw new AppError(409,'This sheet is sending or updating a lead. Wait for it to finish, then save recipients again.','SHEET_BUSY');
+  const messages=await tx.message.findMany({where:{leadId:{in:ids}},select:{id:true}});
+  await tx.job.updateMany({where:{status:{in:['PENDING','DEAD']},OR:[{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:ids}},{type:{in:['SEND','NOTIFY']},entityId:{in:messages.map(message=>message.id)}}]},data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
+  await tx.message.updateMany({where:{leadId:{in:ids},status:'QUEUED'},data:{status:'CANCELLED',failureReason:'Recipients saved; restarting from current unsent sheet rows'}});
+  await tx.message.updateMany({where:{leadId:{in:ids},notificationStatus:{in:['WAITING','QUEUED']}},data:{notificationStatus:'CANCELLED',notificationFailureReason:null}});
+  await tx.feedbackToken.updateMany({where:{assignment:{leadId:{in:ids},active:true}},data:{revokedAt:new Date()}});
+  await tx.assignment.updateMany({where:{leadId:{in:ids},active:true},data:{active:false}});
+  await tx.followup.updateMany({where:{leadId:{in:ids},status:'PENDING'},data:{status:'CANCELLED'}});
+  const startedAt=Date.now();
+  for(const [position,lead] of unsent.entries()){
+    const row=byId.get(lead.stableSourceId)!;
+    const generation=Math.max(0,...lead.assignments.map(assignment=>assignment.generation))+1;
+    const snapshot={...((lead.managedSnapshot||{}) as Record<string,string>),sentStatus:row.values.sentStatus||'',sharedTo:row.values.sharedTo||'',__sourceSent:'0',__deliveryGeneration:String(generation)};
+    await tx.lead.update({where:{id:lead.id},data:{managedSnapshot:snapshot,writebackStatus:'SYNCED',version:{increment:1}}});
+    await tx.job.create({data:{organizationId:sheet.organizationId,type:'ASSIGN',entityId:lead.id,key:`simple:assign:${lead.id}:${opaqueToken()}`,runAt:new Date(startedAt+position)}});
+  }
+  return unsent.length;
+}
+export async function synchronizeSheet(id:string, provider?:SheetProvider, options:{skipUnchanged?:boolean;refreshQueued?:boolean;queueAssignments?:boolean}={}) {
   const sheet=await db.sheet.findUniqueOrThrow({where:{id}});
   if(!options.skipUnchanged)await db.sheet.update({where:{id},data:{syncStatus:'SYNCING',lastSyncError:null}});
   try {
@@ -86,7 +112,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
           const managedSnapshot={...Object.fromEntries(Object.keys(MANAGED_FIELDS).map(k=>[k,row.values[k]||''])),...(publicSheet?{__publicFeedbackInitialized:'1'}:{})};
           const lead=await tx.lead.upsert({where:{sheetId_stableSourceId:{sheetId:id,stableSourceId:row.stableId}},create:{...data,managedSnapshot,...(publicSheet?{status:row.values.status||'New',lastFeedback:row.values.feedback||null}:{}),sheetId:id,stableSourceId:row.stableId,leadDate:Number.isNaN(date.getTime())?new Date():date},update:{...data}});
           if(sourceSent)await rememberSheetSent(tx,lead.id,row.values);
-          else if(parsed.success) await enqueue(tx,'ASSIGN',lead.id,`assign:${lead.id}`);
+          else if(parsed.success){if(options.queueAssignments!==false)await enqueue(tx,'ASSIGN',lead.id,`assign:${lead.id}`);}
           else await tx.syncLog.create({data:{sheetId:id,operation:'VALIDATION',status:'WARNING',details:`Row ${row.row} has an invalid phone number; automatic assignment paused.`}});
         });
         imported++;
@@ -102,7 +128,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
         if(parsed.success&&!phoneSchema.safeParse(existing.mobile).success){
           await transaction(async tx=>{
             await tx.lead.update({where:{id:existing.id},data:{...data,...baseline}});
-            if(!sourceSent&&!sheetAlreadySent(snapshot))await enqueue(tx,'ASSIGN',existing.id,`assign:${existing.id}`);
+            if(options.queueAssignments!==false&&!sourceSent&&!sheetAlreadySent(snapshot))await enqueue(tx,'ASSIGN',existing.id,`assign:${existing.id}`);
           });
         }else if(initialize||existing.sourceFingerprint!==fingerprint||existing.sourceRow!==row.row||existing.metadataId!==(row.metadataId||null)||existing.sourceDeleted){
           await db.lead.update({where:{id:existing.id},data:{...(existing.sourceFingerprint!==fingerprint?data:{sourceRow:row.row,metadataId:row.metadataId||null,sourceDeleted:false}),...baseline}});
@@ -137,7 +163,7 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
     if(!rule)throw new AppError(400,'Configure distribution settings first');
     if((rule.sender&&rule.sender.organizationId!==lead.sheet.organizationId)||rule.recipients.some(r=>r.employee.organizationId!==lead.sheet.organizationId))throw new AppError(403,'Sender and recipients must belong to this organisation');
     if(lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'This lead is no longer available for assignment');
-    if(simple&&(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,leadId))){await cancelQueuedLeadMessages(tx,leadId);return {assigned:false,reason:'Already sent'};}
+    if(simple&&(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,leadId,lead.managedSnapshot))){await cancelQueuedLeadMessages(tx,leadId);return {assigned:false,reason:'Already sent'};}
     if(simple&&await tx.message.findFirst({where:{leadId,status:'PROCESSING'},select:{id:true}}))return {assigned:false,reason:'Delivery in progress'};
     if(lead.assignments.length && !reassign)return {assigned:false,reason:'Already assigned'};
     if(!rule.enabled && !employeeId)return {assigned:false,reason:'Distribution paused'};
@@ -229,10 +255,11 @@ export async function writebackLead(id:string, provider?:SheetProvider,options:{
   const startedAt=new Date();
   const lead=await db.lead.findUniqueOrThrow({where:{id},include:{sheet:true,assignments:{where:{active:true,isPrimary:true},include:{employee:true}},messages:{orderBy:{queuedAt:'desc'},include:{assignment:{include:{employee:true}}}}}});
   const owner=lead.assignments[0]?.employee;
-  const message=lead.messages[0];
+  const messages=currentDeliveryMessages(lead.messages,lead.sheet.connectionType.startsWith('SIMPLE_')?lead.managedSnapshot:undefined);
+  const message=messages[0];
   if(lead.redactedAt)return;
   const simple=lead.sheet.connectionType.startsWith('SIMPLE_');
-  const delivery=deliveryValues(lead.messages,simple?lead.managedSnapshot:undefined);
+  const delivery=deliveryValues(messages,simple?lead.managedSnapshot:undefined);
   // Delivery jobs also repair the latest submitted feedback. Otherwise an old
   // delivery job can mark a lead SYNCED while its feedback is still missing.
   const values:Record<string,string>=simple?{...delivery,...(lead.lastFeedback?{status:lead.status,feedback:lead.lastFeedback}: {})}:options.deliveryOnly?delivery:{assignedEmployee:owner?.name||'',assignedPhone:owner?.phone||'',status:lead.status,feedback:lead.lastFeedback||'',nextFollowupAt:lead.nextFollowupAt?.toISOString()||'',lastContactAt:lead.lastContactAt?.toISOString()||'',updatedAt:lead.updatedAt.toISOString(),updatedBy:owner?.name||'',...delivery,sentAt:message?.submittedAt?.toISOString()||'',deliveryStatus:message && ['SENT','DELIVERED','READ'].includes(message.status)?message.status:'Unconfirmed'};
@@ -241,7 +268,7 @@ export async function writebackLead(id:string, provider?:SheetProvider,options:{
     const snapshot={...(lead.managedSnapshot as Record<string,string>||{}),...observed,...values,...(simple&&(observed||Object.hasOwn(values,'status'))?{__publicOutputV2:'1'}:{})};
     const updated=await transaction(async tx=>{
       const updated=await tx.lead.updateMany({where:{id,version:lead.version},data:{writebackStatus:'SYNCED',managedSnapshot:snapshot}});
-      const sent=lead.messages.filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
+      const sent=messages.filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
       await queueLeadSentNotifications(tx,sent.map(message=>message.id),lead.sheet.organizationId);
       return updated;
     });
@@ -255,22 +282,32 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
   if(message.status!=='QUEUED')return;
   if(message.sender.organizationId!==message.lead.sheet.organizationId||message.assignment.employee.organizationId!==message.lead.sheet.organizationId)throw new AppError(403,'Message connections must belong to this organisation');
   const simple=message.lead.sheet.connectionType.startsWith('SIMPLE_');
-  if(simple&&(sheetAlreadySent(message.lead.managedSnapshot)||await hasSubmittedLead(db,message.leadId))){await transaction(tx=>cancelQueuedLeadMessages(tx,message.leadId));return;}
+  if(simple&&await transaction(async tx=>{
+    const lead=await tx.lead.findUniqueOrThrow({where:{id:message.leadId},select:{managedSnapshot:true}});
+    if(!sheetAlreadySent(lead.managedSnapshot)&&!await hasSubmittedLead(tx,message.leadId,lead.managedSnapshot))return false;
+    await cancelQueuedLeadMessages(tx,message.leadId);return true;
+  }))return;
   if(message.lead.sheet.connectionType.startsWith('SIMPLE_')&&!message.lead.sheet.rule?.enabled)throw new AppError(409,'Automatic sending is paused','PAUSED');
-  if(!message.assignment.active||!message.assignment.employee.active){await db.message.update({where:{id},data:{status:'CANCELLED',failureReason:'Recipient or assignment is inactive'}});return;}
+  if(!message.assignment.active||!message.assignment.employee.active){await db.message.updateMany({where:{id,status:'QUEUED'},data:{status:'CANCELLED',failureReason:'Recipient or assignment is inactive'}});return;}
   if(message.sender.status!=='CONNECTED')throw new AppError(409,'Sender disconnected; outgoing jobs remain queued','DISCONNECTED');
   if(simple&&(!isDemo()||sourceProvider)){
     const rows=await (sourceProvider||sheetProvider(message.lead.sheet)).read(message.lead.sheet);
     const matches=rows.filter(row=>row.stableId===message.lead.stableSourceId);
     if(matches.length!==1)throw new AppError(409,'The original lead row is missing or duplicated. Sending is held for review.','SYNC_CONFLICT');
-    if(sheetSaysSent(matches[0].values.sentStatus)){await transaction(tx=>rememberSheetSent(tx,message.leadId,matches[0].values));return;}
+    if(sheetSaysSent(matches[0].values.sentStatus)){
+      await transaction(async tx=>{
+        const current=await tx.message.findUniqueOrThrow({where:{id},include:{assignment:true}});
+        if(current.status==='QUEUED'&&current.assignment.active)await rememberSheetSent(tx,message.leadId,matches[0].values);
+      });
+      return;
+    }
   }
   if(simple)await refreshSimpleQueuedMessages(message.lead.sheetId,id,true);
   const notificationPhone=message.lead.sheet.rule?.notificationPhone||null;
   const claimData={status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date(),notificationPhone,notificationName:notificationPhone?message.assignment.employee.name:null,notificationStatus:notificationPhone?'WAITING':null};
   const claimed=simple?await transaction(async tx=>{
     const lead=await tx.lead.findUniqueOrThrow({where:{id:message.leadId},select:{managedSnapshot:true}});
-    if(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,message.leadId)){await cancelQueuedLeadMessages(tx,message.leadId);return {count:0};}
+    if(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,message.leadId,lead.managedSnapshot)){await cancelQueuedLeadMessages(tx,message.leadId);return {count:0};}
     if(await tx.message.findFirst({where:{leadId:message.leadId,id:{not:id},status:'PROCESSING'},select:{id:true}})){await cancelQueuedLeadMessages(tx,message.leadId,'A delivery for this lead is already in progress; duplicate sending prevented.');return {count:0};}
     // Both competing send claims write the lead, so MongoDB/SQLite serializes
     // them before either can submit a second message for the same lead.

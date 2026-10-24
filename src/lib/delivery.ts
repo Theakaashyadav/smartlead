@@ -1,14 +1,22 @@
 import { db, usingSQLite, type Transaction } from './db';
 
 export const SUCCESSFUL_SEND_STATUSES=['SUBMITTED','SENT','DELIVERED','READ'];
-type DeliveryMessage={status:string;uncertain:boolean;assignment:{employee:{name:string}}};
+type DeliveryMessage={status:string;uncertain:boolean;assignment:{generation?:number;employee:{name:string}}};
+export function deliveryGeneration(value:unknown){
+  const generation=Number(((value||{}) as Record<string,unknown>).__deliveryGeneration||0);
+  return Number.isSafeInteger(generation)&&generation>0?generation:0;
+}
+export function currentDeliveryMessages<T extends {assignment:{generation?:number}}>(messages:T[],snapshot?:unknown){
+  const generation=deliveryGeneration(snapshot);
+  return messages.filter(message=>(message.assignment.generation||0)>=generation);
+}
 export const sheetSaysSent=(value:unknown)=>typeof value==='string'&&value.trim().toLowerCase()==='sent';
 export function sheetAlreadySent(value:unknown){
   const snapshot=(value||{}) as Record<string,unknown>;
   return snapshot.__sourceSent==='1'||sheetSaysSent(snapshot.sentStatus);
 }
 export function deliveryValues(messages:DeliveryMessage[],sourceSnapshot?:unknown){
-  const sent=messages.filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
+  const sent=currentDeliveryMessages(messages,sourceSnapshot).filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
   // Imported Sent rows have no local provider receipt. Keep their existing
   // delivery cells when saving feedback instead of clearing their history.
   if(!sent.length&&sheetAlreadySent(sourceSnapshot)){

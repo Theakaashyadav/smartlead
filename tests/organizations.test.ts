@@ -90,7 +90,7 @@ describe('separate organisation accounts',()=>{
   });
   it('isolates recipients with the same phone number and enqueues the correct WhatsApp connection',async()=>{
     const f=await fixture();
-    const update=(user:typeof f.a,sheetId:string,name:string)=>simpleAction(['sheets',sheetId,'recipients'],'PUT',new Request('http://localhost',{method:'PUT',body:JSON.stringify({recipients:[{name,phone:'+919876543210'}]})}),user);
+    const update=(user:typeof f.a,sheetId:string,name:string)=>simpleAction(['sheets',sheetId,'recipients'],'PUT',new Request('http://localhost',{method:'PUT',body:JSON.stringify({recipients:[{name,phone:'+919876543210'}]})}),user,{read:async()=>[{stableId:'source',row:2,values:{customerName:name,mobile:'+919800000000'}}],write:vi.fn()});
     await update(f.a,f.sheetA.id,'One Sales');await update(f.b,f.sheetB.id,'Two Sales');
     const employees=await db.employee.findMany({orderBy:{name:'asc'}});expect(employees).toHaveLength(2);expect(employees.map(e=>e.name)).toEqual(['One Sales','Two Sales']);
     for(const [user,sheet,sender]of [[f.a,f.sheetA,f.senderA],[f.b,f.sheetB,f.senderB]] as const){

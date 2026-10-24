@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { db } from './db';
 import { AppError, audit, encrypt, opaqueToken, safeUser } from './security';
-import { enqueue, transaction, updateLeadSheetNow } from './engine';
-import { inspectSpreadsheet, verifyGoogleSheetEditor } from './google';
+import { enqueue, restartUnsentSheetLeads, synchronizeSheet, transaction, updateLeadSheetNow } from './engine';
+import { inspectSpreadsheet, sheetProvider, verifyGoogleSheetEditor, type SheetProvider, type SourceRow } from './google';
 import { attachAuthorizedSheet, googleOAuthConfiguration, startGoogleAuthorization } from './google-oauth';
 import { phoneSchema, projectNameSchema, notificationPhoneSchema } from './validation';
 import { SIMPLE_OUTPUT_COLUMNS, SIMPLE_TEMPLATE, spreadsheetIdentity } from './simple-shared';
@@ -21,7 +21,7 @@ async function sheetById(id:string,organizationId:string) {
   const sheet=await db.sheet.findFirst({where:{id,organizationId,...sheetWhere},include:{rule:true}});
   if(!sheet)throw new AppError(404,'Sheet not found');return sheet;
 }
-export async function simpleAction(path:string[],method:string,request:Request,user:User) {
+export async function simpleAction(path:string[],method:string,request:Request,user:User,sourceProvider?:SheetProvider) {
   if(user.role!=='SUPER_ADMIN')throw new AppError(403,'Sign in with the administrator account to connect sheets and WhatsApp.');
   const organizationId=user.organizationId;
   const route=path.join('/');
@@ -173,29 +173,18 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     const effectiveNotificationPhone=notificationPhone===undefined?sheet.rule?.notificationPhone:notificationPhone;
     if(effectiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveNotificationPhone))throw new AppError(400,'Enter your notification number separately from the lead recipients.');
     const account=await simpleSender(organizationId);if(account?.status!=='CONNECTED')throw new AppError(409,'Connect WhatsApp before starting.');
-    await transaction(async tx=>{
-      const previous=await tx.ruleRecipient.findMany({where:{ruleId:sheet.rule!.id},orderBy:{position:'asc'},include:{employee:{select:{phone:true}}}});
-      const changed=previous.length!==recipients.length||previous.some((r,i)=>r.employee.phone!==recipients[i].phone||(sheet.rule?.mode==='BATCH'?Math.max(1,r.weight):1)!==recipients[i].leadCount);
+    const source=sourceProvider||sheetProvider(sheet);
+    let rows:SourceRow[]=[];
+    await synchronizeSheet(sheet.id,{read:async current=>{rows=await source.read(current);return rows;},write:source.write.bind(source)},{refreshQueued:false,queueAssignments:false});
+    const requeued=await transaction(async tx=>{
+      const requeued=await restartUnsentSheetLeads(tx,sheet,rows);
       const employees=[];
       for(const {name,phone} of recipients)employees.push(await tx.employee.upsert({where:{organizationId_phone:{organizationId,phone}},create:{name,phone,organizationId,projects:[],dailyLimit:1000,capacity:10000},update:{active:true,name}}));
-      if(changed){
-        // Rebuild only leads that have never reached the provider. Otherwise a
-        // batch assigned before adding people would keep going to the old list.
-        const pending=await tx.message.findMany({where:{status:'QUEUED',lead:{sheetId:sheet.id},OR:[{recipient:{notIn:recipients.map(r=>r.phone)}},{lead:{messages:{none:{OR:[{status:{in:['PROCESSING','SUBMITTED','SENT','DELIVERED','READ']}},{status:'FAILED',uncertain:true}]}}}}]},select:{assignmentId:true}});
-        if(pending.length){
-          await tx.message.updateMany({where:{assignmentId:{in:pending.map(m=>m.assignmentId)},status:'QUEUED'},data:{status:'CANCELLED',failureReason:'Recipient selection changed before sending'}});
-          await tx.assignment.updateMany({where:{id:{in:pending.map(m=>m.assignmentId)}},data:{active:false}});
-        }
-      }
       await tx.ruleRecipient.deleteMany({where:{ruleId:sheet.rule!.id}});
-      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'BATCH',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(notificationPhone!==undefined?{notificationPhone:notificationPhone||null}:{}),...(changed?{cursor:0}:{}),recipients:{create:employees.map((e,position)=>({employeeId:e.id,position,weight:recipients[position].leadCount}))}}});
-      const unassigned=await tx.lead.findMany({where:{sheetId:sheet.id,sourceDeleted:false,assignments:{none:{active:true}}},select:{id:true},orderBy:{sourceRow:'asc'}});
-      for(const lead of unassigned)await enqueue(tx,'ASSIGN',lead.id,`simple:assign:${lead.id}:${opaqueToken()}`);
-      await enqueue(tx,'SYNC',sheet.id,`simple:sync:${sheet.id}:${opaqueToken()}`);
-      const queued=await tx.message.findMany({where:{lead:{sheetId:sheet.id},status:'QUEUED'},select:{id:true}});
-      await tx.job.updateMany({where:{type:'SEND',status:'PENDING',entityId:{in:queued.map(m=>m.id)}},data:{runAt:new Date()}});
+      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'BATCH',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(notificationPhone!==undefined?{notificationPhone:notificationPhone||null}:{}),cursor:0,recipients:{create:employees.map((e,position)=>({employeeId:e.id,position,weight:recipients[position].leadCount}))}}});
+      return requeued;
     });
-    await audit(user.id,'START_AUTOMATIC_SENDING','sheet',sheet.id);return {started:true};
+    await audit(user.id,'START_AUTOMATIC_SENDING','sheet',sheet.id);return {started:true,rechecked:rows.length,requeued};
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='pause'&&method==='PUT'){
     const sheet=await sheetById(path[1],organizationId);const {enabled}=z.object({enabled:z.boolean()}).parse(await input());

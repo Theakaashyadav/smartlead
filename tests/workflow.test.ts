@@ -287,7 +287,7 @@ describe('durable end-to-end workflow',()=>{
     const {admin}=await fixture();await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
     await db.sender.create({data:{organizationId:'legacy',id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const selected=[{name:'Selected contact',phone:'+919876543210'},{name:'New conversation',phone:'+919876543219'}];
-    await simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000/api/simple/sheets/sheet/recipients',{method:'PUT',body:JSON.stringify({recipients:selected})}),admin);
+    await simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000/api/simple/sheets/sheet/recipients',{method:'PUT',body:JSON.stringify({recipients:selected})}),admin,new DemoSheetsProvider());
     const rule=await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'},include:{recipients:{orderBy:{position:'asc'},include:{employee:true}}}});
     expect(rule.enabled).toBe(true);expect(rule.senderId).toBe('web');expect(rule.recipients.map(r=>r.employee.phone)).toEqual(selected.map(p=>p.phone));
     await synchronizeSheet('sheet',new DemoSheetsProvider());const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);
@@ -295,25 +295,24 @@ describe('durable end-to-end workflow',()=>{
     const pending=await db.message.findFirstOrThrow();const mock=new DemoWhatsAppProvider(await db.sender.findUniqueOrThrow({where:{id:'sender'}}));const send=vi.spyOn(mock,'sendMessage');
     await expect(dispatchMessage(pending.id,mock)).rejects.toThrow(/paused/);expect(send).not.toHaveBeenCalled();expect((await db.message.findUniqueOrThrow({where:{id:pending.id}})).status).toBe('QUEUED');
     const state=await simpleAction(['state'],'GET',new Request('http://localhost:3000'),admin) as any;expect(state.sheets).toHaveLength(1);expect(state.account.id).toBe('web');
-    await simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients:[selected[1]]})}),admin);
+    await simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients:[selected[1]]})}),admin,new DemoSheetsProvider());
     expect((await db.message.findUniqueOrThrow({where:{id:pending.id}})).status).toBe('CANCELLED');
     await assignLead(lead.id);const replacement=await db.message.findFirstOrThrow({where:{leadId:lead.id,status:'QUEUED'}});expect(replacement.recipient).toBe(selected[1].phone);
     expect(await db.assignment.count({where:{leadId:lead.id,active:true,isPrimary:true}})).toBe(1);
   });
-  it('saves a separate administrator notification number without changing recipient rotation',async()=>{
+  it('saves a separate administrator notification number while rechecking recipients',async()=>{
     const {admin}=await fixture();
     await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
     await db.sender.create({data:{organizationId:'legacy',id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const recipients=[{name:'Lead recipient',phone:'+919876543210',leadCount:2}];
-    const select=(notificationPhone?:string|null)=>simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients,notificationPhone})}),admin);
+    const select=(notificationPhone?:string|null)=>simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients,notificationPhone})}),admin,new DemoSheetsProvider());
     await select('9876543218');
     expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({notificationPhone:'+919876543218'});
     await synchronizeSheet('sheet',new DemoSheetsProvider());const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);
     const pending=await db.message.findFirstOrThrow({where:{leadId:lead.id,status:'QUEUED'}});
-    const before=await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}});
     await select('+919876543217');
-    expect(await db.message.findUniqueOrThrow({where:{id:pending.id}})).toMatchObject({status:'QUEUED',recipient:recipients[0].phone});
-    expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({cursor:before.cursor,notificationPhone:'+919876543217'});
+    expect(await db.message.findUniqueOrThrow({where:{id:pending.id}})).toMatchObject({status:'CANCELLED',recipient:recipients[0].phone});
+    expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({cursor:0,notificationPhone:'+919876543217'});
     await select();expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({notificationPhone:'+919876543217'});
     const state=await simpleAction(['state'],'GET',new Request('http://localhost:3000'),admin) as any;
     expect(state.sheets[0]).toMatchObject({notificationPhone:'+919876543217',recipients:[{name:'Lead recipient',phone:recipients[0].phone,leadCount:2}]});
@@ -321,28 +320,29 @@ describe('durable end-to-end workflow',()=>{
     await expect(select(recipients[0].phone)).rejects.toThrow('separately from the lead recipients');
     await select('');expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({notificationPhone:null});
   });
-  it('rebalances unsent leads when recipients change and preserves rotation on an unchanged save',async()=>{
+  it('rebalances current unsent sheet rows and restarts rotation on each save',async()=>{
     const {admin,sender,rows}=await fixture();
     rows.push({stableId:'source-4',row:6,values:{customerName:'Fifth customer',mobile:'+919800000004'}});
     await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(rows))}});
     await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
     await db.sender.create({data:{organizationId:'legacy',id:'web',name:'WhatsApp',provider:'WEB',status:'CONNECTED'}});
     const people=[0,1,2].map(i=>({name:`Employee ${i}`,phone:`+91987654321${i}`}));
-    const select=(recipients:typeof people)=>simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients})}),admin);
+    const select=(recipients:typeof people)=>simpleAction(['sheets','sheet','recipients'],'PUT',new Request('http://localhost:3000',{method:'PUT',body:JSON.stringify({recipients})}),admin,new DemoSheetsProvider());
     await select([people[0]]);await synchronizeSheet('sheet',new DemoSheetsProvider());
     const leads=await db.lead.findMany({orderBy:{sourceRow:'asc'}});
     for(const lead of leads)await assignLead(lead.id);
     const submitted=await db.message.findFirstOrThrow({where:{leadId:leads[0].id}});
     await dispatchMessage(submitted.id,new DemoWhatsAppProvider(sender));
+    await writebackLead(submitted.leadId,new DemoSheetsProvider());
     await select(people);
     for(const lead of leads)await assignLead(lead.id);
     const queued=await db.message.findMany({where:{status:'QUEUED'},orderBy:{lead:{sourceRow:'asc'}}});
     expect(queued.map(m=>m.recipient)).toEqual([people[0].phone,people[1].phone,people[2].phone,people[0].phone]);
     expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(1);
     expect(await db.message.count({where:{status:'CANCELLED'}})).toBe(4);
-    const before=await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}});
     await select(people);
-    expect((await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).cursor).toBe(before.cursor);
+    expect((await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).cursor).toBe(0);
+    for(const lead of leads)await assignLead(lead.id);
     expect(await db.message.count({where:{status:'QUEUED'}})).toBe(4);
   });
   it('reads renamed message IDs and never submits an unidentified send twice',async()=>{
