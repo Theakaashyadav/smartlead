@@ -20,7 +20,7 @@ export function sourceQuestions(headers:string[],cells:string[]):LeadQuestion[]{
   });
 }
 function messageValue(value:string){return value.replace(/[\r\n]+/g,' ').trim();}
-function messageQuestionLabel(question:string){
+export function messageQuestionLabel(question:string){
   const label=questionLabel(question).replace(/\?+$/,'').trim();
   if(/\bpurpose\b/i.test(label))return 'purpose';
   if(/\bbudget\b/i.test(label))return 'budget';

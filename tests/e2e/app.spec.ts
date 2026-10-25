@@ -260,10 +260,11 @@ test('short private feedback link saves immediately and reports the background s
   });
   await page.goto(`/f/${token}`);
   await expect(page.getByRole('heading',{name:'Sample Customer'})).toBeVisible();
-  await page.getByText('Enquiry details',{exact:true}).click();
+  await expect(page.getByRole('heading',{name:'Enquiry details',exact:true})).toBeVisible();
+  await expect(page.locator('.feedback-enquiry summary')).toHaveCount(0);
   expect(await page.locator('select option:not([disabled])').allTextContents()).toEqual([...FEEDBACK_STATUSES]);
   await expect(page.getByText('Sheet: Plot enquiries',{exact:true})).toBeVisible();
-  await expect(page.getByText('Q.1 - What is your approximate budget?',{exact:true})).toBeVisible();
+  await expect(page.locator('.feedback-question')).toHaveText('budget - 50 lakh');
   await expect(page.getByRole('combobox')).toHaveCount(1);await expect(page.locator('textarea')).toHaveCount(1);await expect(page.locator('input')).toHaveCount(0);
   await page.getByLabel('Feedback (lead status)',{exact:true}).selectOption('Interested');await page.getByLabel('Remark',{exact:true}).fill('Please arrange a site visit on Sunday.');
   await page.getByRole('button',{name:'Save status & feedback'}).click();
@@ -275,9 +276,10 @@ test('short private feedback link saves immediately and reports the background s
 
 for(const width of [320,390,768,1440])test(`feedback page fits a ${width}px screen with long lead details`,async({page})=>{
   await page.setViewportSize({width,height:900});const token='m'.repeat(22);
-  await page.route(`**/api/feedback/${token}`,route=>route.fulfill({json:{data:{employee:{name:'Aman Sharma, Senior Sales Representative'},lead:{id:'mobile-lead',customerName:'Ananya Singh with a very long customer name',mobile:'+919876543210',project:'Corbett Meadows Residential Community',location:'Greater Noida, Uttar Pradesh',sheetName:'New enquiries from our latest campaign',questions:[{question:'When would you like to arrange a site visit?',answer:'Please call me next Sunday afternoon.'}],status:'Details Sent (Cold Client)',lastFeedback:null,writebackStatus:'SYNCED',version:0,updatedAt:'2026-10-25T10:00:00.000Z'}}}}));
+  await page.route(`**/api/feedback/${token}`,route=>route.fulfill({json:{data:{employee:{name:'Aman Sharma, Senior Sales Representative'},lead:{id:'mobile-lead',customerName:'Ananya Singh with a very long customer name',mobile:'+919876543210',project:'Corbett Meadows Residential Community',location:'Greater Noida, Uttar Pradesh',sheetName:'New enquiries from our latest campaign',questions:[{question:'What is your primary purpose for buying a plot?',answer:'self-use'},{question:'What is your approximate budget?',answer:'₹1.03_cr_–_₹1.25_cr'},{question:'When would you be available for a site visit?',answer:'within_7_days'}],status:'Details Sent (Cold Client)',lastFeedback:null,writebackStatus:'SYNCED',version:0,updatedAt:'2026-10-25T10:00:00.000Z'}}}}));
   await page.goto(`/f/${token}`);await expect(page.getByRole('heading',{name:'Leave your feedback'})).toBeVisible();
-  await page.getByText('Enquiry details',{exact:true}).click();
+  await expect(page.locator('.feedback-question')).toHaveText(['purpose - self-use','budget - ₹1.03_cr_–_₹1.25_cr','available for a site visit - within_7_days']);
+  for(const question of await page.locator('.feedback-question').all())await expect(question).toBeVisible();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
   await expect(page.getByRole('link',{name:'+919876543210'})).toHaveAttribute('href','tel:+919876543210');
   const select=page.getByRole('combobox');expect((await select.boundingBox())!.height).toBeGreaterThanOrEqual(44);

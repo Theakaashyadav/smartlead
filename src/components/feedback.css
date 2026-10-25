@@ -44,13 +44,11 @@
 .feedback-call > svg:last-child { margin-left: auto; }
 .feedback-call:hover { background: #d1f9e2; box-shadow: 0 5px 14px #00000015; }
 .feedback-enquiry { margin-top: 24px; border-top: 1px solid #c1e2d918; padding-top: 15px; font-size: 12px; }
-.feedback-enquiry summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; color: #bdd8d4; cursor: pointer; list-style: none; font-weight: 550; font-size: 11px; }
-.feedback-enquiry summary::-webkit-details-marker { display: none; }
-.feedback-enquiry[open] summary svg { transform: rotate(180deg); }
+.feedback-enquiry h3 { margin: 0; padding: 8px 0; color: #bdd8d4; font-size: 11px; font-weight: 550; }
 .feedback-enquiry > div { padding-top: 13px; line-height: 1.8; color: #8eafb1; overflow-wrap: anywhere; }
-.feedback-question { margin-top: 16px; }
-.feedback-question strong { color: #bdd5d6; font-size: 11px; font-weight: 550; }
-.feedback-question p { margin-top: 5px; font-size: 11px; white-space: pre-wrap; }
+.feedback-enquiry .feedback-question { margin: 10px 0 0; color: #d8e8ec; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.feedback-question strong { color: #9fbfbc; font-size: inherit; font-weight: 500; }
+.feedback-question span { white-space: pre-wrap; }
 .feedback-updated { margin-top: 23px; padding-top: 17px; border-top: 1px solid #c1e2d910; color: #7f9da4; font-size: 9px; line-height: 1.7; }
 .feedback-editor { padding: 35px 38px 32px; min-width: 0; background: linear-gradient(160deg, #fff 75%, #f9fcfb); }
 .feedback-editor-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }

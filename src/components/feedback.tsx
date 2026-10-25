@@ -3,9 +3,10 @@ import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { CheckCircle2, Layers, Phone, BriefcaseBusiness, UserRound, ArrowRight, ShieldCheck, MapPin, MessageSquareText, ChevronDown, RefreshCw, LockKeyhole } from 'lucide-react';
+import { CheckCircle2, Layers, Phone, BriefcaseBusiness, UserRound, ArrowRight, ShieldCheck, MapPin, MessageSquareText, RefreshCw, LockKeyhole } from 'lucide-react';
 import { api, Badge, Button, Field, Select, dateTime } from './ui';
 import { FEEDBACK_STATUSES } from '@/lib/feedback-statuses';
+import { messageQuestionLabel } from '@/lib/simple-shared';
 import './feedback.css';
 const formSchema=z.object({status:z.string().min(1),remarks:z.string().trim().min(3,'Please add at least 3 characters of feedback').max(5000),interest:z.string(),nextFollowupAt:z.string(),callOutcome:z.string(),contactMethod:z.string(),siteVisitAt:z.string(),expectedBudget:z.string()});
 type Form=z.infer<typeof formSchema>;
@@ -88,10 +89,10 @@ export function FeedbackPage({token}:{token:string}){
             <div><UserRound size={17}/><span><small>Assigned to</small><strong>{data.employee.name}</strong></span></div>
           </div>
           <a className="feedback-call" href={`tel:${lead.mobile}`}><Phone size={17}/><span>{lead.mobile}</span><ArrowRight size={16}/></a>
-          {(lead.questions?.length||lead.sheetName||lead.source)&&<details className="feedback-enquiry"><summary>Enquiry details<ChevronDown size={16}/></summary><div>
+          {(lead.questions?.length||lead.sheetName||lead.source)&&<section className="feedback-enquiry" aria-labelledby="feedback-enquiry-heading"><h3 id="feedback-enquiry-heading">Enquiry details</h3><div>
             {lead.sheetName&&<p>Sheet: {lead.sheetName}</p>}{lead.source&&<p>Source: {lead.source}</p>}
-            {lead.questions?.map((q,i)=><div className="feedback-question" key={i}><strong>Q.{i+1} - {q.question}</strong><p>{q.answer||'Not provided'}</p></div>)}
-          </div></details>}
+            {lead.questions?.map((q,i)=><p className="feedback-question" key={i}><strong>{messageQuestionLabel(q.question)}</strong>{' - '}<span>{q.answer||'Not provided'}</span></p>)}
+          </div></section>}
           <p className="feedback-updated">Last updated {dateTime(lead.updatedAt)}</p>
         </section>
         <section className="feedback-editor" aria-labelledby="feedback-form-heading">
