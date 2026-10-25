@@ -105,7 +105,7 @@ test('Apps Script reconnect keeps the existing sheet and recipients',async({page
   await page.route('**/api/simple/sheets',route=>{sheet.appsScriptConnected=true;return route.fulfill({json:{data:{id:sheet.id,reauthorized:true}}});});
   await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect Apps Script',exact:true}).click();await expect(page.getByLabel('Apps Script code')).toBeVisible();expect(prepared).toEqual({sheetId:sheet.id});
   await page.getByLabel('Apps Script web app URL').fill('https://script.google.com/macros/s/AKfycb_test_deployment_123456789/exec');await page.getByRole('button',{name:'Check connection',exact:true}).click();await page.getByRole('button',{name:'Save connection',exact:true}).click();
-  await expect(page.getByRole('dialog')).toHaveCount(0);await expect(page.getByRole('button',{name:'Reconnect Apps Script',exact:true})).toBeVisible();await expect(page.getByText('9 leads imported',{exact:true})).toBeVisible();await expect(page.getByText('Person',{exact:true})).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);await expect(page.getByRole('button',{name:'Reconnect Apps Script',exact:true})).toBeVisible();await expect(page.getByText('9 leads imported',{exact:true})).toBeVisible();await expect(page.getByText('Person (1 lead)',{exact:true})).toBeVisible();
 });
 
 test('Apps Script deployment errors keep the code and retry form available on mobile',async({page})=>{

@@ -1,8 +1,9 @@
 'use client';
 import { useState } from 'react';
 import Link from 'next/link';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, ShieldCheck } from 'lucide-react';
 import { api, Button, Field } from './ui';
+import { ConnectionArt } from './connection-art';
 
 export function Login({demo,registering=false}:{demo:boolean;registering?:boolean}){
   const [legacy,setLegacy]=useState(false);
@@ -22,7 +23,15 @@ export function Login({demo,registering=false}:{demo:boolean;registering?:boolea
       window.location.assign('/dashboard');
     }catch(e){setError((e as Error).message);}finally{setBusy(false);}
   }
-  return <main className="simple-login"><div className="simple-login-card">
+  return <main className="simple-login"><div className="simple-login-shell">
+    <aside className="simple-login-story">
+      <span className="theme-eyebrow"><span/>YOUR WORK, BEAUTIFULLY CONNECTED</span>
+      <h2>Less busywork.<br/><span>More opportunity.</span></h2>
+      <p>From the first enquiry to the next conversation. Keep your people and your leads connected.</p>
+      <ConnectionArt/>
+      <div className="simple-login-story-note"><ShieldCheck size={18}/><span>Your team. Your leads. One private workspace.</span></div>
+    </aside>
+    <div className="simple-login-card">
     <div className="simple-brand"><span><ArrowRight size={21}/></span>SmartLead</div>
     <h1>{registering?'Create your organisation':'Welcome back'}</h1>
     <p>{registering?'Create a workspace using your phone number and a four-digit PIN.':legacy?'Sign in to your existing account, then set up your phone number and PIN.':'Enter your phone number and PIN to open your workspace.'}</p>
@@ -45,5 +54,5 @@ export function Login({demo,registering=false}:{demo:boolean;registering?:boolea
     {!registering&&<button type="button" className="text-button" onClick={()=>{setLegacy(!legacy);setError('');setCode('');}}>{legacy?'Use phone number and PIN':'Use an existing email account'}</button>}
     <p className="simple-login-switch">{registering?'Already have an account? ':'For a different organisation, '}<Link href={registering?'/login':'/register'}>{registering?'Log in':'Create an account'}</Link></p>
     {demo&&!registering&&<p className="simple-login-hint">Demo: 9876543210 · PIN 2468. Each new account has its own workspace.</p>}
-  </div></main>;
+  </div></div></main>;
 }
