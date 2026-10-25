@@ -260,28 +260,28 @@ test('short private feedback link saves immediately and reports the background s
   });
   await page.goto(`/f/${token}`);
   await expect(page.getByRole('heading',{name:'Sample Customer'})).toBeVisible();
-  await expect(page.getByRole('heading',{name:'Enquiry details',exact:true})).toBeVisible();
+  await expect(page.getByText('Attempt the call, then submit your feedback.',{exact:true})).toBeVisible();
   await expect(page.locator('.feedback-enquiry summary')).toHaveCount(0);
   expect(await page.locator('select option:not([disabled])').allTextContents()).toEqual([...FEEDBACK_STATUSES]);
-  await expect(page.getByText('Sheet: Plot enquiries',{exact:true})).toBeVisible();
+  await expect(page.getByText('Sheet: Plot enquiries',{exact:true})).toHaveCount(0);
   await expect(page.locator('.feedback-question')).toHaveText('budget - 50 lakh');
   await expect(page.getByRole('combobox')).toHaveCount(1);await expect(page.locator('textarea')).toHaveCount(1);await expect(page.locator('input')).toHaveCount(0);
-  await page.getByLabel('Feedback (lead status)',{exact:true}).selectOption('Interested');await page.getByLabel('Remark',{exact:true}).fill('Please arrange a site visit on Sunday.');
-  await page.getByRole('button',{name:'Save status & feedback'}).click();
-  await expect(page.getByRole('status')).toContainText('Feedback saved securely');
-  await expect(page.getByRole('status')).toContainText('Google Sheet is updating in the background. You can close this page.');
-  await expect(page.getByRole('status')).toContainText('Google Sheet is up to date.',{timeout:10000});
+  await page.getByRole('combobox',{name:'Call result',exact:true}).selectOption('Interested');await page.getByLabel('Remark',{exact:true}).fill('Please arrange a site visit on Sunday.');
+  await page.getByRole('button',{name:'Submit feedback'}).click();
+  await expect(page.getByRole('status')).toContainText('Feedback submitted');
+  await expect(page.getByRole('status')).toContainText('You can close this page.');
+  await expect.poll(()=>reads,{timeout:10000}).toBeGreaterThan(0);
   expect(submitted).toEqual({status:'Interested',remarks:'Please arrange a site visit on Sunday.',version:2});
 });
 
 for(const width of [320,390,768,1440])test(`feedback page fits a ${width}px screen with long lead details`,async({page})=>{
   await page.setViewportSize({width,height:900});const token='m'.repeat(22);
   await page.route(`**/api/feedback/${token}`,route=>route.fulfill({json:{data:{employee:{name:'Aman Sharma, Senior Sales Representative'},lead:{id:'mobile-lead',customerName:'Ananya Singh with a very long customer name',mobile:'+919876543210',project:'Corbett Meadows Residential Community',location:'Greater Noida, Uttar Pradesh',sheetName:'New enquiries from our latest campaign',questions:[{question:'What is your primary purpose for buying a plot?',answer:'self-use'},{question:'What is your approximate budget?',answer:'₹1.03_cr_–_₹1.25_cr'},{question:'When would you be available for a site visit?',answer:'within_7_days'}],status:'Details Sent (Cold Client)',lastFeedback:null,writebackStatus:'SYNCED',version:0,updatedAt:'2026-10-25T10:00:00.000Z'}}}}));
-  await page.goto(`/f/${token}`);await expect(page.getByRole('heading',{name:'Leave your feedback'})).toBeVisible();
+  await page.goto(`/f/${token}`);await expect(page.getByText('Attempt the call, then submit your feedback.',{exact:true})).toBeVisible();
   await expect(page.locator('.feedback-question')).toHaveText(['purpose - self-use','budget - ₹1.03_cr_–_₹1.25_cr','available for a site visit - within_7_days']);
   for(const question of await page.locator('.feedback-question').all())await expect(question).toBeVisible();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
-  await expect(page.getByRole('link',{name:'+919876543210'})).toHaveAttribute('href','tel:+919876543210');
+  await expect(page.getByRole('link',{name:'Call +919876543210'})).toHaveAttribute('href','tel:+919876543210');
   const select=page.getByRole('combobox');expect((await select.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await page.screenshot({path:`data/feedback-${width}.png`,fullPage:true});
 });
@@ -297,17 +297,17 @@ test('feedback remains saved when sheet polling loses the connection and subsequ
     return route.fulfill({json:{data:{employee:{name:'Recipient'},lead:{id:'resilient-lead',customerName:'Customer',mobile:'+919876543210',project:'Meadows',status:'New',lastFeedback:null,writebackStatus:'SYNCED',version:0,updatedAt:'2026-10-25T10:00:00.000Z'}}}});
   });
   await page.goto(`/feedback/${token}`);
-  await page.getByRole('combobox').selectOption('No Answer');await page.getByLabel('Remark',{exact:true}).fill('Call tomorrow.');await page.getByRole('button',{name:'Save status & feedback'}).click();
-  await expect(page.getByRole('status')).toContainText('Feedback saved securely');
+  await page.getByRole('combobox').selectOption('No Answer');await page.getByLabel('Remark',{exact:true}).fill('Call tomorrow.');await page.getByRole('button',{name:'Submit feedback'}).click();
+  await expect(page.getByRole('status')).toContainText('Feedback submitted');
   await expect.poll(()=>reads,{timeout:10000}).toBeGreaterThan(1);
-  await expect(page.getByRole('button',{name:'Save status & feedback'})).toBeEnabled();
+  await expect(page.getByRole('button',{name:'Submit feedback'})).toBeEnabled();
   await expect(page.getByRole('status')).toContainText('You can close this page.');
-  await page.getByRole('combobox').selectOption('Followup (Hot Client)');await page.getByLabel('Remark',{exact:true}).fill('Customer called back. Follow up tomorrow.');await page.getByRole('button',{name:'Save status & feedback'}).click();
+  await page.getByRole('combobox').selectOption('Followup (Hot Client)');await page.getByLabel('Remark',{exact:true}).fill('Customer called back. Follow up tomorrow.');await page.getByRole('button',{name:'Submit feedback'}).click();
   await expect.poll(()=>submissions.length).toBe(2);expect(submissions.map(s=>s.version)).toEqual([0,1]);
 });
 
 test('expired feedback links show an access error without an editable form',async({page})=>{
   const token='expired-private-link';
   await page.route(`**/api/feedback/${token}`,route=>route.fulfill({status:410,json:{error:{message:'This feedback link has expired or been revoked.'}}}));
-  await page.goto(`/feedback/${token}`);await expect(page.locator('.feedback-card').getByRole('alert')).toContainText('expired or been revoked');await expect(page.getByRole('button',{name:'Save status & feedback'})).toHaveCount(0);
+  await page.goto(`/feedback/${token}`);await expect(page.locator('.feedback-card').getByRole('alert')).toContainText('expired or been revoked');await expect(page.getByRole('button',{name:'Submit feedback'})).toHaveCount(0);
 });
