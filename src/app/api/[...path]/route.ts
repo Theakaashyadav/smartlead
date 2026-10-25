@@ -22,6 +22,7 @@ import { requireWhatsAppWorker, workerHeartbeatFresh } from '@/lib/worker-status
 import { SIMPLE_POLL_SECONDS, SEND_INTERVAL_MS } from '@/lib/automation-policy';
 import { finishGoogleAuthorization, googleAuthorizationUsesPopup, startGoogleAuthorization } from '@/lib/google-oauth';
 import { FEEDBACK_STATUSES } from '@/lib/feedback-statuses';
+import { queueFeedbackSubmission } from '@/lib/temporary-leads';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -54,7 +55,7 @@ async function handler(request:Request,context:Context):Promise<Response> {
       const worker=await db.setting.findUnique({where:{key:'simple:worker'}});
       const workerRunning=workerHeartbeatFresh(worker?.value);
       const failure=!workerRunning?await db.setting.findUnique({where:{key:'simple:worker-error'}}):null;
-      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning,workerManager:process.env.SMARTLEAD_EXTERNAL_WORKER==='true'?'external':'nextjs',workerDiagnostic:failure?.value||null,automation:{publicSheetPollSeconds:SIMPLE_POLL_SECONDS,minimumSendIntervalMs:SEND_INTERVAL_MS,skipAlreadySentLeads:true,recipientLeadCounts:true}});
+      return ok({status:'ok',mode:isDemo()?'demo':'production',database:usingSQLite?'sqlite':'mongodb',appOrigin,workerRunning,workerManager:process.env.SMARTLEAD_EXTERNAL_WORKER==='true'?'external':'nextjs',workerDiagnostic:failure?.value||null,storage:{leadMode:process.env.LEAD_STORAGE_MODE==='permanent'?'permanent':'temporary',feedbackLinks:'expiring-references',retainPendingUpdates:true},automation:{publicSheetPollSeconds:SIMPLE_POLL_SECONDS,minimumSendIntervalMs:SEND_INTERVAL_MS,skipAlreadySentLeads:true,recipientLeadCounts:true}});
     }
     if(route==='webhooks/whatsapp'){
       if(method==='GET'){
@@ -110,16 +111,16 @@ async function handler(request:Request,context:Context):Promise<Response> {
     }
     if(path[0]==='feedback'&&path[1]){
       await rateLimit(`feedback:${hash(path[1])}`,60,60);
+      if(method==='POST'){
+        const input=feedbackSchema.extend({status:z.enum(FEEDBACK_STATUSES)}).parse(await body(request));
+        const {feedback,leadId}=await queueFeedbackSubmission(path[1],input);
+        syncFeedbackAfterResponse(leadId);
+        return ok({message:'Feedback saved. Google Sheet updates in the background.',lead:{status:feedback.status,lastFeedback:feedback.remarks,version:input.version+1,updatedAt:feedback.submittedAt,writebackStatus:'PENDING',writebackError:null}});
+      }
       const access=await getFeedbackAccess(path[1]);
       const writebackAvailable=true;
       const writebackFailure=method==='GET'&&access.assignment.lead.writebackStatus==='ERROR'?await db.job.findFirst({where:{type:'WRITEBACK',entityId:access.assignment.leadId,status:{in:['PENDING','DEAD']}},orderBy:{runAt:'desc'},select:{error:true}}):null;
       if(method==='GET')return ok({simple:access.assignment.lead.sheet.connectionType.startsWith('SIMPLE_'),lead:{id:access.assignment.lead.id,customerName:access.assignment.lead.customerName,project:access.assignment.lead.sheet.connectionType.startsWith('SIMPLE_')?access.assignment.lead.sheet.project:access.assignment.lead.project,mobile:access.assignment.lead.mobile,location:access.assignment.lead.location,sheetName:access.assignment.lead.sheet.name,questions:(access.assignment.lead.sourceData as {questions?:unknown[]}|null)?.questions||[],source:access.assignment.lead.source,status:access.assignment.lead.status,lastFeedback:access.assignment.lead.lastFeedback,writebackStatus:access.assignment.lead.writebackStatus,writebackAvailable,writebackError:writebackFailure?.error||null,updatedAt:access.assignment.lead.updatedAt,nextFollowupAt:access.assignment.lead.nextFollowupAt,version:access.assignment.lead.version},employee:{name:access.assignment.employee.name},statuses:FEEDBACK_STATUSES});
-      if(method==='POST'){
-        const input=feedbackSchema.extend({status:z.enum(FEEDBACK_STATUSES)}).parse(await body(request));
-        const feedback=await saveFeedback(access.assignmentId,input,undefined,access.id);
-        syncFeedbackAfterResponse(access.assignment.leadId);
-        return ok({message:'Feedback saved. Google Sheet updates in the background.',lead:{status:feedback.status,lastFeedback:feedback.remarks,version:input.version+1,updatedAt:feedback.submittedAt,writebackStatus:'PENDING',writebackError:null}});
-      }
     }
     const user=await requireUser();
     await rateLimit(`api:${user.id}`,300,60);

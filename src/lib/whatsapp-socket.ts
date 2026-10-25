@@ -17,6 +17,7 @@ type Session = {
   opening?: Promise<void>; retry?: ReturnType<typeof setTimeout>;
   events: Promise<void>; background: Promise<void>; warming?: Promise<void>;
   contacts: Map<string, WhatsAppContact>; recipients: Map<string, { jid: string; expiresAt: number }>;
+  recentMessages: Map<string,{body:string;expiresAt:number}>;
   pendingContacts: Map<string, Partial<Contact>>; contactMappings: Map<string,string>; namesHydrated: boolean; refreshingContacts?: Promise<void>;
 };
 const sessions = new Map<string, Session>();
@@ -121,6 +122,9 @@ async function open(session: Session) {
     connectTimeoutMs: 20000, defaultQueryTimeoutMs: 25000, keepAliveIntervalMs: 15000,
     getMessage: async key => {
       if (!key.id) return;
+      const recent=session.recentMessages.get(key.id);
+      if(recent&&recent.expiresAt>Date.now())return {conversation:recent.body};
+      session.recentMessages.delete(key.id);
       const message = await db.message.findUnique({ where: { providerMessageId: providerId(session.id, key.id) } });
       if (message?.senderId === session.id) return { conversation: decrypt(message.encryptedBody) };
     },
@@ -199,7 +203,7 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
   async connect() {
     const existing = sessions.get(this.sender.id);
     if (existing && !existing.stopped) { await existing.opening; return; }
-    const session: Session = { id: this.sender.id, stopped: false, connected: false, attempts: 0, events: Promise.resolve(), background: Promise.resolve(), contacts: new Map(), recipients: new Map(),pendingContacts:new Map(),contactMappings:new Map(),namesHydrated:false };
+    const session: Session = { id: this.sender.id, stopped: false, connected: false, attempts: 0, events: Promise.resolve(), background: Promise.resolve(), contacts: new Map(), recipients: new Map(),recentMessages:new Map(),pendingContacts:new Map(),contactMappings:new Map(),namesHydrated:false };
     sessions.set(this.sender.id, session);
     session.opening = (async () => {
       await update(session.id, { status: 'CONNECTING', qrCode: null, lastError: null });
@@ -268,6 +272,11 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
       if (!claimed.count) throw new AppError(409, 'This notification is no longer pending submission.');
     }
     try {
+      // WhatsApp can request a short protocol retry after the processing row is
+      // removed. Keep its body in bounded RAM only, never in lasting storage.
+      for(const [id,recent] of session.recentMessages)if(recent.expiresAt<=Date.now())session.recentMessages.delete(id);
+      session.recentMessages.set(messageId,{body:input.body,expiresAt:Date.now()+10*60000});
+      while(session.recentMessages.size>500)session.recentMessages.delete(session.recentMessages.keys().next().value!);
       const message = await socket.sendMessage(recipient.jid, { text: input.body, linkPreview: null }, { messageId });
       if (message?.key.id !== messageId) throw new Error('Missing submission identifier');
       return { id: providerId(this.sender.id, messageId), status: 'SUBMITTED' as const };

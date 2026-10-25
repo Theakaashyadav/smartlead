@@ -12,6 +12,7 @@ import { organizationSettingKey } from './organizations';
 import { sheetPollSeconds } from './automation-policy';
 import { currentDeliveryMessages, deliveryGeneration, deliveryValues, queueDeliveryWriteback, sheetAlreadySent, sheetSaysSent, SUCCESSFUL_SEND_STATUSES } from './delivery';
 import { dispatchLeadSentNotification, queueLeadSentNotifications } from './lead-sent-notifications';
+import { cacheTemporarySource, hydrateTemporaryFeedback, invalidateTemporarySource, purgeCompletedLead, readTemporaryFeedback, sheetOutputHash, temporaryFeedbackLink, temporaryLeadStorage } from './temporary-leads';
 
 const sourceChecks = new Map<string, string>();
 let nextSendAt = 0;
@@ -57,8 +58,10 @@ export async function restartUnsentSheetLeads(tx:Prisma.TransactionClient,sheet:
   const unsent=leads.filter(lead=>!lead.redactedAt&&byId.has(lead.stableSourceId)&&!sheetSaysSent(byId.get(lead.stableSourceId)!.values.sentStatus)&&phoneSchema.safeParse(lead.mobile).success);
   const ids=unsent.map(lead=>lead.id);
   if(!ids.length)return 0;
+  if(temporaryLeadStorage(sheet)&&await tx.feedback.findFirst({where:{leadId:{in:ids},lead:{writebackStatus:{in:['PENDING','ERROR']}}},select:{id:true}}))throw new AppError(409,'Saved feedback is still waiting for this sheet. Finish its sheet update before restarting recipients.','SHEET_BUSY');
   if(await tx.message.findFirst({where:{lead:{sheetId:sheet.id},OR:[{status:'PROCESSING'},{notificationStatus:'PROCESSING'}]},select:{id:true}})||await tx.job.findFirst({where:{status:'PROCESSING',OR:[{type:'SYNC',entityId:sheet.id},{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:leads.map(lead=>lead.id)}}]},select:{id:true}}))throw new AppError(409,'This sheet is sending or updating a lead. Wait for it to finish, then save recipients again.','SHEET_BUSY');
   const messages=await tx.message.findMany({where:{leadId:{in:ids}},select:{id:true}});
+  await tx.feedbackLink.updateMany({where:{sheetId:sheet.id,sourceHash:{in:unsent.map(lead=>hash(lead.stableSourceId))}},data:{revokedAt:new Date()}});
   await tx.job.updateMany({where:{status:{in:['PENDING','DEAD']},OR:[{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:ids}},{type:{in:['SEND','NOTIFY']},entityId:{in:messages.map(message=>message.id)}}]},data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
   await tx.message.updateMany({where:{leadId:{in:ids},status:'QUEUED'},data:{status:'CANCELLED',failureReason:'Recipients saved; restarting from current unsent sheet rows'}});
   await tx.message.updateMany({where:{leadId:{in:ids},notificationStatus:{in:['WAITING','QUEUED']}},data:{notificationStatus:'CANCELLED',notificationFailureReason:null}});
@@ -77,23 +80,28 @@ export async function restartUnsentSheetLeads(tx:Prisma.TransactionClient,sheet:
 }
 export async function synchronizeSheet(id:string, provider?:SheetProvider, options:{skipUnchanged?:boolean;refreshQueued?:boolean;queueAssignments?:boolean}={}) {
   const sheet=await db.sheet.findUniqueOrThrow({where:{id}});
+  const temporary=temporaryLeadStorage(sheet);
   if(!options.skipUnchanged)await db.sheet.update({where:{id},data:{syncStatus:'SYNCING',lastSyncError:null}});
   try {
     const rows=await (provider||sheetProvider(sheet)).read(sheet);
+    cacheTemporarySource(sheet,rows);
+    const sourceSummary={total:rows.length,sent:rows.filter(row=>sheetSaysSent(row.values.sentStatus)).length};
     const contentHash=options.skipUnchanged?hash(JSON.stringify([sheet.createdAt,sheet.columnMapping,sheet.project,rows])):undefined;
     if(contentHash&&sourceChecks.get(id)===contentHash){
-      await db.sheet.update({where:{id},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:0,lastSyncError:null}});
+      await db.sheet.update({where:{id},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:0,lastSyncError:null,...(temporary?{sourceSummary}:{})}});
       return {imported:0,checked:rows.length};
     }
     if(options.skipUnchanged)await db.sheet.update({where:{id},data:{syncStatus:'SYNCING',lastSyncError:null}});
     // Fetch source identities in bounded batches rather than one round trip per row.
-    const identities=rows.map(row=>row.stableId);
+    const identities=rows.filter(row=>!temporary||!sheetSaysSent(row.values.sentStatus)).map(row=>row.stableId);
     const existingRows=[];
     for(let offset=0;offset<identities.length;offset+=500)existingRows.push(...await db.lead.findMany({
       where:{sheetId:id,stableSourceId:{in:identities.slice(offset,offset+500)}},
       select:{id:true,stableSourceId:true,redactedAt:true,sourceFingerprint:true,sourceRow:true,metadataId:true,sourceDeleted:true,managedSnapshot:true,status:true,lastFeedback:true,mobile:true},
     }));
     const existingById=new Map(existingRows.map(lead=>[lead.stableSourceId,lead]));
+    const completedLinks=temporary&&options.queueAssignments!==false&&identities.length?await db.feedbackLink.findMany({where:{sheetId:id,sourceHash:{in:identities.map(id=>hash(id))},expiresAt:{gt:new Date()},revokedAt:null},select:{sourceHash:true}}):[];
+    const linkedSources=new Set(completedLinks.map(link=>link.sourceHash));
     const seen=new Set<string>();let imported=0;
     for(const row of rows) {
       if(seen.has(row.stableId))throw new AppError(409,'Duplicate source Lead IDs detected');
@@ -103,7 +111,10 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
       const fingerprint=hash(JSON.stringify([sourceFingerprint(row.values),row.questions||[]]));
       const existing=existingById.get(row.stableId);
       if(existing?.redactedAt)continue;
-      const sourceSent=sheet.connectionType.startsWith('SIMPLE_')&&sheetSaysSent(row.values.sentStatus);
+      const sourceSent=(sheet.connectionType.startsWith('SIMPLE_')||temporary)&&sheetSaysSent(row.values.sentStatus);
+      // Confirmed rows stay in Sheets. A live link also prevents a cleared Sent
+      // marker from resending until recipients are explicitly saved again.
+      if(temporary&&!existing&&(sourceSent||!parsed.success||linkedSources.has(hash(row.stableId))))continue;
       const date=row.values.leadDate?new Date(row.values.leadDate):new Date();
       const data={customerName:row.values.customerName||'Unnamed lead',mobile,email:row.values.email||null,project:row.values.project||sheet.project,location:row.values.location||null,budget:row.values.budget||null,source:row.values.source||null,requirement:row.values.requirement||null,sourceRow:row.row,metadataId:row.metadataId||null,sourceFingerprint:fingerprint,sourceData:{questions:row.questions||[]},sourceDeleted:false};
       if(!existing) {
@@ -118,6 +129,7 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
         imported++;
       } else {
         const snapshot=(existing.managedSnapshot||{}) as Record<string,string>;
+        if(temporary&&snapshot.__temporaryFeedback==='1')continue;
         // Adopt pre-existing public-sheet output values once when upgrading from
         // the read-only sender. Subsequent external edits remain conflicts.
         const initialize=['SIMPLE_PUBLIC','SIMPLE_GOOGLE','SIMPLE_APPS_SCRIPT'].includes(sheet.connectionType)&&!snapshot.__publicFeedbackInitialized;
@@ -140,8 +152,9 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
     // The send path refreshes each queued body just before submission. Rebuilding
     // the whole outbox on every poll delays the first new lead and repeats work.
     if(options.refreshQueued!==false&&sheet.connectionType.startsWith('SIMPLE_'))await refreshSimpleQueuedMessages(id);
-    await db.sheet.update({where:{id},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:imported,lastSyncError:null}});
-    await db.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'SUCCESS',details:`Imported ${imported} new leads; checked ${rows.length} source rows.`}});
+    await db.sheet.update({where:{id},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:imported,lastSyncError:null,...(temporary?{sourceSummary}:{})}});
+    if(!temporary)await db.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'SUCCESS',details:`Imported ${imported} new leads; checked ${rows.length} source rows.`}});
+    if(temporary)for(const row of rows){const existing=existingById.get(row.stableId);if(existing&&sheetSaysSent(row.values.sentStatus))await purgeCompletedLead(existing.id,row);}
     if(contentHash)sourceChecks.set(id,contentHash);
     return {imported,checked:rows.length};
   } catch(error) {
@@ -224,7 +237,12 @@ export async function refreshSimpleQueuedMessages(sheetId:string,messageId?:stri
 export async function getFeedbackAccess(token:string) {
   if(!/^[\w-]{22}$/.test(token)&&(token.length<30||token.length>100||!verifyFeedbackSignature(token)))throw new AppError(404,'Feedback link not found');
   const record=await db.feedbackToken.findUnique({where:{tokenHash:hash(token)},include:{assignment:{include:{employee:true,lead:{include:{sheet:{select:{name:true,project:true,id:true,connectionType:true,worksheetName:true,organizationId:true}}}}}}}});
+  if(!record){const link=await temporaryFeedbackLink(token);if(link)return readTemporaryFeedback(link);}
   if(!record||record.revokedAt||record.expiresAt<new Date()||!record.assignment.active||!record.assignment.isPrimary)throw new AppError(410,'This feedback link has expired or been revoked. Ask your manager for a new link.');
+  if(((record.assignment.lead.managedSnapshot||{}) as Record<string,string>).__needsHydration==='1'){
+    const link=await temporaryFeedbackLink(token);
+    if(link){const access=await readTemporaryFeedback(link,false);const queued=record.assignment.lead;return {...access,assignment:{...access.assignment,lead:{...access.assignment.lead,status:queued.status,lastFeedback:queued.lastFeedback,version:queued.version,updatedAt:queued.updatedAt,writebackStatus:queued.writebackStatus}}};}
+  }
   return record;
 }
 export async function allowedStatuses(sheetId:string) {
@@ -232,9 +250,9 @@ export async function allowedStatuses(sheetId:string) {
   const setting=await db.setting.findFirst({where:{key:`statuses:${sheetId}`}})||await db.setting.findFirst({where:{key:organizationSettingKey(sheet.organizationId,'statuses')}});
   return setting?setting.value as string[]:STATUSES;
 }
-export async function saveFeedback(assignmentId:string,input:unknown,actorId?:string,tokenId?:string) {
+export async function saveFeedback(assignmentId:string,input:unknown,actorId?:string,tokenId?:string,client?:Prisma.TransactionClient) {
   const data=feedbackSchema.parse(input);
-  return transaction(async tx=>{
+  const persist=async(tx:Prisma.TransactionClient)=>{
     const assignment=await tx.assignment.findUniqueOrThrow({where:{id:assignmentId},include:{lead:{include:{sheet:{select:{organizationId:true}}}}}});
     if(!assignment.active||!assignment.isPrimary)throw new AppError(403,'This assignment is no longer the accountable owner');
     if(tokenId){const token=await tx.feedbackToken.findUnique({where:{id:tokenId}});if(!token||token.assignmentId!==assignmentId||token.revokedAt||token.expiresAt<new Date())throw new AppError(410,'Feedback access expired');}
@@ -249,9 +267,18 @@ export async function saveFeedback(assignmentId:string,input:unknown,actorId?:st
     await enqueue(tx,'WRITEBACK',assignment.leadId,`writeback:feedback:${feedback.id}`);
     await tx.auditLog.create({data:{userId:actorId,action:'FEEDBACK_SUBMITTED',entityType:'lead',entityId:assignment.leadId}});
     return feedback;
-  });
+  };
+  return client?persist(client):transaction(persist);
 }
 export async function writebackLead(id:string, provider?:SheetProvider,options:{deliveryOnly?:boolean}={}) {
+  try{await hydrateTemporaryFeedback(id,provider);}catch(error){
+    const failed=await db.lead.findUnique({where:{id},select:{sheetId:true}});
+    if(failed){
+      await db.lead.updateMany({where:{id},data:{writebackStatus:'ERROR'}});
+      await db.syncLog.create({data:{sheetId:failed.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Sheet identity verification is unavailable; feedback remains queued.'}});
+    }
+    throw error;
+  }
   const startedAt=new Date();
   const lead=await db.lead.findUniqueOrThrow({where:{id},include:{sheet:true,assignments:{where:{active:true,isPrimary:true},include:{employee:true}},messages:{orderBy:{queuedAt:'desc'},include:{assignment:{include:{employee:true}}}}}});
   const owner=lead.assignments[0]?.employee;
@@ -268,13 +295,16 @@ export async function writebackLead(id:string, provider?:SheetProvider,options:{
     const snapshot={...(lead.managedSnapshot as Record<string,string>||{}),...observed,...values,...(simple&&(observed||Object.hasOwn(values,'status'))?{__publicOutputV2:'1'}:{})};
     const updated=await transaction(async tx=>{
       const updated=await tx.lead.updateMany({where:{id,version:lead.version},data:{writebackStatus:'SYNCED',managedSnapshot:snapshot}});
+      if(temporaryLeadStorage(lead.sheet))await tx.feedbackLink.updateMany({where:{leadId:id},data:{outputHash:sheetOutputHash(snapshot)}});
       const sent=messages.filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
       await queueLeadSentNotifications(tx,sent.map(message=>message.id),lead.sheet.organizationId);
       return updated;
     });
     if(updated.count&&(simple||!options.deliveryOnly))await db.job.updateMany({where:{type:'WRITEBACK',entityId:id,status:{in:['PENDING','DEAD']},createdAt:{lte:startedAt}},data:{status:'COMPLETED',error:null,lockedAt:null,lockToken:null}});
     if(!updated.count){await db.lead.update({where:{id},data:{managedSnapshot:snapshot}});await enqueue(db,'WRITEBACK',id,`writeback:repair:${id}:${opaqueToken()}`);}
-    await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'SUCCESS',details:`Managed fields synchronized for lead ${id}.`}});
+    invalidateTemporarySource(lead.sheetId);
+    if(!temporaryLeadStorage(lead.sheet))await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'SUCCESS',details:`Managed fields synchronized for lead ${id}.`}});
+    await purgeCompletedLead(id);
   }catch(error){await db.lead.update({where:{id},data:{writebackStatus:'ERROR'}});await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Google writeback unavailable; feedback remains saved in the database.'}});throw error;}
 }
 export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvider,sourceProvider?:SheetProvider) {
@@ -367,6 +397,14 @@ export async function processJob(id:string, candidate?:Job) {
       if(job.type==='CONNECT')await provider.connect();else if(job.type==='CONTACTS'&&'refreshContacts' in provider)await (provider as import('./whatsapp').WebWhatsAppProvider).refreshContacts();else if(job.type==='DISCONNECT')await provider.disconnect();
     }
     await db.job.updateMany({where:ownership,data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
+    if(job.type==='WRITEBACK')await purgeCompletedLead(job.entityId);
+    else if(job.type==='SEND'||job.type==='NOTIFY'){
+      const message=await db.message.findUnique({where:{id:job.entityId},select:{leadId:true}});
+      if(message)await purgeCompletedLead(message.leadId);
+    }else if(job.type==='SYNC'){
+      const sheet=await db.sheet.findUnique({where:{id:job.entityId},select:{connectionType:true}});
+      if(sheet&&temporaryLeadStorage(sheet))await db.job.deleteMany({where:ownership});
+    }
   }catch(error){
     const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED','APPS_SCRIPT_AUTH','APPS_SCRIPT_UPGRADE','APPS_SCRIPT_PROTECTED'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
     const attempts=job.attempts+(paused?0:1);
@@ -379,7 +417,8 @@ export async function processJob(id:string, candidate?:Job) {
 export async function updateLeadSheetNow(leadId:string) {
   const job=await db.job.findFirst({where:{type:'WRITEBACK',entityId:leadId,status:'PENDING'},orderBy:[{runAt:'asc'},{createdAt:'asc'}]});
   if(job){await db.job.updateMany({where:{id:job.id,status:'PENDING'},data:{runAt:new Date(0)}});await processJob(job.id);}
-  const lead=await db.lead.findUniqueOrThrow({where:{id:leadId},select:{writebackStatus:true,sheetId:true}});
+  const lead=await db.lead.findUnique({where:{id:leadId},select:{writebackStatus:true,sheetId:true}});
+  if(!lead)return {status:'SYNCED',error:null};
   const failure=lead.writebackStatus==='ERROR'?await db.syncLog.findFirst({where:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'ERROR'},orderBy:{createdAt:'desc'},select:{details:true}}):null;
   return {status:lead.writebackStatus,error:failure?.details||null};
 }

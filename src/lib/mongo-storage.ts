@@ -24,6 +24,7 @@ const extraIndexes:Record<string,IndexDescription[]>={
   Assignment:[{key:{employeeId:1,active:1}},{key:{leadId:1},name:'one_active_primary_owner',unique:true,partialFilterExpression:{active:true,isPrimary:true}}],
   Message:[{key:{status:1,queuedAt:1}},{key:{leadId:1}}],
   Feedback:[{key:{leadId:1,submittedAt:1}}],
+  FeedbackLink:[{key:{sheetId:1,sourceHash:1}},{key:{leadId:1}},{key:{expiresAt:1},expireAfterSeconds:0,name:'feedback_link_expiry'}],
   Followup:[{key:{status:1,scheduledAt:1}},{key:{leadId:1}}],
   Job:[{key:{status:1,runAt:1}},{key:{organizationId:1,status:1,createdAt:1}}],
   SyncLog:[{key:{sheetId:1,createdAt:1}}],

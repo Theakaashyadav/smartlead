@@ -4,6 +4,7 @@ import { initializeMongoDatabase } from '@/lib/mongo-storage';
 
 declare module 'vitest' {export interface ProvidedContext {mongoURI:string}}
 process.env.DEMO_MODE='true';
+process.env.LEAD_STORAGE_MODE='permanent';
 process.env.DATABASE_PROVIDER='mongodb';
 process.env.MONGODB_URI=inject('mongoURI');
 process.env.MONGODB_DATABASE=`smartlead_test_${process.pid}`;

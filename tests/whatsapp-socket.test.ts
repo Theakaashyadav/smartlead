@@ -55,6 +55,13 @@ async function source(senderId:string){
 }
 
 describe('WhatsApp QR login without Chromium',()=>{
+  it('serves short protocol retries from bounded memory after the processing record is gone',async()=>{
+    const f=await linked();const result=await f.provider.sendMessage({to:'+919876543211',body:'Temporary lead body',parameters:[]});
+    const id=result.id.slice(`socket:${f.sender.id}:`.length);
+    expect(await db.message.count()).toBe(0);expect(await f.socket.options.getMessage({id})).toEqual({conversation:'Temporary lead body'});
+    const now=Date.now();const clock=vi.spyOn(Date,'now').mockReturnValue(now+11*60000);
+    try{expect(await f.socket.options.getMessage({id})).toBeUndefined();}finally{clock.mockRestore();}
+  });
   it('reuses verified recipient numbers and sends the clickable URL without waiting for a preview',async()=>{
     const f=await linked();
     for(let i=0;i<3;i++)await f.provider.sendMessage({to:'+919876543211',body:'Lead https://example.com/feedback/private-token',parameters:[]});

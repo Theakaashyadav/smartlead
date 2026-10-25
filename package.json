@@ -24,6 +24,7 @@
     "worker:check": "node --import tsx scripts/check-worker.ts",
     "package:hostinger": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-hostinger.ps1",
     "retention": "tsx scripts/retention.ts",
+    "storage:check": "tsx scripts/check-lead-storage.ts",
     "test": "vitest run",
     "test:mongodb": "vitest run --config vitest.mongo.config.ts",
     "test:e2e": "playwright test",

@@ -96,6 +96,7 @@ model Sheet {
   credential GoogleCredential? @relation(fields:[credentialId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   columnMapping Json
   managedColumnsApproved Boolean @default(false)
+  sourceSummary Json?
   syncInterval Int @default(180)
   lastSyncAt DateTime?
   syncStatus String @default("PENDING")
@@ -249,6 +250,26 @@ model FeedbackToken {
   revokedAt DateTime?
   createdAt DateTime @default(now())
   @@map("feedback_tokens")
+}
+
+model FeedbackLink {
+  id String @id @map("_id")
+  tokenHash String @unique
+  sheetId String
+  employeeId String
+  leadId String
+  assignmentId String
+  encryptedSourceId String
+  sourceHash String
+  generation Int
+  version Int
+  outputHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([sheetId,sourceHash])
+  @@index([leadId])
+  @@map("feedback_links")
 }
 
 model Message {

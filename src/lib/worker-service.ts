@@ -14,6 +14,7 @@ import { socketWhatsApp } from './whatsapp-mode';
 import { closeSocketWhatsApp } from './whatsapp-socket';
 import { SEND_INTERVAL_MS, WORKER_IDLE_MS } from './automation-policy';
 import { recoverSheetOutputs, recoverUnavailableSheetWrites } from './sheet-output-recovery';
+import { ensureTemporaryStorage, maintainTemporaryStorage } from './temporary-leads';
 
 export function startWorkerService({closeDatabase=false}={}){
   const controller=new AbortController();
@@ -27,6 +28,7 @@ export function startWorkerService({closeDatabase=false}={}){
 
   async function run(){
     await databaseHealth();databaseReady=true;
+    await ensureTemporaryStorage();
     stage='lease';
     let waiting=false;
     while(!stopping()&&!await lease.acquire()){
@@ -82,6 +84,7 @@ export function startWorkerService({closeDatabase=false}={}){
         },WORKER_IDLE_MS),
         loop('writeback',()=>drainJobs(10,0,undefined,()=>!stopping(),['WRITEBACK']),250),
         loop('contacts',()=>drainJobs(5,0,undefined,()=>!stopping(),['CONTACTS']),1000),
+        loop('temporary-storage',()=>maintainTemporaryStorage(),5000),
       ];
       try{await Promise.all(loops);}catch(error){controller.abort();await Promise.allSettled(loops);throw error;}
     }finally{clearInterval(heartbeatTimer);await renewing;}

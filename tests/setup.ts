@@ -3,6 +3,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 process.env.DEMO_MODE='true';
+process.env.LEAD_STORAGE_MODE='permanent';
 process.env.DATABASE_PROVIDER='sqlite';
 process.env.SESSION_SECRET='test-session-secret-32-characters-minimum';
 process.env.ENCRYPTION_KEY='ab'.repeat(32);

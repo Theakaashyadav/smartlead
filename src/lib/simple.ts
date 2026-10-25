@@ -12,6 +12,7 @@ import { feedbackBaseURL } from './feedback-url';
 import { LEGACY_ORGANIZATION } from './organizations';
 import { requireWhatsAppWorker, workerHeartbeatFresh, workerOfflineMessage } from './worker-status';
 import { SIMPLE_POLL_SECONDS, sheetPollSeconds } from './automation-policy';
+import { invalidateTemporarySource, temporaryLeadStorage } from './temporary-leads';
 import { checkAppsScriptSetup, connectAppsScriptSheet, startAppsScriptSetup } from './apps-script';
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
@@ -39,7 +40,8 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       const total=(statuses:string[])=>counts.filter(c=>statuses.includes(c.status)).reduce((sum,c)=>sum+c._count,0);
       const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
       const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
-      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:s._count.leads,enabled:s.rule?.enabled||false,notificationPhone:s.rule?.notificationPhone||null,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},sentNotificationError:notificationFailure?.notificationFailureReason||null,writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
+      const sourceSummary=temporaryLeadStorage(s)?s.sourceSummary as {total?:number;sent?:number}|null:null;
+      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:sourceSummary?.total??s._count.leads,enabled:s.rule?.enabled||false,notificationPhone:s.rule?.notificationPhone||null,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:sourceSummary?.sent??total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},sentNotificationError:notificationFailure?.notificationFailureReason||null,writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
@@ -131,6 +133,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       // recipients, WhatsApp accounts, and the source Google Sheet intact.
       await tx.job.deleteMany({where:jobs});
       await tx.feedbackToken.deleteMany({where:{assignment:{leadId:{in:leadIds}}}});
+      await tx.feedbackLink.deleteMany({where:{sheetId:sheet.id}});
       await tx.feedback.deleteMany({where:{leadId:{in:leadIds}}});
       await tx.followup.deleteMany({where:{leadId:{in:leadIds}}});
       await tx.message.deleteMany({where:{leadId:{in:leadIds}}});
@@ -143,6 +146,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       await tx.setting.deleteMany({where:{key:{in:[`statuses:${sheet.id}`,`demo-source:${sheet.id}`]}}});
       await tx.rateLimit.deleteMany({where:{key:`sync:${sheet.id}`}});
       await tx.sheet.delete({where:{id:sheet.id}});
+      invalidateTemporarySource(sheet.id);
       await tx.auditLog.create({data:{userId:user.id,action:'DELETE_SHEET',entityType:'sheet',entityId:sheet.id,metadata:{name:sheet.name,leads:leads.length}}});
       return {deleted:true};
     });
