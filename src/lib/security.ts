@@ -11,6 +11,8 @@ export class AppError extends Error {
 }
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 export const opaqueToken = () => randomBytes(32).toString('base64url');
+// 128 random bits, stored only as a hash. Existing signed links remain valid.
+export const shortFeedbackToken = () => randomBytes(16).toString('base64url');
 export function signedFeedbackToken() {
   const nonce=opaqueToken();
   return `${nonce}.${createHmac('sha256',secret('SESSION_SECRET')).update(nonce).digest('base64url')}`;

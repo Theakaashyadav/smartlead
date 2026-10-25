@@ -4,7 +4,7 @@ import { db } from '@/lib/db';
 import { AppError, checkOrigin, decrypt, encrypt, hash, passwordHash, signedFeedbackToken, verifyFeedbackSignature, verifyPassword } from '@/lib/security';
 import { chooseRecipients } from '@/lib/distribution';
 import { DEFAULT_TEMPLATE, feedbackSchema, MANAGED, ruleSchema } from '@/lib/validation';
-import { assignLead, dispatchMessage, drainJobs, enqueue, getFeedbackAccess, saveFeedback, synchronizeSheet, writebackLead } from '@/lib/engine';
+import { assignLead, dispatchMessage, drainJobs, enqueue, getFeedbackAccess, refreshSimpleQueuedMessages, saveFeedback, synchronizeSheet, writebackLead } from '@/lib/engine';
 import { DemoSheetsProvider, GoogleSheetsProvider, type SourceRow, type SheetProvider } from '@/lib/google';
 import { DemoWhatsAppProvider, UncertainDelivery, WebWhatsAppProvider, registerWebClient } from '@/lib/whatsapp';
 import { leadScope } from '@/lib/permissions';
@@ -231,14 +231,28 @@ describe('durable end-to-end workflow',()=>{
     expect(assignments.map(a=>a.employeeId)).toEqual(['e0','e1','e2','e0']);
     expect(await db.feedbackToken.count()).toBe(4);expect(await db.job.count({where:{type:'WRITEBACK'}})).toBe(0);
     const messages=await db.message.findMany();expect(messages).toHaveLength(4);
-    for(const m of messages){expect(decrypt(m.encryptedBody)).toContain('Project – *Noida*');expect(decrypt(m.encryptedBody)).toContain('/feedback/');await dispatchMessage(m.id);}
+    for(const m of messages){expect(decrypt(m.encryptedBody)).toContain('Project – *Noida*');expect(decrypt(m.encryptedBody)).toContain('/f/');await dispatchMessage(m.id);}
     expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(4);expect(await db.job.count({where:{type:'WRITEBACK'}})).toBe(4);
     await synchronizeSheet('sheet',new DemoSheetsProvider());expect(await db.lead.count()).toBe(4);expect(await db.message.count()).toBe(4);
+  });
+  it('shortens legacy queued links without revoking copied links or extending their expiry',async()=>{
+    await fixture();await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
+    await synchronizeSheet('sheet',new DemoSheetsProvider());const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);
+    const message=await db.message.findFirstOrThrow();const legacy=signedFeedbackToken();const expiresAt=new Date(Date.now()+3600000);
+    await db.feedbackToken.create({data:{assignmentId:message.assignmentId,tokenHash:hash(legacy),expiresAt}});
+    await db.message.update({where:{id:message.id},data:{encryptedBody:encrypt(decrypt(message.encryptedBody).replace(/\/f\/[\w-]+/,`/feedback/${legacy}`))}});
+    await refreshSimpleQueuedMessages('sheet');
+    const shortened=decrypt((await db.message.findUniqueOrThrow({where:{id:message.id}})).encryptedBody).match(/\/f\/([\w-]{22})/)![1];
+    expect((await getFeedbackAccess(shortened)).expiresAt).toEqual(expiresAt);
+    expect((await getFeedbackAccess(legacy)).assignmentId).toBe(message.assignmentId);
+    const provider={sendMessage:vi.fn(async()=>({id:'compact-link-send',status:'SUBMITTED'}))} as any;
+    await dispatchMessage(message.id,provider);
+    expect(provider.sendMessage.mock.calls[0][0].parameters[4]).toBe(`http://localhost:3000/f/${shortened}`);
   });
   it('uses a changed project for queued messages while keeping source data and feedback links unchanged',async()=>{
     const {admin}=await fixture();await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
     await synchronizeSheet('sheet',new DemoSheetsProvider());const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id);
-    const message=await db.message.findFirstOrThrow();const token=decrypt(message.encryptedBody).match(/\/feedback\/([^\s]+)/)![1];
+    const message=await db.message.findFirstOrThrow();const token=decrypt(message.encryptedBody).match(/\/f\/([^\s]+)/)![1];
     const source=await db.setting.findUniqueOrThrow({where:{key:'demo-source:sheet'}});const write=vi.spyOn(DemoSheetsProvider.prototype,'write');
     const request=(project:string)=>new Request('http://localhost',{method:'PUT',body:JSON.stringify({project})});
     await expect(simpleAction(['sheets','sheet','project'],'PUT',request('Wrong project'),{...admin,organizationId:'another-org'})).rejects.toMatchObject({status:404});
@@ -261,7 +275,7 @@ describe('durable end-to-end workflow',()=>{
     await db.setting.create({data:{key:'feedback:public',value:{url:'https://feedback.example',at:Date.now()-60000}}});
     await expect(dispatchMessage(message.id,provider)).rejects.toMatchObject({code:'FEEDBACK_OFFLINE'});expect(provider.sendMessage).not.toHaveBeenCalled();
     await db.setting.update({where:{key:'feedback:public'},data:{value:{url:'https://feedback.example',at:Date.now()}}});await dispatchMessage(message.id,provider);
-    expect(provider.sendMessage).toHaveBeenCalledTimes(1);expect(provider.sendMessage.mock.calls[0][0].body).toContain('https://feedback.example/feedback/');
+    expect(provider.sendMessage).toHaveBeenCalledTimes(1);expect(provider.sendMessage.mock.calls[0][0].body).toContain('https://feedback.example/f/');
     const admin=await db.user.findUniqueOrThrow({where:{id:'admin'}});expect(await simpleAction(['state'],'GET',new Request('http://localhost:3000'),admin)).toMatchObject({feedbackError:null});
   });
   it('includes source questions and saves status, employee and feedback for the same public lead',async()=>{
@@ -274,8 +288,8 @@ describe('durable end-to-end workflow',()=>{
     expect(body).toContain('purpose - *Investment*');
     expect(body).toContain('available for a site visit - *Sunday*');
     expect(body).toContain('Name: *Sample customer*\nPhone: *+919876543210*\nCity: *Noida*');expect(body.endsWith('Thank you!')).toBe(true);
-    expect(body).toMatch(/\*Submit Feedback\*\nhttps?:\/\/[^\s]+\/feedback\/[^\s]+\nThank you!/);
-    const token=body.match(/\/feedback\/([^\s]+)/)![1];const access=await getFeedbackAccess(token);expect(access.assignment.lead.id).toBe(lead.id);
+    expect(body).toMatch(/\*Submit Feedback\*\nhttps?:\/\/[^\s]+\/f\/[^\s]+\nThank you!/);
+    const token=body.match(/\/f\/([^\s]+)/)![1];const access=await getFeedbackAccess(token);expect(access.assignment.lead.id).toBe(lead.id);
     csv=csv.replace('Investment,50 lakh','Home,50 lakh');await synchronizeSheet('sheet');
     body=decrypt((await db.message.findUniqueOrThrow({where:{id:outgoing.id}})).encryptedBody);expect(body).toContain('purpose - *Home*');expect(body).toContain(token);expect(await db.message.count()).toBe(1);
     await saveFeedback(access.assignmentId,{status:'Interested',remarks:'Please arrange a site visit',version:access.assignment.lead.version},undefined,access.id);
@@ -382,11 +396,11 @@ describe('durable end-to-end workflow',()=>{
     }finally{registerWebClient(sender.id,null);}
   });
   it('imports initially, detects new rows, and prevents duplicates',async()=>{const f=await fixture();expect((await synchronizeSheet('sheet')).imported).toBe(4);expect((await synchronizeSheet('sheet')).imported).toBe(0);f.rows.push({stableId:'source-new',row:9,values:{customerName:'New customer',mobile:'+919800000099'}});await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(f.rows))}});expect((await synchronizeSheet('sheet')).imported).toBe(1);expect(await db.lead.count()).toBe(5);});
-  it('assigns once, sends once, and generates an authorized feedback link',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const lead=await db.lead.findFirstOrThrow({include:{assignments:true,messages:true}});expect(lead.assignments).toHaveLength(1);expect(lead.messages[0].status).toBe('SUBMITTED');await assignLead(lead.id);await dispatchMessage(lead.messages[0].id);expect(await db.assignment.count({where:{leadId:lead.id}})).toBe(1);expect((await db.message.findUniqueOrThrow({where:{id:lead.messages[0].id}})).attemptCount).toBe(1);const token=decrypt(lead.messages[0].encryptedBody).match(/\/feedback\/([^\s]+)/)![1];expect((await getFeedbackAccess(token)).assignment.leadId).toBe(lead.id);});
+  it('assigns once, sends once, and generates an authorized feedback link',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const lead=await db.lead.findFirstOrThrow({include:{assignments:true,messages:true}});expect(lead.assignments).toHaveLength(1);expect(lead.messages[0].status).toBe('SUBMITTED');await assignLead(lead.id);await dispatchMessage(lead.messages[0].id);expect(await db.assignment.count({where:{leadId:lead.id}})).toBe(1);expect((await db.message.findUniqueOrThrow({where:{id:lead.messages[0].id}})).attemptCount).toBe(1);const token=decrypt(lead.messages[0].encryptedBody).match(/\/f\/([^\s]+)/)![1];expect((await getFeedbackAccess(token)).assignment.leadId).toBe(lead.id);});
   it('keeps disconnected sends queued and resumes after reconnection',async()=>{const {sender}=await fixture();await db.sender.update({where:{id:sender.id},data:{status:'DISCONNECTED'}});await synchronizeSheet('sheet');await drainJobs(100);expect(await db.message.count({where:{status:'QUEUED'}})).toBe(4);await new DemoWhatsAppProvider(sender).connect();await db.job.updateMany({where:{type:'SEND',status:'PENDING'},data:{runAt:new Date()}});await drainJobs(100);expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(4);});
   it('stores feedback repeatedly without creating duplicate leads',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const a=await db.assignment.findFirstOrThrow({where:{isPrimary:true},include:{lead:true}});await saveFeedback(a.id,{status:'Interested',remarks:'Customer likes the project',version:a.lead.version});const updated=await db.lead.findUniqueOrThrow({where:{id:a.leadId}});await saveFeedback(a.id,{status:'Site Visit Scheduled',remarks:'Visit scheduled for Sunday',version:updated.version});await drainJobs(100);expect(await db.feedback.count({where:{leadId:a.leadId}})).toBe(2);expect(await db.lead.count()).toBe(4);const source=await new DemoSheetsProvider().read(await db.sheet.findUniqueOrThrow({where:{id:'sheet'}}));expect(source.find(r=>r.stableId===a.lead.stableSourceId)?.values.status).toBe('Site Visit Scheduled');});
   it('rejects simultaneous stale feedback and preserves the accepted history',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const a=await db.assignment.findFirstOrThrow({where:{isPrimary:true},include:{lead:true}});const data={status:'Interested',remarks:'Customer called back',version:a.lead.version};const result=await Promise.allSettled([saveFeedback(a.id,data),saveFeedback(a.id,data)]);expect(result.filter(r=>r.status==='fulfilled')).toHaveLength(1);expect(await db.feedback.count()).toBe(1);});
-  it('reassigns manually and revokes the former owner’s feedback link',async()=>{await fixture('MANUAL');await synchronizeSheet('sheet');const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id,'e0','admin');const message=await db.message.findFirstOrThrow();const token=decrypt(message.encryptedBody).match(/\/feedback\/([^\s]+)/)![1];await assignLead(lead.id,'e1','admin',true);await expect(getFeedbackAccess(token)).rejects.toThrow(/expired|revoked/);expect(await db.assignment.count({where:{leadId:lead.id,isPrimary:true,active:true}})).toBe(1);});
+  it('reassigns manually and revokes the former owner’s feedback link',async()=>{await fixture('MANUAL');await synchronizeSheet('sheet');const lead=await db.lead.findFirstOrThrow();await assignLead(lead.id,'e0','admin');const message=await db.message.findFirstOrThrow();const token=decrypt(message.encryptedBody).match(/\/f\/([^\s]+)/)![1];await assignLead(lead.id,'e1','admin',true);await expect(getFeedbackAccess(token)).rejects.toThrow(/expired|revoked/);expect(await db.assignment.count({where:{leadId:lead.id,isPrimary:true,active:true}})).toBe(1);});
   it('does not inflate unique leads when notifying everyone',async()=>{const {admin}=await fixture('ALL');await synchronizeSheet('sheet');await drainJobs(100);const data=await workspace(admin,new URLSearchParams());expect(data.stats.total).toBe(4);expect(data.stats.assigned).toBe(4);expect(data.stats.notifications).toBe(12);expect(await db.feedbackToken.count()).toBe(4);});
   it('restricts executive and manager access to their assigned records',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const executive=await db.user.findUniqueOrThrow({where:{id:'u1'}});expect(await db.lead.count({where:leadScope(executive)})).toBe(1);const manager=await db.user.create({data:{organizationId:'legacy',name:'Manager',email:'manager@test.invalid',passwordHash:'unused',role:'MANAGER'}});expect(await db.lead.count({where:leadScope(manager)})).toBe(0);await db.sheetAccess.create({data:{userId:manager.id,sheetId:'sheet'}});expect(await db.lead.count({where:leadScope(manager)})).toBe(4);});
   it('updates a moved row by stable identity and refuses a deleted row',async()=>{await fixture();await synchronizeSheet('sheet');await drainJobs(100);const lead=await db.lead.findFirstOrThrow();const provider=new DemoSheetsProvider();const sheet=await db.sheet.findUniqueOrThrow({where:{id:'sheet'}});let rows=(await provider.read(sheet)).reverse().map((r,i)=>({...r,row:i+2}));await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(rows))}});await synchronizeSheet('sheet');await writebackLead(lead.id);rows=rows.filter(r=>r.stableId!==lead.stableSourceId);await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(rows))}});await expect(writebackLead(lead.id)).rejects.toThrow(/deleted/);});

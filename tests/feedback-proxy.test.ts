@@ -7,6 +7,16 @@ const servers:Server[]=[];
 async function listen(server:Server){servers.push(server);await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;}
 afterEach(async()=>{await Promise.all(servers.splice(0).map(server=>new Promise<void>(resolve=>server.close(()=>resolve()))));});
 describe('employee feedback relay',()=>{
+  it('accepts compact private links and their API without exposing other routes',async()=>{
+    let received='';const upstream=await listen(createServer((request,response)=>{received=request.url||'';response.end('ok');}));
+    const relay=await listen(createFeedbackProxy(upstream,()=> 'https://public.example',()=>({running:true})));
+    const token='a'.repeat(22);
+    expect((await fetch(`${relay}/f/${token}`)).status).toBe(200);expect(received).toBe(`/f/${token}`);
+    expect((await fetch(`${relay}/api/feedback/${token}`,{method:'POST',headers:{origin:'https://public.example'},body:'{}'})).status).toBe(200);
+    expect(received).toBe(`/api/feedback/${token}`);
+    for(const path of ['/f/short',`/f/${token}/extra`,`/f/${token}/../dashboard`,`/api/feedback/${token}/extra`])expect((await fetch(relay+path)).status).toBe(404);
+    expect(feedbackPathAllowed(`/f/${token}`,'POST')).toBe(false);
+  });
   it('forwards only feedback pages and their static assets, without admin credentials',async()=>{
     let received:any;
     const upstream=await listen(createServer((request,response)=>{received={path:request.url,cookie:request.headers.cookie,authorization:request.headers.authorization,origin:request.headers.origin};response.setHeader('Set-Cookie','admin=private');response.end('feedback page');}));

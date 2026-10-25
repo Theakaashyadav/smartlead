@@ -37,10 +37,10 @@ Responses use `{ "data": ... }`; errors use `{ "error": { "code": "...", "messag
 | POST | /api/leads/assign | Manager; `{leadIds:[...],employeeId}`; max 100, authorized recipients only |
 | POST | /api/leads/reassign | Manager; same input, revokes prior links and cancels eligible queued sends |
 | POST | /api/leads/:id/feedback | Scoped owner/admin update; validated feedback and current version |
-| POST | /api/leads/:id/feedback-link | Issue a signed 7-day link for the primary assignment |
+| POST | /api/leads/:id/feedback-link | Issue a short `/f/:token` 7-day private link for the primary assignment |
 | POST | /api/leads/:id/writeback | Manager; retry managed output synchronization |
 | GET | /api/feedback/:token | One authorized assignment only; expiring/revocable capability |
-| POST | /api/feedback/:token | Validated feedback; atomic history/update/outbox transaction |
+| POST | /api/feedback/:token | Validated feedback; atomic history/update/outbox transaction; responds after database commit, with Google Sheets syncing after the response |
 | GET | /api/employees | Role-scoped recipients |
 | POST | /api/employees | Super Admin; validated E.164 phone, capacity, optional executive login |
 | PUT | /api/employees/:id | Super Admin; edit/deactivate employee and linked login |
@@ -79,6 +79,8 @@ Feedback example:
 ```
 
 A stale version returns 409; refresh the record and review the accepted update before retrying. Feedback can be saved successfully while sheet writeback remains pending/error. Repeated updates create feedback history, not duplicate leads.
+
+New public links use `/f/` plus a 22-character random token. Existing signed `/feedback/` links remain valid until expiry or revocation. Public feedback exposes exactly eight statuses: `No Answer`, `Switch Off`, `Interested`, `Not Interested`, `Details Sent (Cold Client)`, `Followup (Hot Client)`, `Site Visit Scheduled`, and `Invalid no.`. The POST response includes the committed status, remark, new version, and `writebackStatus: "PENDING"` in `data.lead`; clients can acknowledge the save immediately. A durable WRITEBACK job retries failed sheet updates independently.
 
 For simple sheet connections, `GET /api/feedback/:token` includes `simple: true`, the sheet name, ordered source questions and answers, the current lead version and `writebackStatus`. The employee form submits only status, remarks and version. The worker writes **Sent Status**, **Shared To** (confirmed successful recipients), **Feedback** (lead status) and **Remark** to the same source identity. Authorized connections verify the API result before `writebackStatus` becomes `SYNCED`. Existing public connections require Apps Script for production writeback; connecting it preserves lead identities and sending history.
 

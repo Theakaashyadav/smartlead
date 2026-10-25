@@ -25,7 +25,7 @@ async function run(){
     if(/Unregistered tunnel connection|Connection terminated|failed to serve tunnel connection|Retrying connection/i.test(text))connected=false;
     if(/Registered tunnel connection/.test(text))connected=true;
     void publish().catch(()=>{});
-    void appendFile('data/feedback-relay.log',text.replace(/\/(?:api\/)?feedback\/[\w.-]+/g,'/feedback/[redacted]')).catch(()=>{});
+    void appendFile('data/feedback-relay.log',text.replace(/\/(?:f|(?:api\/)?feedback)\/[\w.-]+/g,'/feedback/[redacted]')).catch(()=>{});
   };
   tunnel.stdout.on('data',receive);tunnel.stderr.on('data',receive);
   tunnel.on('error',()=>{connected=false;console.error('Could not start the feedback tunnel.');});

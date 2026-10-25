@@ -1,7 +1,7 @@
 import type { Prisma, Sheet, Job } from '@/generated/mongo';
 import { db, databaseTransaction, usingSQLite } from './db';
 import { appUrl, isDemo } from './config';
-import { AppError, audit, decrypt, encrypt, hash, opaqueToken, signedFeedbackToken, verifyFeedbackSignature } from './security';
+import { AppError, audit, decrypt, encrypt, hash, opaqueToken, shortFeedbackToken, verifyFeedbackSignature } from './security';
 import { sheetProvider, sourceFingerprint, type SheetProvider, type SourceRow } from './google';
 import { CLOSED, DEFAULT_TEMPLATE, phoneSchema, feedbackSchema, STATUSES, VARIABLES, MANAGED as MANAGED_FIELDS } from './validation';
 import { chooseRecipients } from './distribution';
@@ -187,9 +187,9 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
     for(const recipient of chosen.notify) {
       const employee=rule.recipients.find(r=>r.employeeId===recipient)!.employee;
       const assignment=await tx.assignment.create({data:{leadId,employeeId:recipient,assignedBy:userId,isPrimary:recipient===chosen.owner,generation:generation+1}});
-      const raw=signedFeedbackToken();
+      const raw=shortFeedbackToken();
       // Notification-only recipients get no editable bearer link.
-      const feedbackLink=assignment.isPrimary?`${simple?await feedbackBaseURL(tx,true):appUrl()}/feedback/${raw}`:'The accountable lead owner will submit feedback.';
+      const feedbackLink=assignment.isPrimary?`${simple?await feedbackBaseURL(tx,true):appUrl()}/f/${raw}`:'The accountable lead owner will submit feedback.';
       if(assignment.isPrimary)await tx.feedbackToken.create({data:{assignmentId:assignment.id,tokenHash:hash(raw),expiresAt:new Date(Date.now()+30*86400000)}});
       if(rule.senderId) {
         const body=simple?simpleLeadMessage(lead,lead.sheet.project,feedbackLink):templateBody(rule.template||DEFAULT_TEMPLATE,{customer_name:lead.customerName,mobile_number:lead.mobile,project_name:lead.project,location:lead.location||'',budget:lead.budget||'',lead_source:lead.source||'',assigned_employee:rule.recipients.find(r=>r.employeeId===chosen.owner)!.employee.name,lead_date:lead.leadDate.toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}),feedback_link:feedbackLink});
@@ -212,17 +212,17 @@ export async function refreshSimpleQueuedMessages(sheetId:string,messageId?:stri
   for(const message of queued)await transaction(async tx=>{
     const current=await tx.message.findUniqueOrThrow({where:{id:message.id},include:{assignment:true,lead:{include:{sheet:true}}}});
     if(current.status!=='QUEUED'||!current.assignment.active)return;
-    let token=decrypt(current.encryptedBody).match(/\/feedback\/([\w.-]+)/)?.[1];
+    let token=decrypt(current.encryptedBody).match(/\/(?:f|feedback)\/([\w.-]+)/)?.[1];
     const saved=token?await tx.feedbackToken.findUnique({where:{tokenHash:hash(token)}}):null;
-    if(!saved||saved.assignmentId!==current.assignmentId||saved.revokedAt||saved.expiresAt<new Date()){
-      token=signedFeedbackToken();await tx.feedbackToken.create({data:{assignmentId:current.assignmentId,tokenHash:hash(token),expiresAt:new Date(Date.now()+30*86400000)}});
+    if(!saved||token?.length!==22||saved.assignmentId!==current.assignmentId||saved.revokedAt||saved.expiresAt<new Date()){
+      token=shortFeedbackToken();await tx.feedbackToken.create({data:{assignmentId:current.assignmentId,tokenHash:hash(token),expiresAt:saved&&!saved.revokedAt&&saved.expiresAt>new Date()?saved.expiresAt:new Date(Date.now()+30*86400000)}});
     }
-    const body=simpleLeadMessage(current.lead,current.lead.sheet.project,`${await feedbackBaseURL(tx,requireOnline)}/feedback/${token}`);
+    const body=simpleLeadMessage(current.lead,current.lead.sheet.project,`${await feedbackBaseURL(tx,requireOnline)}/f/${token}`);
     if(body!==decrypt(current.encryptedBody))await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(body)}});
   });
 }
 export async function getFeedbackAccess(token:string) {
-  if(token.length<30||token.length>100||!verifyFeedbackSignature(token))throw new AppError(404,'Feedback link not found');
+  if(!/^[\w-]{22}$/.test(token)&&(token.length<30||token.length>100||!verifyFeedbackSignature(token)))throw new AppError(404,'Feedback link not found');
   const record=await db.feedbackToken.findUnique({where:{tokenHash:hash(token)},include:{assignment:{include:{employee:true,lead:{include:{sheet:{select:{name:true,project:true,id:true,connectionType:true,worksheetName:true,organizationId:true}}}}}}}});
   if(!record||record.revokedAt||record.expiresAt<new Date()||!record.assignment.active||!record.assignment.isPrimary)throw new AppError(410,'This feedback link has expired or been revoked. Ask your manager for a new link.');
   return record;
@@ -239,7 +239,7 @@ export async function saveFeedback(assignmentId:string,input:unknown,actorId?:st
     if(!assignment.active||!assignment.isPrimary)throw new AppError(403,'This assignment is no longer the accountable owner');
     if(tokenId){const token=await tx.feedbackToken.findUnique({where:{id:tokenId}});if(!token||token.assignmentId!==assignmentId||token.revokedAt||token.expiresAt<new Date())throw new AppError(410,'Feedback access expired');}
     const setting=await tx.setting.findUnique({where:{key:`statuses:${assignment.lead.sheetId}`}})||await tx.setting.findUnique({where:{key:organizationSettingKey(assignment.lead.sheet.organizationId,'statuses')}});
-    if(data.status!==assignment.lead.status&&!(setting?.value as string[]||STATUSES).includes(data.status))throw new AppError(400,'Select a configured lead status');
+    if(data.status!==assignment.lead.status&&!STATUSES.includes(data.status)&&!(setting?.value as string[]||[]).includes(data.status))throw new AppError(400,'Select a configured lead status');
     const followup=data.nextFollowupAt?new Date(data.nextFollowupAt):null;
     const updated=await tx.lead.updateMany({where:{id:assignment.leadId,version:data.version},data:{status:data.status,lastFeedback:data.remarks,interest:data.interest,nextFollowupAt:followup,lastContactAt:new Date(),version:{increment:1},writebackStatus:'PENDING'}});
     if(!updated.count)throw new AppError(409,'Another update was saved. Refresh this lead before submitting again.','VERSION_CONFLICT');
@@ -318,7 +318,7 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
   const body=decrypt((await db.message.findUniqueOrThrow({where:{id}})).encryptedBody);
   const rule=message.lead.sheet.rule;
   // Meta approved template body parameter order is documented in README.
-  const parameters=[message.lead.customerName,message.lead.mobile,message.lead.project,message.assignment.employee.name,body.match(/https?:\/\/\S+\/feedback\/\S+/)?.[0]||'Notification only'];
+  const parameters=[message.lead.customerName,message.lead.mobile,message.lead.project,message.assignment.employee.name,body.match(/https?:\/\/\S+\/(?:f|feedback)\/\S+/)?.[0]||'Notification only'];
   try {
     const result=await (providerOverride||whatsappProvider(message.sender)).sendMessage({to:message.recipient,body,template:rule?.metaTemplate,language:rule?.metaLanguage,parameters,messageId:message.id});
     await transaction(async tx=>{await tx.message.update({where:{id},data:{status:result.status,providerMessageId:result.id,submittedAt:new Date(),uncertain:false,failureReason:null}});await queueDeliveryWriteback(tx,message,`submitted:${message.attemptCount+1}`);});
@@ -374,8 +374,7 @@ export async function processJob(id:string, candidate?:Job) {
   }
   return true;
 }
-// A saved feedback change gets a first attempt in the request that saved it,
-// rather than waiting behind another sheet's retries. The durable job still
+// Start a saved change after the response or on explicit retry. The durable job
 // owns retries and its atomic claim prevents the worker running this job twice.
 export async function updateLeadSheetNow(leadId:string) {
   const job=await db.job.findFirst({where:{type:'WRITEBACK',entityId:leadId,status:'PENDING'},orderBy:[{runAt:'asc'},{createdAt:'asc'}]});

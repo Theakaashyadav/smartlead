@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
-export const STATUSES = ['New','Not Contacted','Call Attempted','No Answer','Switched Off','Not Reachable','Connected','Interested','Very Interested / Hot Lead','Follow-up Required','Site Visit Scheduled','Site Visit Completed','Negotiation','Booking Confirmed','Converted / Closed Won','Not Interested','Invalid Number','Duplicate Lead','Lost / Closed Lost'];
-export const CLOSED = ['Converted / Closed Won','Lost / Closed Lost','Not Interested','Invalid Number','Duplicate Lead'];
+import { FEEDBACK_STATUSES } from './feedback-statuses';
+export const STATUSES: string[] = [...FEEDBACK_STATUSES];
+export const CLOSED = ['Converted / Closed Won','Lost / Closed Lost','Not Interested','Invalid Number','Invalid no.','Duplicate Lead'];
 export const MODES = ['SINGLE','ROUND_ROBIN','ALL','MANUAL','WEIGHTED','CAPACITY'] as const;
 export const phoneSchema = z.string().trim().max(40).transform((v,ctx)=>{
   const p = parsePhoneNumberFromString(v,'IN');

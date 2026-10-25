@@ -1,6 +1,8 @@
 import { createServer, request as upstreamRequest, type IncomingHttpHeaders } from 'node:http';
 
 export function feedbackPathAllowed(path:string,method:string){
+  if(/^\/f\/[\w-]{22}$/.test(path))return ['GET','HEAD'].includes(method);
+  if(/^\/api\/feedback\/[\w-]{22}$/.test(path))return ['GET','HEAD','POST'].includes(method);
   if(/^\/(?:api\/)?feedback\/[\w.-]{30,100}$/.test(path))return path.startsWith('/api/')?['GET','HEAD','POST'].includes(method):['GET','HEAD'].includes(method);
   return ['GET','HEAD'].includes(method)&&/^\/_next\/static\/[\w./%-]+$/.test(path)&&!path.includes('..')&&!/%2e|%2f|%5c/i.test(path);
 }
