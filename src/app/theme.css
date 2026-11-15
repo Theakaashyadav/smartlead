@@ -51,6 +51,24 @@
 .simple-app .simple-organization > strong { font-size: 13px; font-weight: 650; }
 .simple-app .simple-organization > span { margin-right: auto; color: #8592a4; font-size: 12px; overflow-wrap: anywhere; }
 .simple-app .simple-organization > .btn { min-height: 32px; padding: 6px 11px; font-size: 11px; border: 1px solid #e5ebf2; background: #f8fafc; color: #52667d; }
+.simple-app .simple-test-steps { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: #71869a; font-size: 11px; }
+.simple-app .simple-test-preview { padding: 13px 15px; border: 1px solid #e2eae7; border-radius: 10px; background: #f4faf7; color: #47675d; font-size: 12px; overflow-wrap: anywhere; }
+.simple-app .simple-test-selected { display: grid; gap: 7px; }
+.simple-app .simple-test-selected > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border: 1px solid #e3eaf0; border-radius: 9px; }
+.simple-app .simple-test-selected span { min-width: 0; overflow-wrap: anywhere; }
+.simple-app .simple-test-selected small { display: block; color: #8293a4; margin-top: 3px; }
+.simple-app .simple-test-progress .simple-share-note { display: flex; align-items: center; gap: 9px; }
+.simple-app .simple-test-result { padding: 13px 15px; border: 1px solid #e3eaf0; border-radius: 12px; margin: 12px 0; }
+.simple-app .simple-test-result h3 { overflow-wrap: anywhere; }
+.simple-app .simple-test-result h3 small { display: block; margin-top: 4px; color: #8293a4; font-weight: 400; }
+.simple-app .simple-test-stage { display: flex; align-items: flex-start; gap: 9px; margin-top: 13px; color: #7f8c9b; }
+.simple-app .simple-test-stage > svg { flex-shrink: 0; margin-top: 2px; }
+.simple-app .simple-test-stage > div { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.simple-app .simple-test-stage strong { color: #476176; font-size: 12px; }
+.simple-app .simple-test-stage small, .simple-app .simple-test-stage span, .simple-app .simple-test-stage p { font-size: 11px; }
+.simple-app .simple-test-stage.accepted { color: #178368; }
+.simple-app .simple-test-stage.failed { color: #b54747; }
+.simple-app .simple-test-actions { flex-wrap: wrap; }
 .simple-app .simple-intro {
   position: relative; isolation: isolate; min-height: 292px; margin: 0 0 25px; padding: 39px 42px;
   border: 1px solid #254154; border-radius: 25px; overflow: hidden;

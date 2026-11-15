@@ -266,7 +266,9 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
     const { generateMessageIDV2 } = await import('baileys');
     const messageId = generateMessageIDV2(socket.user?.id);
     if (input.messageId) {
-      const claimed = input.purpose==='LEAD_SENT_NOTIFICATION'
+      const claimed = input.purpose==='EXECUTIVE_LEAD_SENT_NOTIFICATION'
+        ? await db.message.updateMany({where:{id:input.messageId,senderId:this.sender.id,notificationStatus:'PROCESSING',executiveNotificationStatus:'PROCESSING'},data:{executiveNotificationProviderMessageId:providerId(this.sender.id,messageId)}})
+        : input.purpose==='LEAD_SENT_NOTIFICATION'
         ? await db.message.updateMany({where:{id:input.messageId,senderId:this.sender.id,notificationStatus:'PROCESSING'},data:{notificationProviderMessageId:providerId(this.sender.id,messageId)}})
         : await db.message.updateMany({ where: { id: input.messageId, senderId: this.sender.id, status: 'PROCESSING' }, data: { providerMessageId: providerId(this.sender.id, messageId) } });
       if (!claimed.count) throw new AppError(409, 'This notification is no longer pending submission.');

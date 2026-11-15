@@ -14,7 +14,7 @@ import { socketWhatsApp } from './whatsapp-mode';
 import { SocketWhatsAppProvider } from './whatsapp-socket';
 
 export class UncertainDelivery extends Error {}
-export interface SendInput {to:string;body:string;template?:string|null;language?:string;parameters:string[];messageId?:string;purpose?:'LEAD_SENT_NOTIFICATION'}
+export interface SendInput {to:string;body:string;template?:string|null;language?:string;parameters:string[];messageId?:string;purpose?:'LEAD_SENT_NOTIFICATION'|'EXECUTIVE_LEAD_SENT_NOTIFICATION'}
 export interface WhatsAppProvider {
   connect(options?:{interactive?:boolean}):Promise<void>;
   disconnect():Promise<void>;

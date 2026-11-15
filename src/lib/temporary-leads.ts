@@ -134,7 +134,7 @@ export async function purgeCompletedLead(leadId:string,observed?:SourceRow){
     if(!lead||!temporaryLeadStorage(lead.sheet)||lead.writebackStatus!=='SYNCED'||lead.redactedAt)return false;
     if(!sheetAlreadySent(lead.managedSnapshot))return false;
     if(observed&&(!sheetSaysSent(observed.values.sentStatus)||observed.values.status!==(lead.lastFeedback?lead.status:observed.values.status)||(lead.lastFeedback&&observed.values.feedback!==lead.lastFeedback)))return false;
-    if(lead.messages.some(message=>message.uncertain||message.notificationUncertain||['QUEUED','PROCESSING','FAILED'].includes(message.status)||['WAITING','QUEUED','PROCESSING','FAILED'].includes(message.notificationStatus||'')))return false;
+    if(lead.messages.some(message=>message.uncertain||message.notificationUncertain||message.executiveNotificationUncertain||['QUEUED','PROCESSING','FAILED'].includes(message.status)||['WAITING','QUEUED','PROCESSING','FAILED'].includes(message.notificationStatus||'')||['WAITING','QUEUED','PROCESSING','FAILED'].includes(message.executiveNotificationStatus||'')))return false;
     const messageIds=lead.messages.map(message=>message.id);
     const jobs={OR:[{type:{in:['ASSIGN','WRITEBACK']},entityId:lead.id},{type:{in:['SEND','NOTIFY']},entityId:{in:messageIds}}]};
     if(await tx.job.findFirst({where:{...jobs,status:{in:['PENDING','PROCESSING','DEAD']}},select:{id:true}}))return false;

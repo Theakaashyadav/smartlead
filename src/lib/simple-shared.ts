@@ -20,6 +20,9 @@ export function sourceQuestions(headers:string[],cells:string[]):LeadQuestion[]{
   });
 }
 function messageValue(value:string){return value.replace(/[\r\n]+/g,' ').trim();}
+export function leadSentNotificationMessage({leadName,recipientName,phone,executiveUpdated=false}:{leadName:string;recipientName:string;phone?:string;executiveUpdated?:boolean}){
+  return `New lead (${messageValue(leadName)}${phone?`, ${messageValue(phone)}`:''}) shared to (${messageValue(recipientName)})${executiveUpdated?' and executive also updated':''}.`;
+}
 export function messageQuestionLabel(question:string){
   const label=questionLabel(question).replace(/\?+$/,'').trim();
   if(/\bpurpose\b/i.test(label))return 'purpose';

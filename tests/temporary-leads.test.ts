@@ -19,11 +19,11 @@ beforeEach(async()=>{
 });
 afterAll(()=>db.$disconnect());
 
-async function fixture(options:{sent?:boolean;notification?:boolean}={}){
+async function fixture(options:{sent?:boolean;notification?:boolean;executiveNotification?:boolean}={}){
   await db.setting.create({data:{key:'feedback:remoteRequired',value:false}});
   const employee=await db.employee.create({data:{organizationId:'legacy',name:'Aman',phone:'+919876543210',projects:[]}});
   const sender=await db.sender.create({data:{organizationId:'legacy',name:'WhatsApp',provider:'DEMO',status:'CONNECTED'}});
-  const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Enquiries',project:'Meadows',spreadsheetId:'temporary-test',connectionType:'SIMPLE_APPS_SCRIPT',columnMapping:{customerName:'Name',mobile:'Phone'},rule:{create:{mode:'SINGLE',senderId:sender.id,template:DEFAULT_TEMPLATE,enabled:true,notificationPhone:options.notification?'+919876543212':null,recipients:{create:{employeeId:employee.id,position:0}}}}}});
+  const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Enquiries',project:'Meadows',spreadsheetId:'temporary-test',connectionType:'SIMPLE_APPS_SCRIPT',columnMapping:{customerName:'Name',mobile:'Phone'},rule:{create:{mode:'SINGLE',senderId:sender.id,template:DEFAULT_TEMPLATE,enabled:true,notificationPhone:options.notification?'+919876543212':null,executiveNotificationPhone:options.executiveNotification?'+919876543213':null,recipients:{create:{employeeId:employee.id,position:0}}}}}});
   const rows:SourceRow[]=[{stableId:'source-1',row:2,values:{customerName:'Private Customer',mobile:'+919876543211',project:'Meadows',sentStatus:options.sent?'Sent':'',sharedTo:options.sent?'Aman':'',status:'',feedback:''},questions:[{question:'What is your purpose?',answer:'self-use'}]}];
   const controls={fail:false};
   const provider:SheetProvider={read:vi.fn(async()=>structuredClone(rows)),write:vi.fn(async(_sheet,id,_metadata,values)=>{
@@ -34,7 +34,7 @@ async function fixture(options:{sent?:boolean;notification?:boolean}={}){
   vi.spyOn(google,'sheetProvider').mockReturnValue(provider);
   return {sheet,employee,sender,rows,provider,controls};
 }
-async function sentFixture(options:{notification?:boolean}={}){
+async function sentFixture(options:{notification?:boolean;executiveNotification?:boolean}={}){
   const f=await fixture(options);await synchronizeSheet(f.sheet.id,f.provider);
   const lead=await db.lead.findFirstOrThrow({where:{sheetId:f.sheet.id}});
   await processJob((await db.job.findFirstOrThrow({where:{type:'ASSIGN',entityId:lead.id}})).id);
@@ -75,8 +75,8 @@ describe('temporary lead processing',()=>{
     expect(await db.message.count()).toBe(1);expect(await db.feedbackLink.count()).toBe(0);expect(await purgeCompletedLead(f.lead.id)).toBe(false);
     f.controls.fail=false;await updateLeadSheetNow(f.lead.id);expect(await db.lead.count()).toBe(0);expect(await db.feedbackLink.count()).toBe(1);
   });
-  it('waits for sent notifications before removing their temporary message records',async()=>{
-    const f=await sentFixture({notification:true});await updateLeadSheetNow(f.lead.id);
+  it.each([{notification:true},{executiveNotification:true},{notification:true,executiveNotification:true}])('waits for sent notifications before removing their temporary message records (%j)',async options=>{
+    const f=await sentFixture(options);await updateLeadSheetNow(f.lead.id);
     expect(await db.lead.count()).toBe(1);const job=await db.job.findFirstOrThrow({where:{type:'NOTIFY',status:'PENDING'}});
     await processJob(job.id);expect(await db.lead.count()).toBe(0);expect(await db.message.count()).toBe(0);expect(await db.feedbackLink.count()).toBe(1);
   });

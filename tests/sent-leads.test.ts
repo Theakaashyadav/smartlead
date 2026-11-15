@@ -67,7 +67,7 @@ describe('restart from current sheet status when saving recipients',()=>{
   await dispatchMessage(resend.id,f.whatsapp,f.source);await writebackLead(f.lead.id,f.source);await dispatchLeadSentNotification(resend.id,f.whatsapp);
   expect(f.send).toHaveBeenCalledTimes(3);
   expect(f.send).toHaveBeenNthCalledWith(2,expect.objectContaining({to:'+919800000004',body:expect.stringContaining('Hello, You got a new lead')}));
-  expect(f.send).toHaveBeenNthCalledWith(3,expect.objectContaining({to:'+919876543218',body:'New Lead Sent to (Updated recipient)'}));
+  expect(f.send).toHaveBeenNthCalledWith(3,expect.objectContaining({to:'+919876543218',body:'New lead (Customer A, +919800000002) shared to (Updated recipient).'}));
   expect(f.rows[0].values).toMatchObject({sentStatus:'Sent',sharedTo:'Updated recipient'});
   await databaseTransaction(tx=>queueDeliveryWriteback(tx,old,'late-old-receipt'));
   await writebackLead(f.lead.id,f.source);await dispatchLeadSentNotification(old.id,f.whatsapp);

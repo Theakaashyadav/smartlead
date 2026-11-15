@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '@/lib/db';
 import { clearTestModels } from './database-fixture';
-import { drainJobs, processJob, scheduleJobs, synchronizeSheet } from '@/lib/engine';
+import { drainJobs, processJob, scheduleJobs, synchronizeSheet, writebackLead } from '@/lib/engine';
 import { sheetPollSeconds } from '@/lib/automation-policy';
 import { DemoWhatsAppProvider } from '@/lib/whatsapp';
 import { DemoSheetsProvider, type SheetProvider, type SourceRow } from '@/lib/google';
@@ -119,5 +119,18 @@ describe('fast public-sheet lead delivery',()=>{
     const second=drainJobs(1,250,undefined,()=>true,['SEND']);
     await vi.waitFor(()=>expect(times).toHaveLength(2));await second;
     expect(times[1]-times[0]).toBeGreaterThanOrEqual(250);
+  });
+  it('spaces executive and administrator notifications inside the same job',async()=>{
+    const f=await fixture();f.rows.splice(1);
+    await db.distributionRule.update({where:{sheetId:f.sheet.id},data:{executiveNotificationPhone:'+919876543217',notificationPhone:'+919876543218'}});
+    await synchronizeSheet(f.sheet.id,f.provider,{refreshQueued:false});await drainJobs(10,0,undefined,()=>true,['ASSIGN','SEND']);
+    const lead=await db.lead.findFirstOrThrow({where:{sheetId:f.sheet.id}});await writebackLead(lead.id,f.provider);
+    vi.useFakeTimers({toFake:['Date','setTimeout','clearTimeout']});
+    const submissions:Array<{to:string;at:number}>=[];const send=DemoWhatsAppProvider.prototype.sendMessage;
+    vi.spyOn(DemoWhatsAppProvider.prototype,'sendMessage').mockImplementation(async function(this:DemoWhatsAppProvider,input){submissions.push({to:input.to,at:Date.now()});return send.call(this,input);});
+    const pending=drainJobs(1,250,undefined,()=>true,['NOTIFY']);
+    await vi.waitFor(()=>expect(submissions).toHaveLength(2));await pending;
+    expect(submissions.map(item=>item.to)).toEqual(['+919876543217','+919876543218']);
+    expect(submissions[1].at-submissions[0].at).toBeGreaterThanOrEqual(250);
   });
 });

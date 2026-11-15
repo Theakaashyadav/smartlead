@@ -164,9 +164,9 @@ describe('WhatsApp QR login without Chromium',()=>{
     for(const message of data.messages)await dispatchMessage(message.id);
     expect(await db.lead.count({where:{sheetId:data.sheet.id}})).toBe(2);expect(f.socket.sendMessage).toHaveBeenCalledTimes(2);
   });
-  it('sends administrator notifications with a separate receipt after sheet writeback',async()=>{
-    const f=await linked();const data=await source(f.sender.id);const notificationPhone='+919876543218';
-    await db.distributionRule.update({where:{sheetId:data.sheet.id},data:{notificationPhone}});
+  it('sends executive then administrator notifications with separate receipts after sheet writeback',async()=>{
+    const f=await linked();const data=await source(f.sender.id);const notificationPhone='+919876543218',executiveNotificationPhone='+919876543217';
+    await db.distributionRule.update({where:{sheetId:data.sheet.id},data:{notificationPhone,executiveNotificationPhone}});
     for(const pending of data.messages){
       await dispatchMessage(pending.id);
       const sent=await db.message.findUniqueOrThrow({where:{id:pending.id}});
@@ -174,15 +174,19 @@ describe('WhatsApp QR login without Chromium',()=>{
       await writebackLead(sent.leadId,{read:vi.fn(),write:vi.fn(async()=>{})});
       await dispatchLeadSentNotification(sent.id);
       const notified=await db.message.findUniqueOrThrow({where:{id:sent.id}});
-      expect(notified).toMatchObject({status:'SUBMITTED',providerMessageId:sent.providerMessageId,notificationStatus:'SUBMITTED',notificationPhone});
+      expect(notified).toMatchObject({status:'SUBMITTED',providerMessageId:sent.providerMessageId,notificationStatus:'SUBMITTED',notificationPhone,executiveNotificationPhone,executiveNotificationStatus:'SUBMITTED'});
       expect(notified.notificationProviderMessageId).toBeTruthy();
       expect(notified.notificationProviderMessageId).not.toBe(sent.providerMessageId);
+      expect(notified.executiveNotificationProviderMessageId).toBeTruthy();
+      expect(new Set([sent.providerMessageId,notified.notificationProviderMessageId,notified.executiveNotificationProviderMessageId]).size).toBe(3);
     }
+    const executiveNotifications=f.socket.sendMessage.mock.calls.filter((call:any[])=>call[0]===executiveNotificationPhone.slice(1)+'@s.whatsapp.net');
+    expect(executiveNotifications.map((call:any[])=>call[1].text)).toEqual(['New lead (Lead one) shared to (Employee 1).','New lead (Lead two) shared to (Employee 2).']);
     const notifications=f.socket.sendMessage.mock.calls.filter((call:any[])=>call[0]===notificationPhone.slice(1)+'@s.whatsapp.net');
-    expect(notifications.map((call:any[])=>call[1].text)).toEqual(['New Lead Sent to (Employee 1)','New Lead Sent to (Employee 2)']);
-    expect(f.socket.sendMessage).toHaveBeenCalledTimes(4);
+    expect(notifications.map((call:any[])=>call[1].text)).toEqual(['New lead (Lead one, +919800000001) shared to (Employee 1) and executive also updated.','New lead (Lead two, +919800000002) shared to (Employee 2) and executive also updated.']);
+    expect(f.socket.sendMessage).toHaveBeenCalledTimes(6);
     for(const pending of data.messages)await dispatchLeadSentNotification(pending.id);
-    expect(f.socket.sendMessage).toHaveBeenCalledTimes(4);
+    expect(f.socket.sendMessage).toHaveBeenCalledTimes(6);
     expect(await db.message.count({where:{status:'SUBMITTED'}})).toBe(2);
   });
   it('holds uncertain sends and reconciles only an exact reserved message ID, recipient and body',async()=>{

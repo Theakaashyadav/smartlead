@@ -18,10 +18,10 @@ beforeEach(async()=>{
 });
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 afterAll(()=>db.$disconnect());
-async function fixture(notificationPhone?:string){
+async function fixture(notificationPhone?:string,executiveNotificationPhone?:string){
   const sender=await db.sender.create({data:{organizationId:'legacy',name:'Test WhatsApp',provider:'DEMO',status:'CONNECTED'}});
   const recipients=await Promise.all(['Original recipient','New recipient'].map((name,i)=>db.employee.create({data:{organizationId:'legacy',name,phone:`+91987654321${i}`,projects:[]}})));
-  const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Public leads',project:'Sales',spreadsheetId:'public-delivery-test-sheet',connectionType:'SIMPLE_PUBLIC',columnMapping:{customerName:'Name',mobile:'Phone'},rule:{create:{senderId:sender.id,template:'New lead',enabled:true,notificationPhone,recipients:{create:recipients.map((e,position)=>({employeeId:e.id,position}))}}}}});
+  const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Public leads',project:'Sales',spreadsheetId:'public-delivery-test-sheet',connectionType:'SIMPLE_PUBLIC',columnMapping:{customerName:'Name',mobile:'Phone'},rule:{create:{senderId:sender.id,template:'New lead',enabled:true,notificationPhone,executiveNotificationPhone,recipients:{create:recipients.map((e,position)=>({employeeId:e.id,position}))}}}}});
   const lead=await db.lead.create({data:{sheetId:sheet.id,stableSourceId:'source-a',sourceRow:2,sourceFingerprint:'test',customerName:'Customer',mobile:'+919800000000',project:'Sales'}});
   await assignLead(lead.id);
   const message=await db.message.findFirstOrThrow({where:{leadId:lead.id}});
@@ -46,7 +46,7 @@ describe('administrator lead-sent notifications',()=>{
     expect(await db.job.count({where:{type:'NOTIFY',entityId:f.message.id}})).toBe(1);
     await Promise.all([dispatchLeadSentNotification(f.message.id,f.provider),dispatchLeadSentNotification(f.message.id,f.provider)]);
     expect(f.send).toHaveBeenCalledTimes(2);
-    expect(f.send.mock.calls[1][0]).toMatchObject({to:adminPhone,body:'New Lead Sent to (Original recipient)'});
+    expect(f.send.mock.calls[1][0]).toMatchObject({to:adminPhone,body:'New lead (Customer, +919800000000) shared to (Original recipient).'});
     await writebackLead(f.lead.id,f.sheetProvider);
     await dispatchLeadSentNotification(f.message.id,f.provider);
     expect(f.send).toHaveBeenCalledTimes(2);
@@ -111,6 +111,89 @@ describe('administrator lead-sent notifications',()=>{
     await dispatchLeadSentNotification(f.message.id,f.provider);
     expect(f.send).toHaveBeenCalledTimes(3);
     expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'SUBMITTED',notificationAttemptCount:2,notificationFailureReason:null});
+  });
+});
+
+describe('executive lead-sent notifications',()=>{
+  const adminPhone='+919876543218',executivePhone='+919876543217';
+  it('updates the sheet, informs the executive without the lead phone, then confirms both to the administrator once',async()=>{
+    const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);
+    await dispatchLeadSentNotification(f.message.id,f.provider);expect(f.send).toHaveBeenCalledOnce();
+    await writebackLead(f.lead.id,f.sheetProvider);
+    let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+    f.send.mockImplementationOnce(async()=>{await gate;return {id:'executive-receipt',status:'SUBMITTED'};});
+    const pending=dispatchLeadSentNotification(f.message.id,f.provider);
+    try{
+      await vi.waitFor(()=>expect(f.send).toHaveBeenCalledTimes(2));
+      expect(f.send.mock.calls[1][0]).toMatchObject({to:executivePhone,body:'New lead (Customer) shared to (Original recipient).',purpose:'EXECUTIVE_LEAD_SENT_NOTIFICATION'});
+      expect(f.send.mock.calls[1][0].body).not.toContain(f.lead.mobile);
+      await dispatchLeadSentNotification(f.message.id,f.provider);expect(f.send).toHaveBeenCalledTimes(2);
+    }finally{release();await pending;}
+    expect(f.send.mock.calls[2][0]).toMatchObject({to:adminPhone,body:'New lead (Customer, +919800000000) shared to (Original recipient) and executive also updated.',purpose:'LEAD_SENT_NOTIFICATION'});
+    await dispatchLeadSentNotification(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    expect(f.send).toHaveBeenCalledTimes(3);expect(await db.message.count({where:{leadId:f.lead.id}})).toBe(1);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'SUBMITTED',executiveNotificationStatus:'SUBMITTED',executiveNotificationProviderMessageId:'executive-receipt'});
+  });
+  it('supports executive notifications when the administrator number is blank',async()=>{
+    const f=await fixture(undefined,executivePhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    await dispatchLeadSentNotification(f.message.id,f.provider);await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledTimes(2);expect(f.send.mock.calls[1][0]).toMatchObject({to:executivePhone,body:'New lead (Customer) shared to (Original recipient).'});
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({notificationStatus:'SUBMITTED',executiveNotificationStatus:'SUBMITTED'});
+  });
+  it('holds the administrator alert until a rejected executive alert succeeds',async()=>{
+    const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    f.send.mockRejectedValueOnce(new AppError(400,'Executive notification rejected'));
+    await expect(dispatchLeadSentNotification(f.message.id,f.provider)).rejects.toThrow('Executive notification rejected');
+    expect(f.send).toHaveBeenCalledTimes(2);expect(f.send.mock.calls[1][0].to).toBe(executivePhone);
+    await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send.mock.calls.slice(1).map(([input])=>input.to)).toEqual([executivePhone,executivePhone,adminPhone]);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({notificationStatus:'SUBMITTED',executiveNotificationStatus:'SUBMITTED',executiveNotificationAttemptCount:2,executiveNotificationFailureReason:null});
+  });
+  it('retries only the administrator after the executive was informed',async()=>{
+    const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    f.send.mockResolvedValueOnce({id:'executive-success',status:'SUBMITTED'}).mockRejectedValueOnce(new AppError(400,'Administrator notification rejected'));
+    await expect(dispatchLeadSentNotification(f.message.id,f.provider)).rejects.toThrow('Administrator notification rejected');
+    await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send.mock.calls.slice(1).map(([input])=>input.to)).toEqual([executivePhone,adminPhone,adminPhone]);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({executiveNotificationAttemptCount:1,executiveNotificationProviderMessageId:'executive-success',notificationStatus:'SUBMITTED'});
+  });
+  it('keeps the executive receipt when a competing dispatcher claims a rejected administrator retry from an older snapshot',async()=>{
+    const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    let snapshotRead!:()=>void,release!:()=>void;
+    const ready=new Promise<void>(resolve=>{snapshotRead=resolve;});const gate=new Promise<void>(resolve=>{release=resolve;});
+    const find=db.message.findUniqueOrThrow.bind(db.message);
+    vi.spyOn(db.message,'findUniqueOrThrow').mockImplementationOnce((args:any)=>(async()=>{const snapshot=await find(args);snapshotRead();await gate;return snapshot;})() as never);
+    const delayed=dispatchLeadSentNotification(f.message.id,f.provider);
+    try{
+      await ready;
+      f.send.mockResolvedValueOnce({id:'executive-success',status:'SUBMITTED'}).mockRejectedValueOnce(new AppError(400,'Administrator retry needed'));
+      await expect(dispatchLeadSentNotification(f.message.id,f.provider)).rejects.toThrow('Administrator retry needed');
+    }finally{release();await delayed;}
+    expect(f.send.mock.calls.slice(1).map(([input])=>input.to)).toEqual([executivePhone,adminPhone,adminPhone]);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({executiveNotificationAttemptCount:1,executiveNotificationStatus:'SUBMITTED',notificationStatus:'SUBMITTED'});
+  });
+  it('holds uncertain executive submissions without sending a misleading administrator confirmation',async()=>{
+    const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    f.send.mockRejectedValueOnce(new UncertainDelivery('Unknown executive outcome'));
+    await dispatchLeadSentNotification(f.message.id,f.provider);await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledTimes(2);expect(f.send.mock.calls[1][0].to).toBe(executivePhone);
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',uncertain:false,notificationStatus:'FAILED',executiveNotificationStatus:'FAILED',executiveNotificationUncertain:true});
+  });
+  it('retains both notification numbers and the recipient name captured when the lead was submitted',async()=>{
+    const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);
+    await db.distributionRule.update({where:{sheetId:f.lead.sheetId},data:{notificationPhone:'+919876543216',executiveNotificationPhone:'+919876543215'}});
+    await db.employee.update({where:{id:f.recipients[0].id},data:{name:'Renamed recipient'}});
+    await writebackLead(f.lead.id,f.sheetProvider);await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send.mock.calls[1][0]).toMatchObject({to:executivePhone,body:'New lead (Customer) shared to (Original recipient).'});
+    expect(f.send.mock.calls[2][0]).toMatchObject({to:adminPhone,body:'New lead (Customer, +919800000000) shared to (Original recipient) and executive also updated.'});
+  });
+  it('holds an executive submission interrupted by a worker restart',async()=>{
+    const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
+    const lastAttempt=new Date(Date.now()-10*60000);
+    await db.message.update({where:{id:f.message.id},data:{notificationStatus:'PROCESSING',notificationLastAttemptAt:lastAttempt,executiveNotificationStatus:'PROCESSING',executiveNotificationLastAttemptAt:lastAttempt}});
+    await scheduleJobs(true);await dispatchLeadSentNotification(f.message.id,f.provider);
+    expect(f.send).toHaveBeenCalledOnce();
+    expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({notificationStatus:'FAILED',executiveNotificationStatus:'FAILED',executiveNotificationUncertain:true});
   });
 });
 

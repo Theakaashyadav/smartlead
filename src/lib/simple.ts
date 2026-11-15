@@ -14,6 +14,7 @@ import { requireWhatsAppWorker, workerHeartbeatFresh, workerOfflineMessage } fro
 import { SIMPLE_POLL_SECONDS, sheetPollSeconds } from './automation-policy';
 import { invalidateTemporarySource, temporaryLeadStorage } from './temporary-leads';
 import { checkAppsScriptSetup, connectAppsScriptSheet, startAppsScriptSetup } from './apps-script';
+import { createTestLeadFlow, getTestLeadFlow } from './test-lead-flow';
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
 const sheetWhere={connectionType:{startsWith:'SIMPLE_'}};
@@ -27,6 +28,8 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   const organizationId=user.organizationId;
   const route=path.join('/');
   const input=async()=>{if(Number(request.headers.get('content-length')||0)>100000)throw new AppError(413,'Request is too large');return request.json();};
+  if(route==='test-flow'&&method==='POST')return createTestLeadFlow(organizationId,await input());
+  if(path.length===2&&path[0]==='test-flow'&&method==='GET')return getTestLeadFlow(organizationId,path[1]);
   if(route==='state'&&method==='GET'){
     const [account,sheets,worker,organization]=await Promise.all([simpleSender(organizationId),db.sheet.findMany({where:{...sheetWhere,organizationId},orderBy:{createdAt:'asc'},include:{rule:{include:{recipients:{orderBy:{position:'asc'},include:{employee:{select:{name:true,phone:true}}}}}},_count:{select:{leads:true}}}}),db.setting.findUnique({where:{key:'simple:worker'}}),db.organization.findUniqueOrThrow({where:{id:organizationId},select:{id:true,name:true}})]);
     const summaries=await Promise.all(sheets.map(async s=>{
@@ -41,7 +44,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
       const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
       const sourceSummary=temporaryLeadStorage(s)?s.sourceSummary as {total?:number;sent?:number}|null:null;
-      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:sourceSummary?.total??s._count.leads,enabled:s.rule?.enabled||false,notificationPhone:s.rule?.notificationPhone||null,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:sourceSummary?.sent??total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},sentNotificationError:notificationFailure?.notificationFailureReason||null,writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
+      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:sourceSummary?.total??s._count.leads,enabled:s.rule?.enabled||false,executiveNotificationPhone:s.rule?.executiveNotificationPhone||null,notificationPhone:s.rule?.notificationPhone||null,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:sourceSummary?.sent??total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},sentNotificationError:notificationFailure?.notificationFailureReason||null,writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
     let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
@@ -172,9 +175,11 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='recipients'&&method==='PUT'){
     const sheet=await sheetById(path[1],organizationId);
-    const {recipients,notificationPhone}=z.object({recipients:z.array(recipientSchema).min(1,'Select at least one person.').max(100),notificationPhone:notificationPhoneSchema}).parse(await input());
+    const {recipients,executiveNotificationPhone,notificationPhone}=z.object({recipients:z.array(recipientSchema).min(1,'Select at least one person.').max(100),executiveNotificationPhone:notificationPhoneSchema,notificationPhone:notificationPhoneSchema}).parse(await input());
     if(new Set(recipients.map(r=>r.phone)).size!==recipients.length)throw new AppError(400,'Select each phone number only once.');
+    const effectiveExecutiveNotificationPhone=executiveNotificationPhone===undefined?sheet.rule?.executiveNotificationPhone:executiveNotificationPhone;
     const effectiveNotificationPhone=notificationPhone===undefined?sheet.rule?.notificationPhone:notificationPhone;
+    if(effectiveExecutiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveExecutiveNotificationPhone))throw new AppError(400,'Enter the executive notification number separately from the lead recipients.');
     if(effectiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveNotificationPhone))throw new AppError(400,'Enter your notification number separately from the lead recipients.');
     const account=await simpleSender(organizationId);if(account?.status!=='CONNECTED')throw new AppError(409,'Connect WhatsApp before starting.');
     const source=sourceProvider||sheetProvider(sheet);
@@ -185,7 +190,7 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       const employees=[];
       for(const {name,phone} of recipients)employees.push(await tx.employee.upsert({where:{organizationId_phone:{organizationId,phone}},create:{name,phone,organizationId,projects:[],dailyLimit:1000,capacity:10000},update:{active:true,name}}));
       await tx.ruleRecipient.deleteMany({where:{ruleId:sheet.rule!.id}});
-      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'BATCH',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(notificationPhone!==undefined?{notificationPhone:notificationPhone||null}:{}),cursor:0,recipients:{create:employees.map((e,position)=>({employeeId:e.id,position,weight:recipients[position].leadCount}))}}});
+      await tx.distributionRule.update({where:{id:sheet.rule!.id},data:{mode:'BATCH',senderId:account.id,enabled:true,template:SIMPLE_TEMPLATE,...(executiveNotificationPhone!==undefined?{executiveNotificationPhone:executiveNotificationPhone||null}:{}),...(notificationPhone!==undefined?{notificationPhone:notificationPhone||null}:{}),cursor:0,recipients:{create:employees.map((e,position)=>({employeeId:e.id,position,weight:recipients[position].leadCount}))}}});
       return requeued;
     });
     await audit(user.id,'START_AUTOMATIC_SENDING','sheet',sheet.id);return {started:true,rechecked:rows.length,requeued};

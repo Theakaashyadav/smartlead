@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, ArrowRight, Check, FileSpreadsheet, LogOut, MessageCircle, Pause, Play, Plus, RefreshCw, Search, Trash2, Users, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, FileSpreadsheet, FlaskConical, LogOut, MessageCircle, Pause, Play, Plus, RefreshCw, Search, Trash2, Users, X } from 'lucide-react';
 import { api, Button, Field, Modal, Select } from './ui';
 import { type WhatsAppContact } from '@/lib/simple-shared';
 import { WhatsAppBrowserLogin } from './whatsapp-browser-login';
@@ -11,8 +11,9 @@ import { WhatsAppBackgroundLogin } from './whatsapp-background-login';
 import { PhoneLoginSettings } from './phone-login-settings';
 import { ConnectSheet } from './connect-sheet';
 import { ConnectionArt } from './connection-art';
+import { TestLeadFlow } from './test-lead-flow';
 
-type SheetSummary={id:string;name:string;project?:string;worksheetName:string;googleAuthorized?:boolean;appsScriptConnected?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;notificationPhone?:string|null;recipients:Array<WhatsAppContact&{leadCount?:number}>;delivery?:{submitted:number;queued:number;failed:number;error:string|null};sentNotificationError?:string|null;writeback?:{pending:number;failed:number;error:string|null}};
+type SheetSummary={id:string;name:string;project?:string;worksheetName:string;googleAuthorized?:boolean;appsScriptConnected?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;executiveNotificationPhone?:string|null;notificationPhone?:string|null;recipients:Array<WhatsAppContact&{leadCount?:number}>;delivery?:{submitted:number;queued:number;failed:number;error:string|null};sentNotificationError?:string|null;writeback?:{pending:number;failed:number;error:string|null}};
 type Account={id:string;phone:string|null;status:string;qrCode:string|null;lastError:string|null};
 type State={user:{name:string;email:string|null;phone?:string|null;pinEnabled?:boolean;twoFactor?:boolean};organization:{id:string;name:string};account:Account|null;sheets:SheetSummary[];workerRunning:boolean;workerMessage?:string|null;whatsappLoginMode?:'background'|'browser'|'qr';feedbackError?:string|null;publicSheetWritebackAvailable?:boolean};
 const message=(e:unknown)=>e instanceof Error?e.message:'Please try again.';
@@ -23,6 +24,7 @@ export function SimpleApp(){
   const [connectOpen,setConnectOpen]=useState(false);const [recipientSheet,setRecipientSheet]=useState<string|null>(null);
   const [scriptSheet,setScriptSheet]=useState<SheetSummary|null>(null);const [connectionNotice,setConnectionNotice]=useState('');
   const [loginSettings,setLoginSettings]=useState(false);
+  const [testFlowOpen,setTestFlowOpen]=useState(false);
   const [deletingSheet,setDeletingSheet]=useState<SheetSummary|null>(null);
   const [projectSheet,setProjectSheet]=useState<SheetSummary|null>(null);
   const closeProject=useCallback(()=>setProjectSheet(null),[]);
@@ -38,7 +40,7 @@ export function SimpleApp(){
   return <div className="simple-app">
     <header className="simple-header"><Link className="simple-brand" href="/dashboard"><span><ArrowRight size={21}/></span>SmartLead</Link><nav aria-label="Main navigation"><Link href="/dashboard" aria-current={section==='dashboard'?'page':undefined}>Dashboard</Link><Link href="/sheets" aria-current={section==='sheets'?'page':undefined}>Sheets</Link><Link href="/whatsapp" aria-current={section==='whatsapp'?'page':undefined}>WhatsApp</Link></nav><Button variant="ghost" aria-label="Sign out" onClick={async()=>{await api('auth/logout','POST');window.location.assign('/login');}}><LogOut size={17}/><span>Sign out</span></Button></header>
     <main className="simple-main">
-      {state&&<div className="simple-organization" aria-label="Current organisation"><strong>{state.organization.name}</strong><span>{state.user.name} · {state.user.phone?.replace(/^\+91(?=\d{10}$)/,'')||state.user.email}</span><Button variant="ghost" onClick={()=>setLoginSettings(true)}>Login & PIN</Button></div>}
+      {state&&<div className="simple-organization" aria-label="Current organisation"><strong>{state.organization.name}</strong><span>{state.user.name} · {state.user.phone?.replace(/^\+91(?=\d{10}$)/,'')||state.user.email}</span><Button onClick={()=>setTestFlowOpen(true)}><FlaskConical size={15}/>Test lead flow</Button><Button variant="ghost" onClick={()=>setLoginSettings(true)}>Login & PIN</Button></div>}
       {state&&loginSettings&&<PhoneLoginSettings user={state.user} onClose={()=>setLoginSettings(false)} onSaved={reload}/>}
       {error&&<div role="alert" className="alert error">{error}<button onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
       {connectionNotice&&<p role="status" className="alert info">{connectionNotice}</p>}
@@ -63,6 +65,7 @@ export function SimpleApp(){
     {deletingSheet&&<DeleteSheet sheet={deletingSheet} onClose={closeDelete} onDeleted={()=>{setState(current=>current?{...current,sheets:current.sheets.filter(sheet=>sheet.id!==deletingSheet.id)}:current);if(recipientSheet===deletingSheet.id)setRecipientSheet(null);setDeletingSheet(null);void reload().catch(e=>setError(message(e)));}}/>}
     {currentSheet&&<RecipientPicker sheet={currentSheet} connected={connected} onClose={closeRecipients} onSaved={async()=>{setRecipientSheet(null);await reload();}}/>}
     {projectSheet&&<ProjectName sheet={projectSheet} onClose={closeProject} onSaved={async()=>{setProjectSheet(null);await reload();}}/>}
+    {state&&testFlowOpen&&<TestLeadFlow organizationId={state.organization.id} connected={connected} workerRunning={state.workerRunning} workerMessage={state.workerMessage} onClose={()=>setTestFlowOpen(false)}/>}
   </div>;
 }
 
@@ -71,7 +74,8 @@ function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onScri
     <div className="simple-sheet-top"><div className="simple-card-icon sheets"><FileSpreadsheet size={24}/></div><div className="simple-sheet-title"><h2>{sheet.name}</h2><p>{sheet.worksheetName}</p></div><span className={`simple-status ${sheet.enabled&&connected?'on':''}`}>{sheet.enabled?(sheet.delivery?.failed?'Some sends need checking':connected?'Sending automatically':'Waiting for WhatsApp'):sheet.recipients.length?'Paused':'Choose recipients'}</span></div>
     <div className="simple-sheet-people"><Users size={17}/><span>{sheet.recipients.length?sheet.recipients.map(p=>`${p.name} (${p.leadCount||1} ${(p.leadCount||1)===1?'lead':'leads'})`).join(' → '):'No recipients selected'}</span>{sheet.recipients.length>1&&<span className="muted">→ repeat</span>}</div>
     <div className="row between" style={{flexWrap:'wrap'}}><span style={{overflowWrap:'anywhere',minWidth:0}}>Project: <strong>{sheet.project||sheet.name}</strong></span><Button disabled={busy} onClick={()=>onProject(sheet)}>Edit project</Button></div>
-    {sheet.notificationPhone&&<p className="muted">Your sent notifications go to {sheet.notificationPhone}.</p>}
+    {sheet.executiveNotificationPhone&&<p className="muted">Executive lead notifications go to {sheet.executiveNotificationPhone}.</p>}
+    {sheet.notificationPhone&&<p className="muted">Your sent notifications go to {sheet.notificationPhone}{sheet.executiveNotificationPhone?' after the executive is notified':''}.</p>}
     {sheet.lastSyncError&&<p className="alert error">{sheet.lastSyncError}</p>}
     {sheet.delivery&&<p className="muted">{sheet.delivery.submitted} submitted to WhatsApp · {sheet.delivery.queued} queued{sheet.delivery.failed?` · ${sheet.delivery.failed} need checking`:""}</p>}
     {sheet.delivery?.error&&<p role="alert" className="alert error">{sheet.delivery.error}</p>}
@@ -115,8 +119,9 @@ function DeleteSheet({sheet,onClose,onDeleted}:{sheet:SheetSummary;onClose:()=>v
 function RecipientPicker({sheet,connected,onClose,onSaved}:{sheet:SheetSummary;connected:boolean;onClose:()=>void;onSaved:()=>Promise<void>}){
   const [contacts,setContacts]=useState<WhatsAppContact[]>([]);
   const [selected,setSelected]=useState<Array<WhatsAppContact&{leadCount:number|''}>>(()=>sheet.recipients.map(p=>({...p,leadCount:p.leadCount||1})));
+  const [executiveNotificationPhone,setExecutiveNotificationPhone]=useState(sheet.executiveNotificationPhone||'');
   const [notificationPhone,setNotificationPhone]=useState(sheet.notificationPhone||'');
-  const [step,setStep]=useState<'recipients'|'notifications'>('recipients');
+  const [step,setStep]=useState<'recipients'|'executive'|'notifications'>('recipients');
   const [search,setSearch]=useState('');const [phone,setPhone]=useState('');const [name,setName]=useState('');const [busy,setBusy]=useState(false);const [loading,setLoading]=useState(true);const [error,setError]=useState('');
   useEffect(()=>{
     if(!connected){setLoading(false);return;}
@@ -132,9 +137,9 @@ function RecipientPicker({sheet,connected,onClose,onSaved}:{sheet:SheetSummary;c
   },[connected]);
   function toggle(person:WhatsAppContact){setSelected(s=>s.some(p=>p.phone===person.phone)?s.filter(p=>p.phone!==person.phone):[...s,{...person,leadCount:1}]);}
   function addNumber(){const value=phone.trim();if(!/^\+?[\d\s()-]{7,25}$/.test(value)){setError('Enter a valid phone number, including country code.');return;}const digits=value.replace(/\D/g,'');const number=value.startsWith('+')?`+${digits}`:digits.length===10?`+91${digits}`:`+${digits}`;if(selected.some(p=>p.phone===number)){setError('This number is already selected.');return;}const person={name:name.trim()||contacts.find(c=>c.phone===number)?.name||number,phone:number,leadCount:1};setSelected(s=>[...s,person]);setPhone('');setName('');setError('');}
-  async function save(e:React.FormEvent){e.preventDefault();setError('');if(step==='recipients'){setStep('notifications');return;}setBusy(true);try{await api(`simple/sheets/${sheet.id}/recipients`,'PUT',{recipients:selected.map(({name,phone,leadCount})=>({name,phone,leadCount:Number(leadCount)})),notificationPhone:notificationPhone.trim()||null});await onSaved();}catch(e){setError(message(e));}finally{setBusy(false);}}
+  async function save(e:React.FormEvent){e.preventDefault();setError('');if(step==='recipients'){setStep('executive');return;}if(step==='executive'){setStep('notifications');return;}setBusy(true);try{await api(`simple/sheets/${sheet.id}/recipients`,'PUT',{recipients:selected.map(({name,phone,leadCount})=>({name,phone,leadCount:Number(leadCount)})),executiveNotificationPhone:executiveNotificationPhone.trim()||null,notificationPhone:notificationPhone.trim()||null});await onSaved();}catch(e){setError(message(e));}finally{setBusy(false);}}
   const people=[...contacts,...selected.filter(s=>!contacts.some(c=>c.phone===s.phone))].filter(c=>`${c.name} ${c.phone}`.toLowerCase().includes(search.toLowerCase()));
-  return <Modal title={step==='recipients'?'Who should receive these leads?':'Where should sent notifications go?'} description={`${sheet.name} · ${sheet.worksheetName}`} onClose={busy?()=>{}:onClose}>
+  return <Modal title={step==='recipients'?'Who should receive these leads?':step==='executive'?'Send lead notifications to an executive?':'Where should your sent notifications go?'} description={`${sheet.name} · ${sheet.worksheetName}`} onClose={busy?()=>{}:onClose}>
     {!connected?<div className="simple-modal-empty"><MessageCircle size={36}/><h3>Connect WhatsApp first</h3><p>Your WhatsApp contacts will appear here after you link your account.</p><Link href="/whatsapp" className="btn primary" onClick={onClose}>Connect WhatsApp<ArrowRight size={16}/></Link></div>:<form className="simple-form" onSubmit={save}>
       {error&&<div role="alert" className="alert error">{error}</div>}
       {step==='recipients'?<>
@@ -149,13 +154,18 @@ function RecipientPicker({sheet,connected,onClose,onSaved}:{sheet:SheetSummary;c
       }):<p>{search?'No matching contacts. Add the number below.':'Your contacts will appear here. You can also add a number below.'}</p>}</div>
       <div className="simple-add-number"><h3>Number not listed? Add it here.</h3><div><input aria-label="Recipient name" placeholder="Name (optional)" value={name} maxLength={100} onChange={e=>setName(e.target.value)}/><input aria-label="Recipient phone number" placeholder="+91 phone number" type="tel" value={phone} onChange={e=>setPhone(e.target.value)}/><Button type="button" onClick={addNumber} disabled={!phone.trim()}><Plus size={16}/>Add</Button></div><small>A new conversation starts automatically when their first lead is sent.</small></div>
       {selected.length>0&&<div className="simple-selected-order"><strong>{selected.length} selected</strong><p>{selected.map(p=>`${p.name} (${p.leadCount||'…'} ${p.leadCount===1?'lead':'leads'})`).join(' → ')} → repeat</p></div>}
-      <Button type="submit" variant="primary" disabled={!selected.length}>Next: sent notifications<ArrowRight size={17}/></Button><p className="simple-fine-print">Saving recipients rechecks the sheet and starts with its first unsent row. To resend a lead, clear its Sent Status in the sheet before saving here. Each person gets their lead count, then the cycle repeats.</p>
+      <Button type="submit" variant="primary" disabled={!selected.length}>Next: executive notifications<ArrowRight size={17}/></Button><p className="simple-fine-print">Saving recipients rechecks the sheet and starts with its first unsent row. To resend a lead, clear its Sent Status in the sheet before saving here. Each person gets their lead count, then the cycle repeats.</p>
+      </>:step==='executive'?<>
+        <p className="simple-share-note">Enter the executive's WhatsApp number to let them know which lead was shared and who received it. Notifications go out after the lead is sent and its Google Sheet is updated.</p>
+        <Field label="Executive notification WhatsApp number"><input type="tel" maxLength={40} placeholder="+91 phone number (optional)" value={executiveNotificationPhone} onChange={event=>setExecutiveNotificationPhone(event.target.value)}/></Field>
+        <p className="simple-fine-print">Message: New lead (Lead Name) shared to ({selected[0]?.name||'Recipient Name'}).<br/>Leave this number blank to skip executive notifications.</p>
+        <div className="row"><Button type="button" onClick={()=>{setError('');setStep('recipients');}}><ArrowLeft size={16}/>Back</Button><Button type="submit" variant="primary">Next: your notifications<ArrowRight size={17}/></Button></div>
       </>:<>
-        <p className="simple-share-note">Enter your WhatsApp number. After a lead is sent to any selected recipient and its Google Sheet is updated, you will receive a notification on this number.</p>
+        <p className="simple-share-note">Enter your WhatsApp number. {executiveNotificationPhone.trim()?'After the lead is sent, its Google Sheet is updated, and the executive is notified, you will receive confirmation on this number.':'After a lead is sent to any selected recipient and its Google Sheet is updated, you will receive confirmation on this number.'}</p>
         <Field label="Your notification WhatsApp number"><input type="tel" maxLength={40} placeholder="+91 phone number (optional)" disabled={busy} value={notificationPhone} onChange={event=>setNotificationPhone(event.target.value)}/></Field>
-        <p className="simple-fine-print">Message: New Lead Sent to ({selected[0]?.name||'Recipient Name'})<br/>The message names the person who received the lead. Leave your number blank to turn off these notifications.</p>
+        <p className="simple-fine-print">Message: New lead (Lead Name, Phone Number) shared to ({selected[0]?.name||'Recipient Name'}){executiveNotificationPhone.trim()?' and executive also updated':''}.<br/>Leave your number blank to turn off your notifications.</p>
         <p className="simple-fine-print">Saving also rechecks Sent Status and restarts from the first unsent row, including leads whose Sent Status you cleared.</p>
-        <div className="row"><Button type="button" disabled={busy} onClick={()=>{setError('');setStep('recipients');}}><ArrowLeft size={16}/>Back</Button><Button type="submit" variant="primary" busy={busy}><Check size={17}/>Save & start sending</Button></div>
+        <div className="row"><Button type="button" disabled={busy} onClick={()=>{setError('');setStep('executive');}}><ArrowLeft size={16}/>Back</Button><Button type="submit" variant="primary" busy={busy}><Check size={17}/>Save & start sending</Button></div>
       </>}
     </form>}
   </Modal>;

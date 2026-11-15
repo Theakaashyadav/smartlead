@@ -1,10 +1,91 @@
 ﻿import { test, expect } from '@playwright/test';
 import { FEEDBACK_STATUSES } from '../../src/lib/feedback-statuses';
+import type { Page } from '@playwright/test';
 async function login(page:any){await page.goto('/login');await page.getByRole('button',{name:'Log in',exact:true}).click();await expect(page).toHaveURL(/dashboard/);await expect(page.getByRole('heading',{name:'Your leads. Sent automatically.'})).toBeVisible();}
 async function expectCentered(page:any){
   const box=await page.getByRole('dialog').boundingBox();const viewport=page.viewportSize();
   expect(box).not.toBeNull();expect(Math.abs(box.x+box.width/2-viewport.width/2)).toBeLessThanOrEqual(2);expect(Math.abs(box.y+box.height/2-viewport.height/2)).toBeLessThanOrEqual(2);
 }
+
+async function testFlowWorkspace(page:Page,connected=true){
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,whatsappLoginMode:'qr',account:connected?{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null}:null,sheets:[]};
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
+  await page.route('**/api/simple/contacts',route=>route.fulfill({json:{data:{contacts:[]}}}));
+  await page.route('**/api/simple/contacts/refresh',route=>route.fulfill({json:{data:{refreshing:true}}}));
+}
+
+async function fillTestFlow(page:Page){
+  await page.getByRole('button',{name:'Test lead flow',exact:true}).click();
+  await page.getByLabel('Test recipient name',{exact:true}).fill('Aman Test');
+  await page.getByLabel('Test recipient phone number',{exact:true}).fill('+919876543211');
+  await page.getByRole('button',{name:'Add recipient',exact:true}).click();
+  await page.getByRole('button',{name:'Next: executive number',exact:true}).click();
+  await page.getByLabel('Executive WhatsApp number',{exact:true}).fill('+919876543211');
+  await page.getByRole('button',{name:'Next: your number',exact:true}).click();
+  await page.getByLabel('Your WhatsApp number',{exact:true}).fill('+919876543211');
+}
+
+test('test lead flow runs all three roles without a sheet and preserves wizard inputs before a single send',async({page})=>{
+  await testFlowWorkspace(page);
+  const stage=()=>({status:'WAITING' as string});
+  const run={id:'test-run-complete',status:'QUEUED',recipients:[{name:'Aman Test',phone:'+919876543211',lead:stage(),executive:stage(),owner:stage()}],executiveNotificationPhone:'+919876543211',notificationPhone:'+919876543211',error:null,workerMessage:null,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+  let posts=0,saved:any,releasePost!:()=>void;
+  const pendingPost=new Promise<void>(resolve=>{releasePost=resolve;});
+  await page.route('**/api/simple/test-flow',async route=>{posts++;saved=route.request().postDataJSON();await pendingPost;await route.fulfill({json:{data:run}});});
+  await page.route('**/api/simple/test-flow/test-run-complete',route=>route.fulfill({json:{data:run}}));
+  await login(page);await expect(page.getByRole('button',{name:'Test lead flow',exact:true})).toHaveCount(1);
+  await fillTestFlow(page);expect(posts).toBe(0);
+  await page.getByRole('button',{name:'Back',exact:true}).click();
+  await expect(page.getByLabel('Executive WhatsApp number',{exact:true})).toHaveValue('+919876543211');
+  await page.getByRole('button',{name:'Back',exact:true}).click();
+  await expect(page.getByText('Aman Test',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Next: executive number',exact:true}).click();
+  await expect(page.getByLabel('Executive WhatsApp number',{exact:true})).toHaveValue('+919876543211');
+  await page.getByRole('button',{name:'Next: your number',exact:true}).click();
+  await expect(page.getByLabel('Your WhatsApp number',{exact:true})).toHaveValue('+919876543211');
+  await expect(page.getByRole('dialog')).toContainText('SmartLead Test Lead');
+  await expect(page.getByRole('dialog')).toContainText('0000000000');
+  await page.setViewportSize({width:390,height:844});await expectCentered(page);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
+  await page.screenshot({path:'data/test-lead-flow-mobile-preview.png',fullPage:true});
+  const send=page.getByRole('button',{name:'Send test lead',exact:true});await send.click();
+  await expect.poll(()=>posts).toBe(1);await expect(send).toHaveCount(0);await expect(page.getByRole('dialog')).toContainText('Starting your test');await page.keyboard.press('Enter');expect(posts).toBe(1);
+  expect(saved).toMatchObject({recipients:[{name:'Aman Test',phone:'+919876543211'}],executiveNotificationPhone:'+919876543211',notificationPhone:'+919876543211'});
+  expect(saved.requestId).toMatch(/^[0-9a-f-]{36}$/i);
+  releasePost();await expect(page.getByText('Lead to recipient',{exact:true})).toBeVisible();
+  run.status='RUNNING';run.recipients[0].lead.status='SUBMITTED';run.recipients[0].executive.status='PROCESSING';
+  await expect(page.getByText('Accepted by WhatsApp',{exact:true})).toHaveCount(1,{timeout:10000});
+  run.recipients[0].executive.status='SUBMITTED';run.recipients[0].owner.status='PROCESSING';
+  await expect(page.getByText('Accepted by WhatsApp',{exact:true})).toHaveCount(2,{timeout:10000});
+  run.status='COMPLETED';run.recipients[0].owner.status='SUBMITTED';
+  await expect(page.getByText('Test completed. The sample lead and both notifications were accepted by WhatsApp.',{exact:true})).toBeVisible({timeout:10000});
+  await expect(page.getByText('Accepted by WhatsApp',{exact:true})).toHaveCount(3);expect(posts).toBe(1);
+  await page.screenshot({path:'data/test-lead-flow-mobile-complete.png',fullPage:true});
+});
+
+test('test lead flow holds an uncertain notification without resending or claiming completion',async({page})=>{
+  await testFlowWorkspace(page);let posts=0;
+  const error='Executive notification acceptance is uncertain. Check WhatsApp before starting another test.';
+  const run={id:'test-run-uncertain',status:'UNCERTAIN',recipients:[{name:'Aman Test',phone:'+919876543211',lead:{status:'SUBMITTED',providerMessageId:'test-lead-receipt'},executive:{status:'UNCERTAIN',error},owner:{status:'WAITING'}}],executiveNotificationPhone:'+919876543211',notificationPhone:'+919876543211',error,workerMessage:null,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+  await page.route('**/api/simple/test-flow',route=>{posts++;return route.fulfill({json:{data:run}});});
+  await page.route('**/api/simple/test-flow/test-run-uncertain',route=>route.fulfill({json:{data:run}}));
+  await login(page);await fillTestFlow(page);await page.getByRole('button',{name:'Send test lead',exact:true}).click();
+  await expect(page.getByText('A test message may have been sent. Check WhatsApp before starting another test.',{exact:true})).toBeVisible();
+  await expect(page.getByText('Accepted by WhatsApp',{exact:true})).toHaveCount(1);
+  await expect(page.getByText('Test completed.',{exact:false})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Send test lead',exact:true})).toHaveCount(0);
+  await page.keyboard.press('Enter');expect(posts).toBe(1);
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();await page.getByRole('button',{name:'Test lead flow',exact:true}).click();expect(posts).toBe(1);
+});
+
+test('test lead flow asks to connect WhatsApp without asking for a sheet',async({page})=>{
+  await testFlowWorkspace(page,false);let posts=0;
+  await page.route('**/api/simple/test-flow',route=>{posts++;return route.fulfill({json:{data:{}}});});
+  await login(page);await page.getByRole('button',{name:'Test lead flow',exact:true}).click();
+  await expect(page.getByRole('dialog').getByRole('link',{name:'Connect WhatsApp',exact:false})).toHaveAttribute('href','/whatsapp');
+  await expect(page.getByRole('dialog').getByRole('button',{name:'Connect sheet',exact:false})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Send test lead',exact:true})).toHaveCount(0);expect(posts).toBe(0);
+});
 
 test('two organisation owners create separate accounts and keep their connections when switching logins',async({page,browser})=>{
   const suffix=Date.now().toString().slice(-9);const phone=`9${suffix}`,otherPhone=`8${suffix}`,pin='4826';
@@ -179,14 +260,23 @@ test('contact picker saves consecutive lead counts in selection order and center
   await expect(page.locator('.simple-selected-order')).toContainText('Aman (2 leads) → Akash (1 lead) → New person (1 lead) → repeat');
   await expectCentered(page);await page.screenshot({path:'data/recipient-counts-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});await expectCentered(page);await page.screenshot({path:'data/recipient-counts-mobile.png',fullPage:true});
-  await page.getByRole('button',{name:'Next: sent notifications'}).click();
-  await expect(page.getByRole('heading',{name:'Where should sent notifications go?'})).toBeVisible();
-  await expect(page.getByText('Message: New Lead Sent to (Aman)',{exact:false})).toBeVisible();
+  await page.getByRole('button',{name:'Next: executive notifications'}).click();
+  await expect(page.getByRole('heading',{name:'Send lead notifications to an executive?'})).toBeVisible();
+  await expect(page.getByText('Message: New lead (Lead Name) shared to (Aman).',{exact:false})).toBeVisible();
+  await page.getByLabel('Executive notification WhatsApp number',{exact:true}).fill('+919876543217');
+  await expectCentered(page);await page.screenshot({path:'data/executive-notifications-mobile.png',fullPage:true});
+  await page.getByRole('button',{name:'Next: your notifications'}).click();
+  await expect(page.getByRole('heading',{name:'Where should your sent notifications go?'})).toBeVisible();
+  await expect(page.getByText('Message: New lead (Lead Name, Phone Number) shared to (Aman) and executive also updated.',{exact:false})).toBeVisible();
   await page.getByLabel('Your notification WhatsApp number',{exact:true}).fill('+919876543218');
   await expectCentered(page);await page.screenshot({path:'data/sent-notifications-mobile.png',fullPage:true});
   await page.getByRole('button',{name:'Back',exact:true}).click();
+  await expect(page.getByLabel('Executive notification WhatsApp number',{exact:true})).toHaveValue('+919876543217');
+  await page.getByRole('button',{name:'Back',exact:true}).click();
   await expect(page.getByLabel('Leads per turn for Aman',{exact:true})).toHaveValue('2');
-  await page.getByRole('button',{name:'Next: sent notifications'}).click();
+  await page.getByRole('button',{name:'Next: executive notifications'}).click();
+  await expect(page.getByLabel('Executive notification WhatsApp number',{exact:true})).toHaveValue('+919876543217');
+  await page.getByRole('button',{name:'Next: your notifications'}).click();
   await expect(page.getByLabel('Your notification WhatsApp number',{exact:true})).toHaveValue('+919876543218');
   await page.setViewportSize({width:1440,height:1050});await expectCentered(page);
   await page.getByRole('button',{name:'Save & start sending'}).click();
@@ -194,26 +284,34 @@ test('contact picker saves consecutive lead counts in selection order and center
   expect(saved.recipients.map((p:any)=>p.phone)).toEqual(['+919876543211','+919876543210','+919876543219']);
   expect(saved.recipients.map((p:any)=>p.leadCount)).toEqual([2,1,1]);
   expect(saved.notificationPhone).toBe('+919876543218');
+  expect(saved.executiveNotificationPhone).toBe('+919876543217');
 });
 
 test('saved phone names replace number labels without losing edited counts and survive reopening the picker',async({page})=>{
   const phone='+919876543210';let contacts=[{name:phone,phone}];
-  const sheet={id:'saved-name-sheet',name:'Saved contacts',worksheetName:'Leads',enabled:false,leadCount:0,recipients:[{name:phone,phone,leadCount:2}],notificationPhone:'+919876543218',lastSyncError:null};
+  const sheet={id:'saved-name-sheet',name:'Saved contacts',worksheetName:'Leads',enabled:false,leadCount:0,recipients:[{name:phone,phone,leadCount:2}],notificationPhone:'+919876543218',executiveNotificationPhone:'+919876543216' as string|null,lastSyncError:null};
   const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null},sheets:[sheet]};
   await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
   await page.route('**/api/simple/contacts',route=>route.fulfill({json:{data:{contacts}}}));
   await page.route('**/api/simple/contacts/refresh',route=>route.fulfill({json:{data:{refreshing:true}}}));
-  await page.route('**/api/simple/sheets/saved-name-sheet/recipients',route=>{const saved=route.request().postDataJSON();sheet.recipients=saved.recipients;sheet.notificationPhone=saved.notificationPhone;return route.fulfill({json:{data:{started:true}}});});
+  await page.route('**/api/simple/sheets/saved-name-sheet/recipients',route=>{const saved=route.request().postDataJSON();sheet.recipients=saved.recipients;sheet.notificationPhone=saved.notificationPhone;sheet.executiveNotificationPhone=saved.executiveNotificationPhone;return route.fulfill({json:{data:{started:true}}});});
   await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Edit recipients',exact:true}).click();
   await page.getByLabel(`Leads per turn for ${phone}`,{exact:true}).fill('3');contacts=[{phone,name:'Aman Office'}];
   await expect(page.getByLabel('Leads per turn for Aman Office',{exact:true})).toHaveValue('3',{timeout:10000});
-  await page.getByRole('button',{name:'Next: sent notifications'}).click();
+  await page.getByRole('button',{name:'Next: executive notifications'}).click();
+  await expect(page.getByLabel('Executive notification WhatsApp number',{exact:true})).toHaveValue('+919876543216');
+  await page.getByLabel('Executive notification WhatsApp number',{exact:true}).fill('');
+  await page.getByRole('button',{name:'Next: your notifications'}).click();
+  await expect(page.getByText('Message: New lead (Lead Name, Phone Number) shared to (Aman Office).',{exact:false})).toBeVisible();
   await expect(page.getByLabel('Your notification WhatsApp number',{exact:true})).toHaveValue('+919876543218');
   await page.getByLabel('Your notification WhatsApp number',{exact:true}).fill('+919876543217');
   await page.getByRole('button',{name:'Save & start sending'}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(sheet.recipients).toEqual([{name:'Aman Office',phone,leadCount:3}]);
+  expect(sheet.executiveNotificationPhone).toBeNull();
   await page.getByRole('button',{name:'Edit recipients',exact:true}).click();await expect(page.getByLabel('Leads per turn for Aman Office',{exact:true})).toHaveValue('3');await expectCentered(page);
-  await page.getByRole('button',{name:'Next: sent notifications'}).click();
+  await page.getByRole('button',{name:'Next: executive notifications'}).click();
+  await expect(page.getByLabel('Executive notification WhatsApp number',{exact:true})).toHaveValue('');
+  await page.getByRole('button',{name:'Next: your notifications'}).click();
   await expect(page.getByLabel('Your notification WhatsApp number',{exact:true})).toHaveValue('+919876543217');
   await page.getByRole('button',{name:'Close dialog'}).click();await page.getByRole('button',{name:'Login & PIN',exact:true}).click();await expectCentered(page);
 });

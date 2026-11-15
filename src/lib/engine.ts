@@ -12,10 +12,17 @@ import { organizationSettingKey } from './organizations';
 import { sheetPollSeconds } from './automation-policy';
 import { currentDeliveryMessages, deliveryGeneration, deliveryValues, queueDeliveryWriteback, sheetAlreadySent, sheetSaysSent, SUCCESSFUL_SEND_STATUSES } from './delivery';
 import { dispatchLeadSentNotification, queueLeadSentNotifications } from './lead-sent-notifications';
+import { dispatchTestLeadFlow } from './test-lead-flow';
 import { cacheTemporarySource, hydrateTemporaryFeedback, invalidateTemporarySource, purgeCompletedLead, readTemporaryFeedback, sheetOutputHash, temporaryFeedbackLink, temporaryLeadStorage } from './temporary-leads';
 
 const sourceChecks = new Map<string, string>();
 let nextSendAt = 0;
+async function waitForSendInterval(sendDelay:number){
+  if(!sendDelay)return;
+  const delay=nextSendAt-Date.now();
+  if(delay>0)await new Promise(resolve=>setTimeout(resolve,delay));
+  nextSendAt=Date.now()+sendDelay;
+}
 
 export async function enqueue(tx:Prisma.TransactionClient, type:string, entityId:string, key:string) {
   const entity=['CONNECT','DISCONNECT','CONTACTS'].includes(type)
@@ -65,6 +72,7 @@ export async function restartUnsentSheetLeads(tx:Prisma.TransactionClient,sheet:
   await tx.job.updateMany({where:{status:{in:['PENDING','DEAD']},OR:[{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:ids}},{type:{in:['SEND','NOTIFY']},entityId:{in:messages.map(message=>message.id)}}]},data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
   await tx.message.updateMany({where:{leadId:{in:ids},status:'QUEUED'},data:{status:'CANCELLED',failureReason:'Recipients saved; restarting from current unsent sheet rows'}});
   await tx.message.updateMany({where:{leadId:{in:ids},notificationStatus:{in:['WAITING','QUEUED']}},data:{notificationStatus:'CANCELLED',notificationFailureReason:null}});
+  await tx.message.updateMany({where:{leadId:{in:ids},executiveNotificationStatus:{in:['WAITING','QUEUED']}},data:{executiveNotificationStatus:'CANCELLED',executiveNotificationFailureReason:null}});
   await tx.feedbackToken.updateMany({where:{assignment:{leadId:{in:ids},active:true}},data:{revokedAt:new Date()}});
   await tx.assignment.updateMany({where:{leadId:{in:ids},active:true},data:{active:false}});
   await tx.followup.updateMany({where:{leadId:{in:ids},status:'PENDING'},data:{status:'CANCELLED'}});
@@ -334,7 +342,8 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
   }
   if(simple)await refreshSimpleQueuedMessages(message.lead.sheetId,id,true);
   const notificationPhone=message.lead.sheet.rule?.notificationPhone||null;
-  const claimData={status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date(),notificationPhone,notificationName:notificationPhone?message.assignment.employee.name:null,notificationStatus:notificationPhone?'WAITING':null};
+  const executiveNotificationPhone=message.lead.sheet.rule?.executiveNotificationPhone||null;
+  const claimData={status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date(),notificationPhone,executiveNotificationPhone,notificationName:notificationPhone||executiveNotificationPhone?message.assignment.employee.name:null,notificationStatus:notificationPhone||executiveNotificationPhone?'WAITING':null,executiveNotificationStatus:executiveNotificationPhone?'WAITING':null};
   const claimed=simple?await transaction(async tx=>{
     const lead=await tx.lead.findUniqueOrThrow({where:{id:message.leadId},select:{managedSnapshot:true}});
     if(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,message.leadId,lead.managedSnapshot)){await cancelQueuedLeadMessages(tx,message.leadId);return {count:0};}
@@ -366,7 +375,7 @@ export async function retryMessage(id:string,userId:string) {
   if(message.status!=='FAILED'||message.uncertain)throw new AppError(409,'Only confirmed failures are eligible for retry. Uncertain outcomes require provider reconciliation.');
   await transaction(async tx=>{await tx.message.update({where:{id},data:{status:'QUEUED',failureReason:null,failedAt:null}});await enqueue(tx,'SEND',id,`send:${id}:retry:${message.attemptCount}`);await tx.auditLog.create({data:{userId,action:'RETRY_NOTIFICATION',entityType:'message',entityId:id}});});
 }
-export async function processJob(id:string, candidate?:Job) {
+export async function processJob(id:string, candidate?:Job,beforeNotificationSend?:()=>Promise<void>) {
   const token=opaqueToken();
   const job=candidate||await db.job.findUniqueOrThrow({where:{id}});
   const lock={status:'PROCESSING',lockedAt:new Date(),lockToken:token};
@@ -390,7 +399,11 @@ export async function processJob(id:string, candidate?:Job) {
     }
     else if(job.type==='WRITEBACK')await writebackLead(job.entityId,undefined,{deliveryOnly});
     else if(job.type==='SEND')await dispatchMessage(job.entityId);
-    else if(job.type==='NOTIFY')await dispatchLeadSentNotification(job.entityId);
+    else if(job.type==='NOTIFY')await dispatchLeadSentNotification(job.entityId,undefined,beforeNotificationSend);
+    else if(job.type==='TEST_FLOW')await dispatchTestLeadFlow(job.entityId,job.organizationId,undefined,async()=>{
+      await db.job.updateMany({where:ownership,data:{lockedAt:new Date()}});
+      await beforeNotificationSend?.();
+    },token);
     else if(job.type==='CONNECT'||job.type==='DISCONNECT'||job.type==='CONTACTS'){
       const sender=await db.sender.findUniqueOrThrow({where:{id:job.entityId}});
       const provider=whatsappProvider(sender);
@@ -434,7 +447,7 @@ export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shou
     // A newly created SEND overtakes remaining ASSIGN work in the same batch.
     const candidates=await Promise.all([
       controls.length?db.job.findFirst({where:{...due,type:{in:controls}},orderBy}):null,
-      !types||types.includes('NOTIFY')?db.job.findFirst({where:{...due,type:'NOTIFY'},orderBy}):null,
+      !types||types.some(type=>['NOTIFY','TEST_FLOW'].includes(type))?db.job.findFirst({where:{...due,type:{in:['NOTIFY','TEST_FLOW'].filter(type=>!types||types.includes(type))}},orderBy}):null,
       !types||types.includes('SEND')?db.job.findFirst({where:{...due,type:'SEND'},orderBy}):null,
       // Start new saves ahead of old failures. Keep one slot in five for due
       // retries so a continuous lead stream still repairs earlier updates.
@@ -443,12 +456,11 @@ export async function drainJobs(limit=50,sendDelay=0,organizationId?:string,shou
     ]);
     const job=candidates.find(candidate=>candidate!==null);
     if(!job||!shouldContinue())break;
-    if(['SEND','NOTIFY'].includes(job.type)&&sendDelay){
-      const delay=nextSendAt-Date.now();if(delay>0)await new Promise(resolve=>setTimeout(resolve,delay));
+    if(job.type==='SEND'&&sendDelay){
+      await waitForSendInterval(sendDelay);
       if(!shouldContinue())break;
-      nextSendAt=Date.now()+sendDelay;
     }
-    if(await processJob(job.id,job))processed++;
+    if(await processJob(job.id,job,sendDelay?()=>waitForSendInterval(sendDelay):undefined))processed++;
   }
   return processed;
 }
@@ -465,6 +477,7 @@ export async function scheduleJobs(simpleOnly=false,maintenance=true) {
   // Jobs interrupted after possible submission are flagged, never automatically resent.
   const stale=new Date(Date.now()-5*60000);
   await db.message.updateMany({where:{status:'PROCESSING',lastAttemptAt:{lt:stale}},data:{status:'FAILED',uncertain:true,failureReason:'Worker stopped during submission; verify provider acceptance before resending.',failedAt:new Date()}});
+  await db.message.updateMany({where:{notificationStatus:'PROCESSING',executiveNotificationStatus:'PROCESSING',notificationLastAttemptAt:{lt:stale}},data:{notificationStatus:'FAILED',notificationUncertain:true,notificationFailureReason:'Worker stopped during executive notification submission. Check the linked WhatsApp account before resending.',executiveNotificationStatus:'FAILED',executiveNotificationUncertain:true,executiveNotificationFailureReason:'Worker stopped during executive notification submission. Check the linked WhatsApp account before resending.'}});
   await db.message.updateMany({where:{notificationStatus:'PROCESSING',notificationLastAttemptAt:{lt:stale}},data:{notificationStatus:'FAILED',notificationUncertain:true,notificationFailureReason:'Worker stopped during sent notification submission. Check the linked WhatsApp account before resending.'}});
   await db.job.updateMany({where:{status:'PROCESSING',lockedAt:{lt:stale}},data:{status:'PENDING',lockedAt:null,lockToken:null}});
   await db.authSession.deleteMany({where:{expiresAt:{lt:new Date()}}});
