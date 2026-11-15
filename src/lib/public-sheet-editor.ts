@@ -9,6 +9,7 @@ import { columnName, expectedOutputValue, legacyRemarkColumn, nextOutputMove, ou
 export { columnName, nextOutputMove, outputColumns } from './sheet-output';
 import { browserExecutablePath } from './browser-executable';
 import { prepareHostedStdin } from './hosted-stdin';
+import { assertSheetWork, cancelledSheetWork } from './sheet-work';
 
 let browser:Promise<Browser>|undefined;
 let writes:Promise<unknown>=Promise.resolve();
@@ -38,14 +39,15 @@ async function selectRange(page:Page,range:string){
   await page.keyboard.type(range);await page.keyboard.press('Enter');
   await pause(120);
 }
-async function paste(page:Page,range:string,values:string[]){
+async function paste(page:Page,range:string,values:string[],beforeWrite?:()=>Promise<void>){
   await selectRange(page,range);
   await page.evaluate(text=>navigator.clipboard.writeText(text),values.map(sheetPasteText).join('\t'));
+  await beforeWrite?.();
   await page.keyboard.down('Control');await page.keyboard.press('KeyV');await page.keyboard.up('Control');await pause(350);
   await page.keyboard.press('Escape');
   await page.waitForFunction(()=>!!document.querySelector('[aria-label*="Document status: Saved"]'),{timeout:20000});
 }
-async function moveColumns(page:Page,start:number,count:number,direction:'left'|'right'){
+async function moveColumns(page:Page,start:number,count:number,direction:'left'|'right',beforeWrite?:()=>Promise<void>){
   await selectRange(page,`${columnName(start)}:${columnName(start+count-1)}`);
   await page.click('#docs-edit-menu');
   await page.waitForFunction(()=>document.querySelector('#docs-edit-menu')?.getAttribute('aria-expanded')==='true');
@@ -55,13 +57,15 @@ async function moveColumns(page:Page,start:number,count:number,direction:'left'|
   await page.waitForFunction(direction=>Array.from(document.querySelectorAll('.goog-menuitem')).some(e=>e.getBoundingClientRect().width>0&&new RegExp(`^Columns? ${direction}$`).test(e.textContent?.trim()||'')),{},direction);
   const item=await page.evaluate(direction=>{const el=Array.from(document.querySelectorAll('.goog-menuitem')).find(e=>e.getBoundingClientRect().width>0&&new RegExp(`^Columns? ${direction}$`).test(e.textContent?.trim()||''));if(!el)return null;const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};},direction);
   if(!item)throw new AppError(502,'Google Sheets column controls are unavailable. Please retry.');
-  await page.mouse.click(item.x,item.y);await pause(150);
+  await beforeWrite?.();await page.mouse.click(item.x,item.y);await pause(150);
   await page.waitForFunction(()=>!!document.querySelector('[aria-label*="Document status: Saved"]'),{timeout:20000});
 }
 async function performWrite(sheet:Sheet,stableId:string,values:Record<string,string>){
   editorStage='load-source';
-  const lead=await db.lead.findUniqueOrThrow({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
+  const lead=await db.lead.findUnique({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
+  if(!lead)throw cancelledSheetWork();
   if(lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'The original lead is no longer available for sheet updates.');
+  const beforeWrite=()=>assertSheetWork(sheet.id,lead.id);
   let csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);
   const fields=Object.keys(values);
   let columns=outputColumns(csv,fields);
@@ -90,9 +94,9 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
     await page.bringToFront();
     editorStage='output-columns';
     const legacy=legacyRemarkColumn(csv[0]);
-    if(legacy>=0){await paste(page,`${columnName(legacy)}1`,['Remark']);csv[0][legacy]='Remark';}
+    if(legacy>=0){await paste(page,`${columnName(legacy)}1`,['Remark'],beforeWrite);csv[0][legacy]='Remark';}
     // Create the complete layout even when this job only updates delivery.
-    for(const column of outputColumns(csv).filter(c=>c.missing))await paste(page,`${columnName(column.index)}1`,[column.label]);
+    for(const column of outputColumns(csv).filter(c=>c.missing))await paste(page,`${columnName(column.index)}1`,[column.label],beforeWrite);
     for(let attempt=0;attempt<10;attempt++){
       csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);
       if(!outputColumns(csv).some(c=>c.missing))break;
@@ -104,7 +108,7 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
     let move=nextOutputMove(csv);let steps=0;
     while(move){
       if(++steps>csv[0].length*4)throw new AppError(502,'Google Sheets could not confirm the output column order. Please retry.');
-      const previous=csv[0].join('\t');await moveColumns(page,move.start,move.count,move.direction);
+      const previous=csv[0].join('\t');await moveColumns(page,move.start,move.count,move.direction,beforeWrite);
       for(let attempt=0;attempt<10;attempt++){csv=await publicCSV(sheet.spreadsheetId,sheet.worksheetId);if(csv[0].join('\t')!==previous)break;await pause(300);}
       if(csv[0].join('\t')===previous)throw new AppError(502,'Google has not confirmed the column move yet. The update will be retried.');
       move=nextOutputMove(csv);
@@ -126,7 +130,7 @@ async function performWrite(sheet:Sheet,stableId:string,values:Record<string,str
     const sorted=[...columns].sort((a,b)=>a.index-b.index);
     for(let i=0;i<sorted.length;){
       let end=i+1;while(end<sorted.length&&sorted[end].index===sorted[end-1].index+1)end++;
-      await paste(page,`${columnName(sorted[i].index)}${row}`,sorted.slice(i,end).map(c=>values[c.field]||''));i=end;
+      await paste(page,`${columnName(sorted[i].index)}${row}`,sorted.slice(i,end).map(c=>values[c.field]||''),beforeWrite);i=end;
     }
     let verified:Record<string,string>|undefined;
     editorStage='verify-row';

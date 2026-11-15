@@ -8,6 +8,7 @@ import { LEGACY_ORGANIZATION } from './organizations';
 import { DELIVERY_COLUMNS, SIMPLE_OUTPUT_COLUMNS } from './simple-shared';
 import { expectedOutputValue, legacyRemarkColumn, nextOutputMove, outputColumns, simpleOutputValues } from './sheet-output';
 import { AppsScriptSheetsProvider } from './apps-script';
+import { assertSheetWork, cancelledSheetWork } from './sheet-work';
 
 type Metadata = {metadataId:number;metadataKey:string;metadataValue:string;location:{dimensionRange?:{sheetId:number;startIndex:number;endIndex:number}}};
 export type SourceRow = {stableId:string;row:number;metadataId?:number;values:Record<string,string>;questions?:Array<{question:string;answer:string}>};
@@ -100,6 +101,7 @@ export class GoogleSheetsProvider implements SheetProvider {
     }
     if(newHeaders.length!==headers.length) {
       // Only append explicitly approved new columns, never rewrite source headers.
+      await assertSheetWork(sheet.id);
       await googleRequest(sheet.spreadsheetId,'/values:batchUpdate',token,{valueInputOption:'RAW',data:[{range:`${tabRange(sheet)}!${columnLetter(headers.length)}1:${columnLetter(newHeaders.length-1)}1`,values:[newHeaders.slice(headers.length)]}]});
       headers=newHeaders;
     }
@@ -137,7 +139,7 @@ export class GoogleSheetsProvider implements SheetProvider {
         // Newly appended headers are expected; compare only source body rows.
         if(JSON.stringify((fresh.values||[]).slice(1))!==JSON.stringify((data.values||[]).slice(1))) throw new AppError(409,'Sheet changed during import. Retry when row editing is complete.');
       }
-      for(let start=0;start<requests.length;start+=100) await googleRequest(sheet.spreadsheetId,':batchUpdate',token,{requests:requests.slice(start,start+100)});
+      for(let start=0;start<requests.length;start+=100){await assertSheetWork(sheet.id);await googleRequest(sheet.spreadsheetId,':batchUpdate',token,{requests:requests.slice(start,start+100)});}
     }
     const taggedInfo=await googleRequest(sheet.spreadsheetId,'?fields=developerMetadata',token);
     const allTags:Metadata[]=taggedInfo.developerMetadata||[];
@@ -152,6 +154,7 @@ export class GoogleSheetsProvider implements SheetProvider {
         // Identity is now anchored; use metadata to add the ID without touching other cells.
         const values:Array<string|null>=Array(headers.length).fill(null);
         values[headers.indexOf(map.leadId)]=row.stableId;
+        await assertSheetWork(sheet.id);
         await googleRequest(sheet.spreadsheetId,'/values:batchUpdateByDataFilter',token,{valueInputOption:'RAW',data:[{dataFilter:{developerMetadataLookup:{metadataId:row.metadataId}},values:[values]}]});
       }
     }
@@ -170,11 +173,13 @@ export class GoogleSheetsProvider implements SheetProvider {
       const rows:string[][]=(current.values||[headers]).map((row:unknown[])=>row.map(value=>String(value??'')));
       const legacy=legacyRemarkColumn(headers);
       if(legacy>=0){
+        await assertSheetWork(sheet.id);
         await googleRequest(sheet.spreadsheetId,'/values:batchUpdate',token,{valueInputOption:'RAW',data:[{range:`${tabRange(sheet)}!${columnLetter(legacy)}1`,values:[['Remark']]}]});
         headers[legacy]='Remark';rows[0][legacy]='Remark';
       }
       const columns=outputColumns(rows);const added=columns.filter(c=>c.missing);
       if(added.length){
+        await assertSheetWork(sheet.id);
         await googleRequest(sheet.spreadsheetId,'/values:batchUpdate',token,{valueInputOption:'RAW',data:[{range:`${tabRange(sheet)}!${columnLetter(added[0].index)}1:${columnLetter(added.at(-1)!.index)}1`,values:[added.map(c=>c.label)]}]});
         for(const column of added){while(rows[0].length<column.index)rows[0].push('');rows[0][column.index]=column.label;}
       }
@@ -185,7 +190,7 @@ export class GoogleSheetsProvider implements SheetProvider {
         for(const row of rows){while(row.length<rows[0].length)row.push('');const cells=row.splice(move.start,1);row.splice(move.start+(move.direction==='right'?1:-1),0,...cells);}
         move=nextOutputMove(rows);
       }
-      if(moves.length)await googleRequest(sheet.spreadsheetId,':batchUpdate',token,{requests:moves});
+      if(moves.length){await assertSheetWork(sheet.id);await googleRequest(sheet.spreadsheetId,':batchUpdate',token,{requests:moves});}
       headers.splice(0,headers.length,...rows[0]);
       for(const [field] of Object.entries(SIMPLE_OUTPUT_COLUMNS))map[field]=headers[outputColumns(rows,[field])[0].index];
       await db.sheet.update({where:{id:sheet.id},data:{columnMapping:map}});
@@ -204,6 +209,7 @@ export class GoogleSheetsProvider implements SheetProvider {
         map[field]=matches[0]||label;if(!matches.length)added.push(label);
       }
       if(added.length){
+        await assertSheetWork(sheet.id);
         await googleRequest(sheet.spreadsheetId,'/values:batchUpdate',token,{valueInputOption:'RAW',data:[{range:`${tabRange(sheet)}!${columnLetter(start)}1:${columnLetter(start+added.length-1)}1`,values:[added]}]});
         while(headers.length<start)headers.push('');headers.push(...added);
       }
@@ -217,7 +223,8 @@ export class GoogleSheetsProvider implements SheetProvider {
     const identityMatches=sheet.connectionType==='SIMPLE_GOOGLE'?simpleSourceRows(sheet,[headers,source])[0]?.stableId===stableId:source[headers.indexOf(map.leadId)]===stableId;
     if(!identityMatches) throw new AppError(409,'Source lead identity changed. No cells were updated.');
     const lead=await db.lead.findUnique({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
-    const snapshot=(lead?.managedSnapshot||{}) as Record<string,string>;
+    if(!lead)throw cancelledSheetWork();
+    const snapshot=(lead.managedSnapshot||{}) as Record<string,string>;
     const output:Array<string|null>=Array(headers.length).fill(null);
     for(const [field,value] of Object.entries(values)) {
       if(!Object.hasOwn(MANAGED,field)) throw new AppError(400,'Only application-managed fields may be written');
@@ -227,6 +234,7 @@ export class GoogleSheetsProvider implements SheetProvider {
       if(Object.hasOwn(snapshot,field)&&actual!==expected&&actual!==value)throw new AppError(409,`The source ${field} was edited outside SmartLead. Review the conflict before writing back.`,'SYNC_CONFLICT');
       output[index]=value;
     }
+    await assertSheetWork(sheet.id,lead.id);
     const written=await googleRequest(sheet.spreadsheetId,'/values:batchUpdateByDataFilter',token,{valueInputOption:'RAW',data:[{dataFilter:filter,values:[output]}]});
     if(written.totalUpdatedRows!==1) throw new AppError(409,'The source row could not be updated safely');
     if(simple)return Object.fromEntries(outputColumns([headers]).map(column=>[column.field,values[column.field]??String(source[column.index]||'')]));
@@ -243,7 +251,8 @@ export class AuthorizedSheetsProvider implements SheetProvider {
   }
   async write(sheet:Sheet,stableId:string,_metadataId:number|null,values:Record<string,string>){
     const lead=await db.lead.findUnique({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
-    if(!lead||lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'The original lead is no longer available for sheet updates.');
+    if(!lead)throw cancelledSheetWork();
+    if(lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'The original lead is no longer available for sheet updates.');
     const token=await googleToken(sheet.credentialId,sheet.organizationId);
     const key=`smartlead_oauth_${sheet.organizationId}_${sheet.worksheetId}`;
     const [data,info]=await Promise.all([
@@ -257,6 +266,7 @@ export class AuthorizedSheetsProvider implements SheetProvider {
     if(tags.length>1)throw new AppError(409,'Duplicate row identities found. Review this row before retrying.');
     let metadataId=tags[0]?.metadataId;
     if(!metadataId){
+      await assertSheetWork(sheet.id,lead.id);
       const tagged=await googleRequest(sheet.spreadsheetId,':batchUpdate',token,{requests:[{createDeveloperMetadata:{developerMetadata:{metadataKey:key,metadataValue:stableId,visibility:'DOCUMENT',location:{dimensionRange:{sheetId:sheet.worksheetId,dimension:'ROWS',startIndex:source[0].row-1,endIndex:source[0].row}}}}}]});
       metadataId=tagged.replies?.[0]?.createDeveloperMetadata?.developerMetadata?.metadataId;
     }
@@ -286,7 +296,7 @@ export class DemoSheetsProvider implements SheetProvider {
     const snapshot=(lead?.managedSnapshot||{}) as Record<string,string>;
     for(const [field,value]of Object.entries(values))if(Object.hasOwn(snapshot,field)&&(matches[0].values[field]||'')!==snapshot[field]&&(matches[0].values[field]||'')!==value)throw new AppError(409,`The source ${field} changed outside SmartLead. Review the conflict.`,'SYNC_CONFLICT');
     matches[0].values={...matches[0].values,...values};
-    await db.setting.upsert({where:{key:`demo-source:${sheet.id}`},create:{key:`demo-source:${sheet.id}`,value:JSON.parse(JSON.stringify(rows))},update:{value:JSON.parse(JSON.stringify(rows))}});
+    await db.setting.updateMany({where:{key:`demo-source:${sheet.id}`},data:{value:JSON.parse(JSON.stringify(rows))}});
   }
 }
 export const sheetProvider=(sheet:Sheet):SheetProvider=>sheet.connectionType==='DEMO'?new DemoSheetsProvider():sheet.connectionType==='SIMPLE_APPS_SCRIPT'?new AppsScriptSheetsProvider():sheet.connectionType==='SIMPLE_GOOGLE'?new AuthorizedSheetsProvider():sheet.connectionType==='SIMPLE_PUBLIC'?new PublicSheetsProvider():new GoogleSheetsProvider();

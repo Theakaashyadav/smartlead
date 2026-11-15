@@ -271,7 +271,7 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
         : input.purpose==='LEAD_SENT_NOTIFICATION'
         ? await db.message.updateMany({where:{id:input.messageId,senderId:this.sender.id,notificationStatus:'PROCESSING'},data:{notificationProviderMessageId:providerId(this.sender.id,messageId)}})
         : await db.message.updateMany({ where: { id: input.messageId, senderId: this.sender.id, status: 'PROCESSING' }, data: { providerMessageId: providerId(this.sender.id, messageId) } });
-      if (!claimed.count) throw new AppError(409, 'This notification is no longer pending submission.');
+      if (!claimed.count) throw new AppError(409, 'This message was cancelled or its sheet was deleted.', 'WORK_CANCELLED');
     }
     try {
       // WhatsApp can request a short protocol retry after the processing row is

@@ -13,6 +13,7 @@ import { sheetPollSeconds } from './automation-policy';
 import { currentDeliveryMessages, deliveryGeneration, deliveryValues, queueDeliveryWriteback, sheetAlreadySent, sheetSaysSent, SUCCESSFUL_SEND_STATUSES } from './delivery';
 import { dispatchLeadSentNotification, queueLeadSentNotifications } from './lead-sent-notifications';
 import { dispatchTestLeadFlow } from './test-lead-flow';
+import { assertSheetWork, cancelledSheetWork, lockSheetWork } from './sheet-work';
 import { cacheTemporarySource, hydrateTemporaryFeedback, invalidateTemporarySource, purgeCompletedLead, readTemporaryFeedback, sheetOutputHash, temporaryFeedbackLink, temporaryLeadStorage } from './temporary-leads';
 
 const sourceChecks = new Map<string, string>();
@@ -87,11 +88,13 @@ export async function restartUnsentSheetLeads(tx:Prisma.TransactionClient,sheet:
   return unsent.length;
 }
 export async function synchronizeSheet(id:string, provider?:SheetProvider, options:{skipUnchanged?:boolean;refreshQueued?:boolean;queueAssignments?:boolean}={}) {
-  const sheet=await db.sheet.findUniqueOrThrow({where:{id}});
+  const sheet=await db.sheet.findUnique({where:{id}});
+  if(!sheet||sheet.syncStatus==='DELETING'){sourceChecks.delete(id);invalidateTemporarySource(id);return {imported:0,checked:0};}
   const temporary=temporaryLeadStorage(sheet);
-  if(!options.skipUnchanged)await db.sheet.update({where:{id},data:{syncStatus:'SYNCING',lastSyncError:null}});
+  if(!options.skipUnchanged&&!((await db.sheet.updateMany({where:{id,syncStatus:{not:'DELETING'}},data:{syncStatus:'SYNCING',lastSyncError:null}})).count))return {imported:0,checked:0};
   try {
     const rows=await (provider||sheetProvider(sheet)).read(sheet);
+    await assertSheetWork(id);
     cacheTemporarySource(sheet,rows);
     const sourceSummary={total:rows.length,sent:rows.filter(row=>sheetSaysSent(row.values.sentStatus)).length};
     const contentHash=options.skipUnchanged?hash(JSON.stringify([sheet.createdAt,sheet.columnMapping,sheet.project,rows])):undefined;
@@ -127,6 +130,9 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
       const data={customerName:row.values.customerName||'Unnamed lead',mobile,email:row.values.email||null,project:row.values.project||sheet.project,location:row.values.location||null,budget:row.values.budget||null,source:row.values.source||null,requirement:row.values.requirement||null,sourceRow:row.row,metadataId:row.metadataId||null,sourceFingerprint:fingerprint,sourceData:{questions:row.questions||[]},sourceDeleted:false};
       if(!existing) {
         await transaction(async tx=>{
+          // A real parent write serializes new children with sheet deletion on
+          // MongoDB too, where relations do not supply foreign-key protection.
+          await lockSheetWork(tx,id);
           const publicSheet=['SIMPLE_PUBLIC','SIMPLE_GOOGLE','SIMPLE_APPS_SCRIPT'].includes(sheet.connectionType);
           const managedSnapshot={...Object.fromEntries(Object.keys(MANAGED_FIELDS).map(k=>[k,row.values[k]||''])),...(publicSheet?{__publicFeedbackInitialized:'1'}:{})};
           const lead=await tx.lead.upsert({where:{sheetId_stableSourceId:{sheetId:id,stableSourceId:row.stableId}},create:{...data,managedSnapshot,...(publicSheet?{status:row.values.status||'New',lastFeedback:row.values.feedback||null}:{}),sheetId:id,stableSourceId:row.stableId,leadDate:Number.isNaN(date.getTime())?new Date():date},update:{...data}});
@@ -160,16 +166,25 @@ export async function synchronizeSheet(id:string, provider?:SheetProvider, optio
     // The send path refreshes each queued body just before submission. Rebuilding
     // the whole outbox on every poll delays the first new lead and repeats work.
     if(options.refreshQueued!==false&&sheet.connectionType.startsWith('SIMPLE_'))await refreshSimpleQueuedMessages(id);
-    await db.sheet.update({where:{id},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:imported,lastSyncError:null,...(temporary?{sourceSummary}:{})}});
-    if(!temporary)await db.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'SUCCESS',details:`Imported ${imported} new leads; checked ${rows.length} source rows.`}});
+    await transaction(async tx=>{
+      await lockSheetWork(tx,id);
+      const live=await tx.sheet.updateMany({where:{id,syncStatus:{not:'DELETING'}},data:{syncStatus:'SYNCED',lastSyncAt:new Date(),lastImported:imported,lastSyncError:null,...(temporary?{sourceSummary}:{})}});
+      if(!live.count)throw cancelledSheetWork();
+      if(!temporary)await tx.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'SUCCESS',details:`Imported ${imported} new leads; checked ${rows.length} source rows.`}});
+    });
     if(temporary)for(const row of rows){const existing=existingById.get(row.stableId);if(existing&&sheetSaysSent(row.values.sentStatus))await purgeCompletedLead(existing.id,row);}
     if(contentHash)sourceChecks.set(id,contentHash);
     return {imported,checked:rows.length};
   } catch(error) {
     sourceChecks.delete(id);
+    invalidateTemporarySource(id);
+    if(error instanceof AppError&&error.code==='WORK_CANCELLED'||!await db.sheet.findUnique({where:{id},select:{id:true}}))return {imported:0,checked:0};
     const message=error instanceof AppError?error.message:'Synchronization failed. Check credentials, source permissions, and API availability.';
-    await db.sheet.update({where:{id},data:{syncStatus:'ERROR',lastSyncError:message}});
-    await db.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'ERROR',details:message}});
+    await transaction(async tx=>{
+      await lockSheetWork(tx,id);
+      const live=await tx.sheet.updateMany({where:{id,syncStatus:{not:'DELETING'}},data:{syncStatus:'ERROR',lastSyncError:message}});
+      if(live.count)await tx.syncLog.create({data:{sheetId:id,operation:'IMPORT',status:'ERROR',details:message}});
+    });
     throw error;
   }
 }
@@ -178,7 +193,8 @@ function templateBody(template:string, values:Record<string,string>) {
 }
 export async function assignLead(leadId:string, employeeId?:string, userId?:string, reassign=false) {
   return transaction(async tx=>{
-    const lead=await tx.lead.findUniqueOrThrow({where:{id:leadId},include:{sheet:{include:{rule:{include:{recipients:{orderBy:{position:'asc'},include:{employee:true}},sender:true}}}},assignments:{where:{active:true}}}});
+    const lead=await tx.lead.findUnique({where:{id:leadId},include:{sheet:{include:{rule:{include:{recipients:{orderBy:{position:'asc'},include:{employee:true}},sender:true}}}},assignments:{where:{active:true}}}});
+    if(!lead)return {assigned:false,reason:'Sheet work cancelled'};
     const rule=lead.sheet.rule;
     const simple=lead.sheet.connectionType.startsWith('SIMPLE_');
     if(!rule)throw new AppError(400,'Configure distribution settings first');
@@ -232,8 +248,8 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
 export async function refreshSimpleQueuedMessages(sheetId:string,messageId?:string,requireOnline=false){
   const queued=await db.message.findMany({where:{...(messageId?{id:messageId}:{}),lead:{sheetId},status:'QUEUED',assignment:{active:true}},select:{id:true}});
   for(const message of queued)await transaction(async tx=>{
-    const current=await tx.message.findUniqueOrThrow({where:{id:message.id},include:{assignment:true,lead:{include:{sheet:true}}}});
-    if(current.status!=='QUEUED'||!current.assignment.active)return;
+    const current=await tx.message.findUnique({where:{id:message.id},include:{assignment:true,lead:{include:{sheet:true}}}});
+    if(!current||current.status!=='QUEUED'||!current.assignment.active)return;
     if(current.lead.sheet.sendFeedbackLink===false){
       const body=simpleLeadMessage(current.lead,current.lead.sheet.project);
       if(body!==decrypt(current.encryptedBody))await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(body)}});
@@ -247,6 +263,10 @@ export async function refreshSimpleQueuedMessages(sheetId:string,messageId?:stri
     let token=decrypt(current.encryptedBody).match(/\/(?:f|feedback)\/([\w.-]+)/)?.[1];
     const saved=token?await tx.feedbackToken.findUnique({where:{tokenHash:hash(token)}}):null;
     if(!saved||token?.length!==22||saved.assignmentId!==current.assignmentId||saved.revokedAt||saved.expiresAt<new Date()){
+      // Take a real write on the message before creating its token, so an
+      // immediate sheet delete cannot leave a token for a removed assignment.
+      const live=await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(decrypt(current.encryptedBody))}});
+      if(!live.count)return;
       token=shortFeedbackToken();await tx.feedbackToken.create({data:{assignmentId:current.assignmentId,tokenHash:hash(token),expiresAt:saved&&!saved.revokedAt&&saved.expiresAt>new Date()?saved.expiresAt:new Date(Date.now()+30*86400000)}});
     }
     const body=simpleLeadMessage(current.lead,current.lead.sheet.project,`${await feedbackBaseURL(tx,requireOnline)}/f/${token}`);
@@ -292,14 +312,17 @@ export async function saveFeedback(assignmentId:string,input:unknown,actorId?:st
 export async function writebackLead(id:string, provider?:SheetProvider,options:{deliveryOnly?:boolean}={}) {
   try{await hydrateTemporaryFeedback(id,provider);}catch(error){
     const failed=await db.lead.findUnique({where:{id},select:{sheetId:true}});
-    if(failed){
-      await db.lead.updateMany({where:{id},data:{writebackStatus:'ERROR'}});
-      await db.syncLog.create({data:{sheetId:failed.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Sheet identity verification is unavailable; feedback remains queued.'}});
-    }
+    if(!failed||error instanceof AppError&&error.code==='WORK_CANCELLED')return;
+    await transaction(async tx=>{
+      await lockSheetWork(tx,failed.sheetId);
+      const live=await tx.lead.updateMany({where:{id},data:{writebackStatus:'ERROR'}});
+      if(live.count)await tx.syncLog.create({data:{sheetId:failed.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Sheet identity verification is unavailable; feedback remains queued.'}});
+    });
     throw error;
   }
   const startedAt=new Date();
-  const lead=await db.lead.findUniqueOrThrow({where:{id},include:{sheet:true,assignments:{where:{active:true,isPrimary:true},include:{employee:true}},messages:{orderBy:{queuedAt:'desc'},include:{assignment:{include:{employee:true}}}}}});
+  const lead=await db.lead.findUnique({where:{id},include:{sheet:true,assignments:{where:{active:true,isPrimary:true},include:{employee:true}},messages:{orderBy:{queuedAt:'desc'},include:{assignment:{include:{employee:true}}}}}});
+  if(!lead)return;
   const owner=lead.assignments[0]?.employee;
   const messages=currentDeliveryMessages(lead.messages,lead.sheet.connectionType.startsWith('SIMPLE_')?lead.managedSnapshot:undefined);
   const message=messages[0];
@@ -310,29 +333,47 @@ export async function writebackLead(id:string, provider?:SheetProvider,options:{
   // delivery job can mark a lead SYNCED while its feedback is still missing.
   const values:Record<string,string>=simple?{...delivery,...(lead.lastFeedback?{status:lead.status,feedback:lead.lastFeedback}: {})}:options.deliveryOnly?delivery:{assignedEmployee:owner?.name||'',assignedPhone:owner?.phone||'',status:lead.status,feedback:lead.lastFeedback||'',nextFollowupAt:lead.nextFollowupAt?.toISOString()||'',lastContactAt:lead.lastContactAt?.toISOString()||'',updatedAt:lead.updatedAt.toISOString(),updatedBy:owner?.name||'',...delivery,sentAt:message?.submittedAt?.toISOString()||'',deliveryStatus:message && ['SENT','DELIVERED','READ'].includes(message.status)?message.status:'Unconfirmed'};
   try {
+    await assertSheetWork(lead.sheetId,id);
     const observed=await (provider||sheetProvider(lead.sheet)).write(lead.sheet,lead.stableSourceId,lead.metadataId,values);
     const snapshot={...(lead.managedSnapshot as Record<string,string>||{}),...observed,...values,...(simple&&(observed||Object.hasOwn(values,'status'))?{__publicOutputV2:'1'}:{})};
     const updated=await transaction(async tx=>{
+      await lockSheetWork(tx,lead.sheetId);
+      if(!await tx.lead.findUnique({where:{id},select:{id:true}}))return null;
       const updated=await tx.lead.updateMany({where:{id,version:lead.version},data:{writebackStatus:'SYNCED',managedSnapshot:snapshot}});
+      if(!updated.count){
+        const live=await tx.lead.updateMany({where:{id},data:{managedSnapshot:snapshot}});
+        if(!live.count)return null;
+        await enqueue(tx,'WRITEBACK',id,`writeback:repair:${id}:${opaqueToken()}`);
+      }
       if(temporaryLeadStorage(lead.sheet))await tx.feedbackLink.updateMany({where:{leadId:id},data:{outputHash:sheetOutputHash(snapshot)}});
       const sent=messages.filter(message=>!message.uncertain&&SUCCESSFUL_SEND_STATUSES.includes(message.status));
       await queueLeadSentNotifications(tx,sent.map(message=>message.id),lead.sheet.organizationId);
+      if(!temporaryLeadStorage(lead.sheet))await tx.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'SUCCESS',details:`Managed fields synchronized for lead ${id}.`}});
       return updated;
     });
+    if(!updated){invalidateTemporarySource(lead.sheetId);return;}
     if(updated.count&&(simple||!options.deliveryOnly))await db.job.updateMany({where:{type:'WRITEBACK',entityId:id,status:{in:['PENDING','DEAD']},createdAt:{lte:startedAt}},data:{status:'COMPLETED',error:null,lockedAt:null,lockToken:null}});
-    if(!updated.count){await db.lead.update({where:{id},data:{managedSnapshot:snapshot}});await enqueue(db,'WRITEBACK',id,`writeback:repair:${id}:${opaqueToken()}`);}
     invalidateTemporarySource(lead.sheetId);
-    if(!temporaryLeadStorage(lead.sheet))await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'SUCCESS',details:`Managed fields synchronized for lead ${id}.`}});
     await purgeCompletedLead(id);
-  }catch(error){await db.lead.update({where:{id},data:{writebackStatus:'ERROR'}});await db.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Google writeback unavailable; feedback remains saved in the database.'}});throw error;}
+  }catch(error){
+    invalidateTemporarySource(lead.sheetId);
+    if(error instanceof AppError&&error.code==='WORK_CANCELLED'||!await db.lead.findUnique({where:{id},select:{id:true}}))return;
+    await transaction(async tx=>{
+      await lockSheetWork(tx,lead.sheetId);
+      const live=await tx.lead.updateMany({where:{id},data:{writebackStatus:'ERROR'}});
+      if(live.count)await tx.syncLog.create({data:{sheetId:lead.sheetId,operation:'WRITEBACK',status:'ERROR',details:error instanceof AppError?error.message:'Google writeback unavailable; feedback remains saved in the database.'}});
+    });
+    throw error;
+  }
 }
 export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvider,sourceProvider?:SheetProvider) {
-  const message=await db.message.findUniqueOrThrow({where:{id},include:{sender:true,assignment:{include:{employee:true}},lead:{include:{sheet:{include:{rule:true}}}}}});
-  if(message.status!=='QUEUED')return;
+  const message=await db.message.findUnique({where:{id},include:{sender:true,assignment:{include:{employee:true}},lead:{include:{sheet:{include:{rule:true}}}}}});
+  if(!message||message.status!=='QUEUED')return;
   if(message.sender.organizationId!==message.lead.sheet.organizationId||message.assignment.employee.organizationId!==message.lead.sheet.organizationId)throw new AppError(403,'Message connections must belong to this organisation');
   const simple=message.lead.sheet.connectionType.startsWith('SIMPLE_');
   if(simple&&await transaction(async tx=>{
-    const lead=await tx.lead.findUniqueOrThrow({where:{id:message.leadId},select:{managedSnapshot:true}});
+    const lead=await tx.lead.findUnique({where:{id:message.leadId},select:{managedSnapshot:true}});
+    if(!lead)return true;
     if(!sheetAlreadySent(lead.managedSnapshot)&&!await hasSubmittedLead(tx,message.leadId,lead.managedSnapshot))return false;
     await cancelQueuedLeadMessages(tx,message.leadId);return true;
   }))return;
@@ -341,12 +382,13 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
   if(message.sender.status!=='CONNECTED')throw new AppError(409,'Sender disconnected; outgoing jobs remain queued','DISCONNECTED');
   if(simple&&(!isDemo()||sourceProvider)){
     const rows=await (sourceProvider||sheetProvider(message.lead.sheet)).read(message.lead.sheet);
+    if(!await db.message.findUnique({where:{id},select:{id:true}})){invalidateTemporarySource(message.lead.sheetId);return;}
     const matches=rows.filter(row=>row.stableId===message.lead.stableSourceId);
     if(matches.length!==1)throw new AppError(409,'The original lead row is missing or duplicated. Sending is held for review.','SYNC_CONFLICT');
     if(sheetSaysSent(matches[0].values.sentStatus)){
       await transaction(async tx=>{
-        const current=await tx.message.findUniqueOrThrow({where:{id},include:{assignment:true}});
-        if(current.status==='QUEUED'&&current.assignment.active)await rememberSheetSent(tx,message.leadId,matches[0].values);
+        const current=await tx.message.findUnique({where:{id},include:{assignment:true}});
+        if(current?.status==='QUEUED'&&current.assignment.active)await rememberSheetSent(tx,message.leadId,matches[0].values);
       });
       return;
     }
@@ -356,7 +398,8 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
   const executiveNotificationPhone=message.lead.sheet.rule?.executiveNotificationPhone||null;
   const claimData={status:'PROCESSING',attemptCount:{increment:1},lastAttemptAt:new Date(),notificationPhone,executiveNotificationPhone,notificationName:notificationPhone||executiveNotificationPhone?message.assignment.employee.name:null,notificationStatus:notificationPhone||executiveNotificationPhone?'WAITING':null,executiveNotificationStatus:executiveNotificationPhone?'WAITING':null};
   const claimed=simple?await transaction(async tx=>{
-    const lead=await tx.lead.findUniqueOrThrow({where:{id:message.leadId},select:{managedSnapshot:true}});
+    const lead=await tx.lead.findUnique({where:{id:message.leadId},select:{managedSnapshot:true}});
+    if(!lead)return {count:0};
     if(sheetAlreadySent(lead.managedSnapshot)||await hasSubmittedLead(tx,message.leadId,lead.managedSnapshot)){await cancelQueuedLeadMessages(tx,message.leadId);return {count:0};}
     if(await tx.message.findFirst({where:{leadId:message.leadId,id:{not:id},status:'PROCESSING'},select:{id:true}})){await cancelQueuedLeadMessages(tx,message.leadId,'A delivery for this lead is already in progress; duplicate sending prevented.');return {count:0};}
     // Both competing send claims write the lead, so MongoDB/SQLite serializes
@@ -365,19 +408,25 @@ export async function dispatchMessage(id:string, providerOverride?:WhatsAppProvi
     return tx.message.updateMany({where:{id,status:'QUEUED',assignment:{active:true}},data:claimData});
   }):await db.message.updateMany({where:{id,status:'QUEUED'},data:claimData});
   if(!claimed.count)return;
-  const body=decrypt((await db.message.findUniqueOrThrow({where:{id}})).encryptedBody);
+  const current=await db.message.findUnique({where:{id}});if(!current){invalidateTemporarySource(message.lead.sheetId);return;}
+  const body=decrypt(current.encryptedBody);
   const rule=message.lead.sheet.rule;
   // Meta approved template body parameter order is documented in README.
   const parameters=[message.lead.customerName,message.lead.mobile,message.lead.project,message.assignment.employee.name,body.match(/https?:\/\/\S+\/(?:f|feedback)\/\S+/)?.[0]||'Notification only'];
   try {
     const result=await (providerOverride||whatsappProvider(message.sender)).sendMessage({to:message.recipient,body,template:rule?.metaTemplate,language:rule?.metaLanguage,parameters,messageId:message.id});
-    await transaction(async tx=>{await tx.message.update({where:{id},data:{status:result.status,providerMessageId:result.id,submittedAt:new Date(),uncertain:false,failureReason:null}});await queueDeliveryWriteback(tx,message,`submitted:${message.attemptCount+1}`);});
+    await transaction(async tx=>{const live=await tx.message.updateMany({where:{id},data:{status:result.status,providerMessageId:result.id,submittedAt:new Date(),uncertain:false,failureReason:null}});if(live.count)await queueDeliveryWriteback(tx,message,`submitted:${message.attemptCount+1}`);});
   } catch(error) {
+    if(error instanceof AppError&&error.code==='WORK_CANCELLED'){
+      await db.message.updateMany({where:{id,status:'PROCESSING'},data:{status:'CANCELLED',failureReason:error.message}});
+      invalidateTemporarySource(message.lead.sheetId);return;
+    }
+    if(!await db.message.findUnique({where:{id},select:{id:true}})){invalidateTemporarySource(message.lead.sheetId);return;}
     if(error instanceof AppError&&error.code==='DISCONNECTED'){
-      await db.message.update({where:{id},data:{status:'QUEUED',failureReason:null}});throw error;
+      await db.message.updateMany({where:{id},data:{status:'QUEUED',failureReason:null}});throw error;
     }
     const uncertain=error instanceof UncertainDelivery || !(error instanceof AppError);
-    await db.message.update({where:{id},data:{status:'FAILED',failedAt:new Date(),uncertain,failureReason:uncertain?'Acceptance is uncertain. Verify with the sender before any manual resend.':(error as Error).message}});
+    await db.message.updateMany({where:{id},data:{status:'FAILED',failedAt:new Date(),uncertain,failureReason:uncertain?'Acceptance is uncertain. Verify with the sender before any manual resend.':(error as Error).message}});
     // Provider rejections and uncertain outcomes require explicit review; no blind retry.
   }
 }
@@ -388,7 +437,8 @@ export async function retryMessage(id:string,userId:string) {
 }
 export async function processJob(id:string, candidate?:Job,beforeNotificationSend?:()=>Promise<void>) {
   const token=opaqueToken();
-  const job=candidate||await db.job.findUniqueOrThrow({where:{id}});
+  const job=candidate||await db.job.findUnique({where:{id}});
+  if(!job)return false;
   const lock={status:'PROCESSING',lockedAt:new Date(),lockToken:token};
   let deliveryOnly=job.key.startsWith('writeback:delivery:');
   const claimed=job.type==='WRITEBACK'?await transaction(async tx=>{
@@ -430,6 +480,15 @@ export async function processJob(id:string, candidate?:Job,beforeNotificationSen
       if(sheet&&temporaryLeadStorage(sheet))await db.job.deleteMany({where:ownership});
     }
   }catch(error){
+    if(error instanceof AppError&&error.code==='WORK_CANCELLED'){
+      await db.job.updateMany({where:ownership,data:{status:'COMPLETED',lockedAt:null,lockToken:null,error:null}});
+      if(job.type==='SYNC'){sourceChecks.delete(job.entityId);invalidateTemporarySource(job.entityId);}
+      return true;
+    }
+    if(!await db.job.findUnique({where:{id},select:{id:true}})){
+      if(job.type==='SYNC'){sourceChecks.delete(job.entityId);invalidateTemporarySource(job.entityId);}
+      return true;
+    }
     const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED','APPS_SCRIPT_AUTH','APPS_SCRIPT_UPGRADE','APPS_SCRIPT_PROTECTED'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
     const attempts=job.attempts+(paused?0:1);
     await db.job.updateMany({where:ownership,data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});

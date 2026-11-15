@@ -52,6 +52,7 @@ export async function readTemporaryFeedback(link:FeedbackLink,observe=true):Prom
   if(!sheet||!employee?.active||employee.organizationId!==sheet.organizationId)throw new AppError(410,'This feedback assignment is no longer available.');
   const cached=sources.get(sheet.id);
   const rows=cached&&cached.key===cacheKey(sheet)&&Date.now()-cached.at<15000?cached.rows:await sheetProvider(sheet).read(sheet);
+  if(!await db.sheet.findUnique({where:{id:sheet.id},select:{id:true}})){invalidateTemporarySource(sheet.id);throw new AppError(410,'This feedback assignment is no longer available.');}
   if(rows!==cached?.rows)cacheTemporarySource(sheet,rows);
   const matches=rows.filter(row=>hash(row.stableId)===link.sourceHash);
   if(matches.length!==1)throw new AppError(409,'The original lead row is missing or duplicated. Ask your manager to check the sheet.','SYNC_CONFLICT');
@@ -65,7 +66,9 @@ export async function readTemporaryFeedback(link:FeedbackLink,observe=true):Prom
       const changed=await tx.feedbackLink.updateMany({where:{id:link.id,version:link.version,outputHash:link.outputHash},data:{version:{increment:1},outputHash}});
       if(changed.count)await tx.feedbackLink.updateMany({where:{leadId:link.leadId,id:{not:link.id}},data:{version:link.version+1,outputHash}});
     });
-    link=await db.feedbackLink.findUniqueOrThrow({where:{id:link.id}});
+    const refreshed=await db.feedbackLink.findUnique({where:{id:link.id}});
+    if(!refreshed){invalidateTemporarySource(sheet.id);throw new AppError(410,'This feedback assignment is no longer available.');}
+    link=refreshed;
   }
   const data=sourceLeadData(sheet,row);
   const lead:Lead&{sheet:Sheet}={...data,id:link.leadId,sheetId:sheet.id,sheet,status:row.values.status||'New',interest:null,lastFeedback:row.values.feedback||null,
@@ -84,13 +87,15 @@ export async function saveTemporaryFeedback(link:FeedbackLink,input:unknown){
     if(current.version!==data.version)throw new AppError(409,'Another update was saved. Refresh this lead before submitting again.','VERSION_CONFLICT');
     const [sheet,employee]=await Promise.all([tx.sheet.findUnique({where:{id:current.sheetId}}),tx.employee.findUnique({where:{id:current.employeeId}})]);
     if(!sheet||!employee?.active||employee.organizationId!==sheet.organizationId)throw new AppError(410,'This feedback assignment is no longer available.');
+    // Claim the existing lookup before recreating temporary children. Its real
+    // version write conflicts with deletion, including on MongoDB without FKs.
+    const claimed=await tx.feedbackLink.updateMany({where:{id:current.id,version:data.version},data:{version:data.version+1}});
+    if(!claimed.count)throw new AppError(409,'Another update was saved. Refresh this lead before submitting again.','VERSION_CONFLICT');
     await tx.lead.upsert({where:{id:current.leadId},create:{id:current.leadId,sheetId:sheet.id,stableSourceId:decrypt(current.encryptedSourceId),sourceRow:0,sourceFingerprint:'',
       customerName:'[Queued feedback]',mobile:'',project:sheet.project,version:data.version,managedSnapshot:{__temporaryFeedback:'1',__needsHydration:'1',__expectedOutputHash:current.outputHash,__publicFeedbackInitialized:'1',__sourceSent:'1',sentStatus:'Sent'}},update:{}});
     await tx.assignment.upsert({where:{id:current.assignmentId},create:{id:current.assignmentId,leadId:current.leadId,employeeId:employee.id,generation:current.generation},update:{}});
     await tx.feedbackToken.upsert({where:{id:current.id},create:{id:current.id,assignmentId:current.assignmentId,tokenHash:current.tokenHash,expiresAt:current.expiresAt},update:{}});
     const feedback=await saveFeedback(current.assignmentId,data,undefined,current.id,tx);
-    const claimed=await tx.feedbackLink.updateMany({where:{id:current.id,version:data.version},data:{version:data.version+1}});
-    if(!claimed.count)throw new AppError(409,'Another update was saved. Refresh this lead before submitting again.','VERSION_CONFLICT');
     await tx.feedbackLink.updateMany({where:{leadId:current.leadId,id:{not:current.id}},data:{version:data.version+1}});
     return feedback;
   });
@@ -125,7 +130,7 @@ export async function hydrateTemporaryFeedback(leadId:string,provider?:SheetProv
   if(matches.length!==1||!sheetSaysSent(matches[0].values.sentStatus))throw new AppError(409,'The original sent lead row is missing, duplicated, or reopened. Feedback remains queued.','SYNC_CONFLICT');
   if(sheetOutputHash(matches[0].values)!==snapshot.__expectedOutputHash)throw new AppError(409,'A managed sheet value changed after this feedback page was opened. Review the sheet before retrying.','SYNC_CONFLICT');
   const data=sourceLeadData(lead.sheet,matches[0]);
-  await db.lead.update({where:{id:leadId},data:{...data,managedSnapshot:{...data.managedSnapshot,__temporaryFeedback:'1',__needsHydration:'0'}}});
+  await db.lead.updateMany({where:{id:leadId},data:{...data,managedSnapshot:{...data.managedSnapshot,__temporaryFeedback:'1',__needsHydration:'0'}}});
 }
 
 export async function purgeCompletedLead(leadId:string,observed?:SourceRow){

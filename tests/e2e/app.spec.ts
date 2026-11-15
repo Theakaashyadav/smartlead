@@ -343,6 +343,20 @@ test('saved phone names replace number labels without losing edited counts and s
   await page.getByRole('button',{name:'Close dialog'}).click();await page.getByRole('button',{name:'Login & PIN',exact:true}).click();await expectCentered(page);
 });
 
+test('an enabled sheet deletes immediately without requiring pause',async({page})=>{
+  const sheet={id:'delete-active-sheet',name:'Active leads',worksheetName:'Incoming',enabled:true,leadCount:1,recipients:[{name:'Recipient',phone:'+919876543211'}],lastSyncError:null,delivery:{submitted:0,queued:1,failed:0,error:null}};
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null},sheets:[sheet]};
+  let deleted=0,paused=0;
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
+  await page.route('**/api/simple/sheets/delete-active-sheet/pause',route=>{paused++;return route.fulfill({json:{data:{paused:true}}});});
+  await page.route('**/api/simple/sheets/delete-active-sheet',route=>{expect(route.request().method()).toBe('DELETE');deleted++;state.sheets=[];return route.fulfill({json:{data:{deleted:true}}});});
+  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Delete Active leads',exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('Delete sheet?');
+  await page.getByRole('dialog').getByRole('button',{name:'Delete sheet',exact:true}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);await expect(page.getByRole('heading',{name:'Active leads',exact:true})).toHaveCount(0);
+  expect(deleted).toBe(1);expect(paused).toBe(0);
+});
+
 test('sheet cards show queued, submitted and failed sends',async({page})=>{
   const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:{id:'web',status:'CONNECTED',phone:'+919876543212',qrCode:null,lastError:null},sheets:[{id:'sheet-status',name:'My leads',worksheetName:'Sheet1',enabled:true,leadCount:6,recipients:[{name:'Person',phone:'+919876543210'}],lastSyncError:null,delivery:{submitted:3,queued:2,failed:1,error:'This phone number is not registered on WhatsApp.'}}]};
   await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));

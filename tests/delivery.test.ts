@@ -76,8 +76,10 @@ describe('administrator lead-sent notifications',()=>{
   it('processes a durable notification job and holds interrupted notification submissions',async()=>{
     const f=await fixture(adminPhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
     const job=await db.job.findFirstOrThrow({where:{type:'NOTIFY'}});
+    await db.job.update({where:{id:job.id},data:{runAt:new Date(0)}});
     await processJob(job.id);
-    expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'COMPLETED'});
+    const completed=await db.job.findUniqueOrThrow({where:{id:job.id}});
+    expect(completed,completed.error||'Notification job should complete').toMatchObject({status:'COMPLETED'});
     expect(await db.message.findUniqueOrThrow({where:{id:f.message.id}})).toMatchObject({status:'SUBMITTED',notificationStatus:'SUBMITTED'});
     await db.message.update({where:{id:f.message.id},data:{notificationStatus:'PROCESSING',notificationLastAttemptAt:new Date(Date.now()-10*60000)}});
     await scheduleJobs(true);
@@ -161,8 +163,8 @@ describe('executive lead-sent notifications',()=>{
     const f=await fixture(adminPhone,executivePhone);await dispatchMessage(f.message.id,f.provider);await writebackLead(f.lead.id,f.sheetProvider);
     let snapshotRead!:()=>void,release!:()=>void;
     const ready=new Promise<void>(resolve=>{snapshotRead=resolve;});const gate=new Promise<void>(resolve=>{release=resolve;});
-    const find=db.message.findUniqueOrThrow.bind(db.message);
-    vi.spyOn(db.message,'findUniqueOrThrow').mockImplementationOnce((args:any)=>(async()=>{const snapshot=await find(args);snapshotRead();await gate;return snapshot;})() as never);
+    const find=db.message.findUnique.bind(db.message);
+    vi.spyOn(db.message,'findUnique').mockImplementationOnce((args:any)=>(async()=>{const snapshot=await find(args);snapshotRead();await gate;return snapshot;})() as never);
     const delayed=dispatchLeadSentNotification(f.message.id,f.provider);
     try{
       await ready;

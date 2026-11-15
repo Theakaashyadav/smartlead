@@ -3,6 +3,7 @@ import { SUCCESSFUL_SEND_STATUSES } from './delivery';
 import { AppError } from './security';
 import { UncertainDelivery, whatsappProvider, type WhatsAppProvider } from './whatsapp';
 import { leadSentNotificationMessage } from './simple-shared';
+import { assertMessageSubmission } from './message-submission';
 
 // Only messages included in a successful sheet write become eligible. Keeping
 // this outbox on the original message leaves lead delivery counts unchanged.
@@ -19,8 +20,8 @@ export async function queueLeadSentNotifications(tx:Transaction,messageIds:strin
 }
 
 export async function dispatchLeadSentNotification(id:string,providerOverride?:WhatsAppProvider,beforeSend?:()=>Promise<void>){
-  const message=await db.message.findUniqueOrThrow({where:{id},include:{sender:true,lead:{include:{sheet:true}}}});
-  if(message.notificationStatus!=='QUEUED')return;
+  const message=await db.message.findUnique({where:{id},include:{sender:true,lead:{include:{sheet:true}}}});
+  if(!message||message.notificationStatus!=='QUEUED')return;
   if(message.sender.organizationId!==message.lead.sheet.organizationId)throw new AppError(403,'Notification sender must belong to this organisation');
   if((!message.notificationPhone&&!message.executiveNotificationPhone)||!message.notificationName||message.lead.redactedAt||message.lead.sourceDeleted||message.uncertain||!SUCCESSFUL_SEND_STATUSES.includes(message.status)){
     await db.message.updateMany({where:{id,notificationStatus:'QUEUED'},data:{notificationStatus:'CANCELLED'}});
@@ -42,30 +43,37 @@ export async function dispatchLeadSentNotification(id:string,providerOverride?:W
     // Another dispatcher can finish the executive and requeue a rejected owner
     // between our initial read and claim. Only the state read under our claim
     // determines the next stage; an older read must never reset that receipt.
-    const current=await db.message.findUniqueOrThrow({where:{id},select:{executiveNotificationStatus:true,executiveNotificationUncertain:true}});
+    const current=await db.message.findUnique({where:{id},select:{notificationStatus:true,executiveNotificationStatus:true,executiveNotificationUncertain:true}});
+    if(!current||current.notificationStatus!=='PROCESSING')return;
     stage=message.executiveNotificationPhone&&!SUCCESSFUL_SEND_STATUSES.includes(current.executiveNotificationStatus||'')?'executive':'owner';
     if(stage==='executive'&&current.executiveNotificationUncertain)throw new UncertainDelivery('Executive notification acceptance is uncertain.');
     const provider=providerOverride||whatsappProvider(message.sender);
     if(stage==='executive'){
       const executiveClaim=await db.message.updateMany({where:{id,notificationStatus:'PROCESSING',executiveNotificationStatus:'QUEUED'},data:{executiveNotificationStatus:'PROCESSING',executiveNotificationLastAttemptAt:new Date(),executiveNotificationAttemptCount:{increment:1}}});
-      if(!executiveClaim.count)throw new AppError(409,'Executive notification is not ready for submission.');
+      if(!executiveClaim.count){
+        if(!await db.message.findUnique({where:{id},select:{id:true}}))return;
+        throw new AppError(409,'Executive notification is not ready for submission.');
+      }
       await beforeSend?.();
+      await assertMessageSubmission({messageId:id,purpose:'EXECUTIVE_LEAD_SENT_NOTIFICATION'},message.senderId);
       const result=await provider.sendMessage({
         to:message.executiveNotificationPhone!,
         body:leadSentNotificationMessage({leadName,recipientName}),
         parameters:[],messageId:message.id,purpose:'EXECUTIVE_LEAD_SENT_NOTIFICATION',
       });
       if(!result.id)throw new UncertainDelivery('Executive notification returned no submission identifier.');
-      await db.message.update({where:{id},data:{executiveNotificationStatus:result.status,executiveNotificationProviderMessageId:result.id,executiveNotificationSubmittedAt:new Date(),executiveNotificationUncertain:false,executiveNotificationFailureReason:null}});
+      const saved=await db.message.updateMany({where:{id,notificationStatus:'PROCESSING',executiveNotificationStatus:'PROCESSING'},data:{executiveNotificationStatus:result.status,executiveNotificationProviderMessageId:result.id,executiveNotificationSubmittedAt:new Date(),executiveNotificationUncertain:false,executiveNotificationFailureReason:null}});
+      if(!saved.count)return;
     }
     if(!message.notificationPhone){
-      await db.message.update({where:{id},data:{notificationStatus:'SUBMITTED',notificationSubmittedAt:new Date(),notificationUncertain:false,notificationFailureReason:null}});
+      await db.message.updateMany({where:{id,notificationStatus:'PROCESSING'},data:{notificationStatus:'SUBMITTED',notificationSubmittedAt:new Date(),notificationUncertain:false,notificationFailureReason:null}});
       return;
     }
     // A recorded executive receipt survives owner retries, so the executive is
     // never sent the same notification again when the owner's send is rejected.
     stage='owner';
     await beforeSend?.();
+    await assertMessageSubmission({messageId:id,purpose:'LEAD_SENT_NOTIFICATION'},message.senderId);
     const result=await provider.sendMessage({
       to:message.notificationPhone,
       body:leadSentNotificationMessage({leadName,recipientName,phone:message.lead.mobile,executiveUpdated:!!message.executiveNotificationPhone}),
@@ -74,18 +82,23 @@ export async function dispatchLeadSentNotification(id:string,providerOverride?:W
       purpose:'LEAD_SENT_NOTIFICATION',
     });
     if(!result.id)throw new UncertainDelivery('Sent notification returned no submission identifier.');
-    await db.message.update({where:{id},data:{notificationStatus:result.status,notificationProviderMessageId:result.id,notificationSubmittedAt:new Date(),notificationUncertain:false,notificationFailureReason:null}});
+    await db.message.updateMany({where:{id,notificationStatus:'PROCESSING'},data:{notificationStatus:result.status,notificationProviderMessageId:result.id,notificationSubmittedAt:new Date(),notificationUncertain:false,notificationFailureReason:null}});
   }catch(error){
+    if(error instanceof AppError&&error.code==='WORK_CANCELLED'){
+      await db.message.updateMany({where:{id,notificationStatus:'PROCESSING',executiveNotificationStatus:'PROCESSING'},data:{executiveNotificationStatus:'CANCELLED'}});
+      await db.message.updateMany({where:{id,notificationStatus:'PROCESSING'},data:{notificationStatus:'CANCELLED',notificationFailureReason:null}});
+      return;
+    }
     const disconnected=error instanceof AppError&&error.code==='DISCONNECTED';
     const uncertain=error instanceof UncertainDelivery||!(error instanceof AppError);
     const failure=uncertain
       ? `${stage==='executive'?'Executive notification':'Sent notification'} acceptance is uncertain. Check the linked WhatsApp account before resending.`
       : disconnected?null:`${stage==='executive'?'Executive notification: ':''}${(error as Error).message}`;
-    await db.message.update({where:{id},data:{
+    const saved=await db.message.updateMany({where:{id,notificationStatus:'PROCESSING'},data:{
       notificationStatus:uncertain?'FAILED':'QUEUED',notificationUncertain:uncertain,
       notificationFailureReason:failure,
       ...(stage==='executive'?{executiveNotificationStatus:uncertain?'FAILED':'QUEUED',executiveNotificationUncertain:uncertain,executiveNotificationFailureReason:failure}:{}),
     }});
-    if(!uncertain)throw error;
+    if(saved.count&&!uncertain)throw error;
   }
 }

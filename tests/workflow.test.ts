@@ -340,7 +340,7 @@ describe('durable end-to-end workflow',()=>{
     expect(await db.distributionRule.findUniqueOrThrow({where:{sheetId:'sheet'}})).toMatchObject({notificationPhone:null,executiveNotificationPhone:null});
   });
   it('rebalances current unsent sheet rows and restarts rotation on each save',async()=>{
-    const {admin,sender,rows}=await fixture();
+    const {admin,rows}=await fixture();
     rows.push({stableId:'source-4',row:6,values:{customerName:'Fifth customer',mobile:'+919800000004'}});
     await db.setting.update({where:{key:'demo-source:sheet'},data:{value:JSON.parse(JSON.stringify(rows))}});
     await db.sheet.update({where:{id:'sheet'},data:{connectionType:'SIMPLE_SERVICE_ACCOUNT'}});
@@ -351,7 +351,7 @@ describe('durable end-to-end workflow',()=>{
     const leads=await db.lead.findMany({orderBy:{sourceRow:'asc'}});
     for(const lead of leads)await assignLead(lead.id);
     const submitted=await db.message.findFirstOrThrow({where:{leadId:leads[0].id}});
-    await dispatchMessage(submitted.id,new DemoWhatsAppProvider(sender));
+    await dispatchMessage(submitted.id,new DemoWhatsAppProvider(await db.sender.findUniqueOrThrow({where:{id:submitted.senderId}})));
     await writebackLead(submitted.leadId,new DemoSheetsProvider());
     await select(people);
     for(const lead of leads)await assignLead(lead.id);

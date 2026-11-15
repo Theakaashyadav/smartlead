@@ -12,6 +12,7 @@ import { nativeWhatsAppLogin, NativeWhatsAppProvider } from './whatsapp-native';
 import { installWhatsAppCompatibility } from './whatsapp-compat';
 import { socketWhatsApp } from './whatsapp-mode';
 import { SocketWhatsAppProvider } from './whatsapp-socket';
+import { assertMessageSubmission } from './message-submission';
 
 export class UncertainDelivery extends Error {}
 export interface SendInput {to:string;body:string;template?:string|null;language?:string;parameters:string[];messageId?:string;purpose?:'LEAD_SENT_NOTIFICATION'|'EXECUTIVE_LEAD_SENT_NOTIFICATION'}
@@ -30,7 +31,7 @@ export class DemoWhatsAppProvider implements WhatsAppProvider {
   async disconnect(){await db.sender.update({where:{id:this.sender.id},data:{status:'DISCONNECTED',qrCode:null}});}
   async getConnectionStatus(){return (await db.sender.findUniqueOrThrow({where:{id:this.sender.id}})).status;}
   async getQRCode(){return null;}
-  async sendMessage(_input:SendInput){if(await this.getConnectionStatus()!=='CONNECTED')throw new AppError(409,'Demo sender is disconnected');return {id:`demo-${crypto.randomUUID()}`,status:'SUBMITTED' as const};}
+  async sendMessage(input:SendInput){if(await this.getConnectionStatus()!=='CONNECTED')throw new AppError(409,'Demo sender is disconnected');await assertMessageSubmission(input,this.sender.id);return {id:`demo-${crypto.randomUUID()}`,status:'SUBMITTED' as const};}
   async getMessageStatus(){return 'SUBMITTED';}
   async handleIncomingEvents(){}
 }
@@ -45,6 +46,7 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
   async sendMessage(input:SendInput){
     if(!input.template)throw new AppError(400,'Set an approved Meta template for this sheet. Automatic notifications always use approved templates.');
     const payload={messaging_product:'whatsapp',to:input.to.replace('+',''),type:'template',template:{name:input.template,language:{code:input.language||'en'},components:[{type:'body',parameters:input.parameters.map(text=>({type:'text',text}))}]}};
+    await assertMessageSubmission(input,this.sender.id);
     let response:Response;
     try{response=await fetch(`${this.url()}/messages`,{method:'POST',headers:{Authorization:`Bearer ${this.credentials().accessToken}`,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(25000)});}catch{throw new UncertainDelivery('Provider request timed out or connection was interrupted; acceptance is unknown. Verify in Meta before resending.');}
     if(!response.ok){if(response.status>=500)throw new UncertainDelivery('Meta returned a server error; acceptance is unknown.');throw new AppError(400,`Meta rejected the notification (HTTP ${response.status}). Check template approval, recipient authorization and account limits.`);}
@@ -67,8 +69,8 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
         if(value!=='FAILED' && (rank[value]||0)<(rank[message.status]||0))continue;
         const date=status.timestamp?new Date(Number(status.timestamp)*1000):new Date();
         await databaseTransaction(async tx=>{
-          await tx.message.update({where:{id:message.id},data:{status:value,uncertain:false,...(value==='SENT'?{sentAt:date}:value==='DELIVERED'?{deliveredAt:date}:value==='READ'?{readAt:date}:{failedAt:date,failureReason:'Provider reported message delivery failure'})}});
-          await queueDeliveryWriteback(tx,message,`status:${value}:${message.providerMessageId}`);
+          const updated=await tx.message.updateMany({where:{id:message.id},data:{status:value,uncertain:false,...(value==='SENT'?{sentAt:date}:value==='DELIVERED'?{deliveredAt:date}:value==='READ'?{readAt:date}:{failedAt:date,failureReason:'Provider reported message delivery failure'})}});
+          if(updated.count)await queueDeliveryWriteback(tx,message,`status:${value}:${message.providerMessageId}`);
         });
       }
     }
@@ -138,6 +140,7 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
     try{await c.pupPage!.evaluate(installWhatsAppCompatibility);}catch{throw new AppError(409,'WhatsApp is reconnecting; outgoing leads remain queued.','DISCONNECTED');}
     let recipient;try{recipient=await c.getNumberId(input.to.replace('+',''));}catch{throw new AppError(502,'Could not check this WhatsApp number.');}
     if(!recipient)throw new AppError(400,'This phone number is not registered on WhatsApp.');
+    await assertMessageSubmission(input,this.sender.id);
     try{
       const message=await c.sendMessage(recipient._serialized,input.body,{sendSeen:false});
       const id=(message?.id as {_serialized?:string;$1?:string}|undefined)?._serialized||(message?.id as {$1?:string}|undefined)?.$1;

@@ -125,14 +125,15 @@ export async function simpleAction(path:string[],method:string,request:Request,u
     return transaction(async tx=>{
       const sheet=await tx.sheet.findFirst({where:{id:path[1],organizationId,...sheetWhere},include:{rule:true}});
       if(!sheet)throw new AppError(404,'Sheet not found');
+      // Take the same parent-row write lock as an import before collecting its
+      // graph, so an in-flight worker cannot add orphaned work after deletion.
+      await tx.sheet.update({where:{id:sheet.id},data:{syncStatus:'DELETING'}});
+      if(sheet.rule)await tx.distributionRule.update({where:{id:sheet.rule.id},data:{enabled:false}});
       const leads=await tx.lead.findMany({where:{sheetId:sheet.id},select:{id:true}});
       const leadIds=leads.map(lead=>lead.id);
-      const messages=await tx.message.findMany({where:{leadId:{in:leadIds}},select:{id:true,status:true,notificationStatus:true}});
+      const messages=await tx.message.findMany({where:{leadId:{in:leadIds}},select:{id:true}});
       const jobs={organizationId,OR:[{type:'SYNC',entityId:sheet.id},{type:{in:['ASSIGN','WRITEBACK']},entityId:{in:leadIds}},{type:{in:['SEND','NOTIFY']},entityId:{in:messages.map(m=>m.id)}}]};
-      if(messages.some(m=>m.status==='PROCESSING'||m.notificationStatus==='PROCESSING')||await tx.job.findFirst({where:{...jobs,status:'PROCESSING'},select:{id:true}})){
-        throw new AppError(409,'This sheet is being updated or sending a message. Pause it, wait a moment, then try deleting again.');
-      }
-      // Remove queued work and dependent records together, keeping shared
+      // Remove queued and claimed work together with dependent records, keeping shared
       // recipients, WhatsApp accounts, and the source Google Sheet intact.
       await tx.job.deleteMany({where:jobs});
       await tx.feedbackToken.deleteMany({where:{assignment:{leadId:{in:leadIds}}}});

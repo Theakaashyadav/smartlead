@@ -122,7 +122,7 @@ function DeleteSheet({sheet,onClose,onDeleted}:{sheet:SheetSummary;onClose:()=>v
   }
   return <Modal title="Delete sheet?" description={`${sheet.name} · ${sheet.worksheetName}`} onClose={close}>
     <div className="simple-delete-sheet">
-      <p>This permanently removes this connection, its imported leads, messages, and feedback from SmartLead. Automatic sending for this sheet will stop.</p>
+      <p>This immediately removes this connection, its imported leads, messages, and feedback from SmartLead. Queued work is cancelled without pausing the sheet first.</p>
       <p>Your original Google Sheet stays unchanged.</p>
       {error&&<p role="alert" className="alert error">{error}</p>}
       <div className="row"><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="danger" busy={busy} onClick={remove}><Trash2 size={16}/>Delete sheet</Button></div>

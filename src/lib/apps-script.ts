@@ -10,6 +10,7 @@ import {enqueue,refreshSimpleQueuedMessages,transaction} from './engine';
 import {SUCCESSFUL_SEND_STATUSES} from './delivery';
 import {SIMPLE_POLL_SECONDS} from './automation-policy';
 import {projectNameSchema} from './validation';
+import {assertSheetWork,cancelledSheetWork} from './sheet-work';
 
 const protocol='smartlead-apps-script-v1';
 const settingsSchema=z.object({token:z.string().min(32),spreadsheetId:z.string().regex(/^[\w-]+$/),gid:z.number().optional(),sheetId:z.string().optional(),endpoint:z.string().optional(),identityStyle:z.enum(['PUBLIC','RAW_ID']).optional()});
@@ -146,7 +147,8 @@ export class AppsScriptSheetsProvider implements SheetProvider{
   async read(sheet:Sheet){const settings=await scriptSettings(sheet);const data=await appsScriptRequest(settings,'read',{worksheetId:sheet.worksheetId});const rows=z.array(z.array(z.string())).parse(data?.rows);return sourceRows(sheet,rows,settings);}
   async write(sheet:Sheet,stableId:string,_metadataId:number|null,values:Record<string,string>){
     const lead=await db.lead.findUnique({where:{sheetId_stableSourceId:{sheetId:sheet.id,stableSourceId:stableId}}});
-    if(!lead||lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'The original lead is no longer available for sheet updates.');
+    if(!lead)throw cancelledSheetWork();
+    if(lead.sourceDeleted||lead.redactedAt)throw new AppError(409,'The original lead is no longer available for sheet updates.');
     const settings=await scriptSettings(sheet);const raw=await appsScriptRequest(settings,'read',{worksheetId:sheet.worksheetId});const rows=z.array(z.array(z.string())).parse(raw?.rows);
     const source=sourceRows(sheet,rows,settings).filter(row=>row.stableId===stableId);
     if(source.length!==1)throw new AppError(409,'The original lead row is missing or duplicated.','SYNC_CONFLICT');
@@ -154,6 +156,7 @@ export class AppsScriptSheetsProvider implements SheetProvider{
     const fields=map.leadId?['leadId']:['mobile',...(map.leadDate?['leadDate']:[])];
     const identity=fields.map(field=>({column:map[field],value:String(rows[source[0].row-1][headers.indexOf(map[field])]||'').trim()}));
     if(identity.some(cell=>!cell.column)||!identity[0]?.value)throw new AppError(409,'The source lead identity is missing.','SYNC_CONFLICT');
+    await assertSheetWork(sheet.id,lead.id);
     const result=await appsScriptRequest(settings,'write',{worksheetId:sheet.worksheetId,stableId,metadataKey:`smartlead_script_${sheet.organizationId}_${sheet.worksheetId}`,identity,values,snapshot:lead.managedSnapshot||{}});
     const observed=z.record(z.string(),z.string()).parse(result?.values);
     if(!Object.entries(values).every(([field,value])=>observed[field]===value))throw new AppError(502,'Apps Script has not confirmed the saved lead fields. The update will retry.','APPS_SCRIPT_VERIFY');
