@@ -12,8 +12,9 @@ import { PhoneLoginSettings } from './phone-login-settings';
 import { ConnectSheet } from './connect-sheet';
 import { ConnectionArt } from './connection-art';
 import { TestLeadFlow } from './test-lead-flow';
+import { FeedbackLinkToggle } from './feedback-link-toggle';
 
-type SheetSummary={id:string;name:string;project?:string;worksheetName:string;googleAuthorized?:boolean;appsScriptConnected?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;executiveNotificationPhone?:string|null;notificationPhone?:string|null;recipients:Array<WhatsAppContact&{leadCount?:number}>;delivery?:{submitted:number;queued:number;failed:number;error:string|null};sentNotificationError?:string|null;writeback?:{pending:number;failed:number;error:string|null}};
+type SheetSummary={id:string;name:string;project?:string;sendFeedbackLink?:boolean;worksheetName:string;googleAuthorized?:boolean;appsScriptConnected?:boolean;lastSyncAt:string|null;lastSyncError:string|null;pollInterval?:number;leadCount:number;enabled:boolean;executiveNotificationPhone?:string|null;notificationPhone?:string|null;recipients:Array<WhatsAppContact&{leadCount?:number}>;delivery?:{submitted:number;queued:number;failed:number;error:string|null};sentNotificationError?:string|null;writeback?:{pending:number;failed:number;error:string|null}};
 type Account={id:string;phone:string|null;status:string;qrCode:string|null;lastError:string|null};
 type State={user:{name:string;email:string|null;phone?:string|null;pinEnabled?:boolean;twoFactor?:boolean};organization:{id:string;name:string};account:Account|null;sheets:SheetSummary[];workerRunning:boolean;workerMessage?:string|null;whatsappLoginMode?:'background'|'browser'|'qr';feedbackError?:string|null;publicSheetWritebackAvailable?:boolean};
 const message=(e:unknown)=>e instanceof Error?e.message:'Please try again.';
@@ -34,6 +35,7 @@ export function SimpleApp(){
   useEffect(()=>{let active=true;const refresh=()=>api<State>('simple/state').then(s=>{if(active)setState(s);}).catch(e=>{if(active)setError(message(e));});refresh();const timer=setInterval(refresh,5000);return()=>{active=false;clearInterval(timer);};},[]);
   async function action(path:string,method='POST',body?:unknown){setBusy(true);setError('');try{const result=await api<{writeback?:{error?:string|null}}>(`simple/${path}`,method,body);await reload();if(result.writeback?.error)setError(result.writeback.error);}catch(e){setError(message(e));}finally{setBusy(false);}}
   function connectScript(sheet:SheetSummary){setScriptSheet(sheet);setConnectOpen(true);}
+  function updateFeedbackLink(id:string,sendFeedbackLink:boolean){setState(current=>current?{...current,sheets:current.sheets.map(sheet=>sheet.id===id?{...sheet,sendFeedbackLink}:sheet)}:current);}
   const account=state?.account;const connected=account?.status==='CONNECTED';
   const currentSheet=state?.sheets.find(s=>s.id===recipientSheet);
   const section=pathname==='/sheets'?'sheets':pathname==='/whatsapp'?'whatsapp':'dashboard';
@@ -48,12 +50,12 @@ export function SimpleApp(){
         {section==='dashboard'&&<><div className="simple-intro"><span className="simple-kicker">SHEETS → WHATSAPP</span><h1>Your leads. Sent automatically.</h1><p>Connect your sheets, link WhatsApp, and choose who receives each lead.</p><ConnectionArt/></div><div className="simple-cards">
           <Link href="/sheets" className="simple-connect-card"><div className="simple-card-icon sheets"><FileSpreadsheet size={30}/></div><h2>Connect Sheets</h2><p>Add one or more Google Sheets.<br/>Choose recipients for each sheet.</p><div className="simple-card-bottom"><span>{state.sheets.length?`${state.sheets.length} sheet${state.sheets.length===1?'':'s'} connected`:'No sheets connected'}</span><ArrowRight size={22}/></div></Link>
           <Link href="/whatsapp" className="simple-connect-card"><div className="simple-card-icon whatsapp"><MessageCircle size={30}/></div><h2>Connect WhatsApp</h2><p>Scan one QR code to link your account.<br/>Use its contacts to send your leads.</p><div className="simple-card-bottom"><span className={connected?'simple-connected':''}>{connected?`Connected ${account?.phone||''}`:'Link your WhatsApp account'}</span><ArrowRight size={22}/></div></Link>
-        </div><div className="simple-how"><span>1. Connect</span><ArrowRight size={15}/><span>2. Choose people</span><ArrowRight size={15}/><span>3. Leads go out, one by one</span></div>{state.sheets.length>0&&<section className="simple-dashboard-sheets" aria-label="Connected sheets"><div className="simple-page-heading"><h2>Your connected sheets</h2><Link className="inline-link" href="/sheets">Manage sheets<ArrowRight size={15}/></Link></div><SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onScript={connectScript} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet} onWriteback={sheet=>action(`sheets/${sheet.id}/writeback`)} onProject={setProjectSheet}/></section>}</>}
+        </div><div className="simple-how"><span>1. Connect</span><ArrowRight size={15}/><span>2. Choose people</span><ArrowRight size={15}/><span>3. Leads go out, one by one</span></div>{state.sheets.length>0&&<section className="simple-dashboard-sheets" aria-label="Connected sheets"><div className="simple-page-heading"><h2>Your connected sheets</h2><Link className="inline-link" href="/sheets">Manage sheets<ArrowRight size={15}/></Link></div><SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onScript={connectScript} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet} onWriteback={sheet=>action(`sheets/${sheet.id}/writeback`)} onProject={setProjectSheet} onFeedbackSaved={updateFeedbackLink}/></section>}</>}
         {section==='sheets'&&<><div className="simple-page-heading"><div><Link className="simple-back" href="/dashboard"><ArrowLeft size={15}/>Dashboard</Link><h1>Your Google Sheets</h1><p>Each person receives their lead count, then the order repeats.</p></div><Button variant="primary" onClick={()=>setConnectOpen(true)}><Plus size={17}/>{state.sheets.length?'Connect another sheet':'Connect sheet'}</Button></div>
           {!connected&&<Link className="simple-connect-notice" href="/whatsapp"><MessageCircle size={19}/><span>Connect WhatsApp to see your contacts and start sending.</span><ArrowRight size={18}/></Link>}
-          {state.feedbackError&&<p role="alert" className="alert info">{state.feedbackError} Your leads remain queued.</p>}
+          {state.feedbackError&&state.sheets.some(sheet=>sheet.sendFeedbackLink!==false)&&<p role="alert" className="alert info">{state.feedbackError} Leads with feedback links remain queued.</p>}
           {state.publicSheetWritebackAvailable===false&&state.sheets.length>0&&<p className="alert info">Feedback is saved in SmartLead. Automatic feedback updates to public Google Sheets are unavailable with this connection.</p>}
-          {!state.sheets.length?<div className="simple-empty"><FileSpreadsheet size={42}/><h2>Connect your first sheet</h2><p>Paste a Google Sheets link. You can add more sheets whenever you need.</p><Button variant="primary" onClick={()=>setConnectOpen(true)}><Plus size={16}/>Connect sheet</Button></div>:<SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onScript={connectScript} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet} onWriteback={sheet=>action(`sheets/${sheet.id}/writeback`)} onProject={setProjectSheet}/>}
+          {!state.sheets.length?<div className="simple-empty"><FileSpreadsheet size={42}/><h2>Connect your first sheet</h2><p>Paste a Google Sheets link. You can add more sheets whenever you need.</p><Button variant="primary" onClick={()=>setConnectOpen(true)}><Plus size={16}/>Connect sheet</Button></div>:<SheetCards sheets={state.sheets} connected={connected} busy={busy} onRecipients={setRecipientSheet} onScript={connectScript} onToggle={sheet=>action(`sheets/${sheet.id}/pause`,'PUT',{enabled:!sheet.enabled})} onDelete={setDeletingSheet} onWriteback={sheet=>action(`sheets/${sheet.id}/writeback`)} onProject={setProjectSheet} onFeedbackSaved={updateFeedbackLink}/>}
         </>}
         {section==='whatsapp'&&<><div className="simple-page-heading"><div><Link className="simple-back" href="/dashboard"><ArrowLeft size={15}/>Dashboard</Link><h1>Your WhatsApp</h1><p>One account for all your connected sheets.</p></div></div><section className="simple-whatsapp-panel">
           {state.whatsappLoginMode==='background'||state.whatsappLoginMode==='qr'?<WhatsAppBackgroundLogin account={account} busy={busy} workerRunning={state.workerRunning} onConnect={()=>action('whatsapp/connect')} onDisconnect={()=>action('whatsapp/disconnect')}/>:<WhatsAppBrowserLogin account={account} busy={busy} workerRunning={state.workerRunning} onConnect={()=>action('whatsapp/connect')} onDisconnect={()=>action('whatsapp/disconnect')}/>}
@@ -69,11 +71,12 @@ export function SimpleApp(){
   </div>;
 }
 
-function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onScript,onWriteback,onProject}:{sheets:SheetSummary[];connected:boolean;busy:boolean;onRecipients:(id:string)=>void;onToggle:(sheet:SheetSummary)=>void;onDelete:(sheet:SheetSummary)=>void;onScript:(sheet:SheetSummary)=>void;onWriteback:(sheet:SheetSummary)=>void;onProject:(sheet:SheetSummary)=>void}){
+function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onScript,onWriteback,onProject,onFeedbackSaved}:{sheets:SheetSummary[];connected:boolean;busy:boolean;onRecipients:(id:string)=>void;onToggle:(sheet:SheetSummary)=>void;onDelete:(sheet:SheetSummary)=>void;onScript:(sheet:SheetSummary)=>void;onWriteback:(sheet:SheetSummary)=>void;onProject:(sheet:SheetSummary)=>void;onFeedbackSaved:(id:string,sendFeedbackLink:boolean)=>void}){
   return <div className="simple-sheet-list">{sheets.map(sheet=><article className="simple-sheet" key={sheet.id}>
     <div className="simple-sheet-top"><div className="simple-card-icon sheets"><FileSpreadsheet size={24}/></div><div className="simple-sheet-title"><h2>{sheet.name}</h2><p>{sheet.worksheetName}</p></div><span className={`simple-status ${sheet.enabled&&connected?'on':''}`}>{sheet.enabled?(sheet.delivery?.failed?'Some sends need checking':connected?'Sending automatically':'Waiting for WhatsApp'):sheet.recipients.length?'Paused':'Choose recipients'}</span></div>
     <div className="simple-sheet-people"><Users size={17}/><span>{sheet.recipients.length?sheet.recipients.map(p=>`${p.name} (${p.leadCount||1} ${(p.leadCount||1)===1?'lead':'leads'})`).join(' → '):'No recipients selected'}</span>{sheet.recipients.length>1&&<span className="muted">→ repeat</span>}</div>
     <div className="row between" style={{flexWrap:'wrap'}}><span style={{overflowWrap:'anywhere',minWidth:0}}>Project: <strong>{sheet.project||sheet.name}</strong></span><Button disabled={busy} onClick={()=>onProject(sheet)}>Edit project</Button></div>
+    <SheetFeedbackLink sheet={sheet} onSaved={onFeedbackSaved}/>
     {sheet.executiveNotificationPhone&&<p className="muted">Executive lead notifications go to {sheet.executiveNotificationPhone}.</p>}
     {sheet.notificationPhone&&<p className="muted">Your sent notifications go to {sheet.notificationPhone}{sheet.executiveNotificationPhone?' after the executive is notified':''}.</p>}
     {sheet.lastSyncError&&<p className="alert error">{sheet.lastSyncError}</p>}
@@ -88,10 +91,21 @@ function SheetCards({sheets,connected,busy,onRecipients,onToggle,onDelete,onScri
   </article>)}</div>;
 }
 
+function SheetFeedbackLink({sheet,onSaved}:{sheet:SheetSummary;onSaved:(id:string,sendFeedbackLink:boolean)=>void}){
+  const [busy,setBusy]=useState(false);const [error,setError]=useState('');
+  async function update(sendFeedbackLink:boolean){
+    if(busy)return;setBusy(true);setError('');
+    try{const result=await api<{sendFeedbackLink:boolean}>(`simple/sheets/${sheet.id}/feedback-link`,'PUT',{sendFeedbackLink});onSaved(sheet.id,result.sendFeedbackLink);}
+    catch(error){setError(message(error));}finally{setBusy(false);}
+  }
+  return <div className="simple-sheet-feedback"><FeedbackLinkToggle enabled={sheet.sendFeedbackLink!==false} onChange={update} disabled={busy} label={`Send feedback link for ${sheet.name}`} description="Change anytime. Applies to new and queued messages."/>{error&&<p role="alert" className="alert error">{error}</p>}</div>;
+}
+
 function ProjectName({sheet,onClose,onSaved}:{sheet:SheetSummary;onClose:()=>void;onSaved:()=>Promise<void>}){
-  const [project,setProject]=useState(sheet.project||sheet.name);const [busy,setBusy]=useState(false);const [error,setError]=useState('');
-  return <Modal title="Project name" description={sheet.name} onClose={onClose}><form className="simple-form" onSubmit={async event=>{event.preventDefault();setBusy(true);setError('');try{await api(`simple/sheets/${sheet.id}/project`,'PUT',{project:project.trim()});await onSaved();}catch(error){setError(message(error));}finally{setBusy(false);}}}>
+  const [project,setProject]=useState(sheet.project||sheet.name);const [sendFeedbackLink,setSendFeedbackLink]=useState(sheet.sendFeedbackLink!==false);const [busy,setBusy]=useState(false);const [error,setError]=useState('');
+  return <Modal title="Project name" description={sheet.name} onClose={busy?()=>{}:onClose}><form className="simple-form" onSubmit={async event=>{event.preventDefault();setBusy(true);setError('');try{await api(`simple/sheets/${sheet.id}/project`,'PUT',{project:project.trim(),sendFeedbackLink});await onSaved();}catch(error){setError(message(error));}finally{setBusy(false);}}}>
     <Field label="Project name"><input required maxLength={120} value={project} onChange={event=>setProject(event.target.value)} autoFocus/></Field>
+    <FeedbackLinkToggle enabled={sendFeedbackLink} onChange={setSendFeedbackLink} disabled={busy}/>
     <p className="simple-share-note">New and queued WhatsApp messages use this project name. Your sheet values stay as entered.</p>
     {error&&<p role="alert" className="alert error">{error}</p>}
     <Button type="submit" variant="primary" busy={busy}>Save project name</Button>

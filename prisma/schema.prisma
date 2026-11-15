@@ -88,6 +88,7 @@ model Sheet {
   organization Organization @relation(fields:[organizationId], references:[id], onDelete:NoAction, onUpdate:NoAction)
   name String
   project String
+  sendFeedbackLink Boolean @default(true)
   spreadsheetId String
   worksheetId Int @default(0)
   worksheetName String @default("Sheet1")

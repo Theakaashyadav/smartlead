@@ -1,0 +1,1 @@
+ALTER TABLE "Sheet" ADD COLUMN "sendFeedbackLink" BOOLEAN NOT NULL DEFAULT true;

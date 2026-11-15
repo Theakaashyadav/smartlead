@@ -47,11 +47,15 @@ async function fixture(){
     expect(input).toBe(endpoint);const body=JSON.parse(String(init?.body));calls.push({url:input,body});
     context.INPUT=JSON.stringify(body);const reply=runInContext('doPost({postData:{contents:INPUT}})',context);return new Response(reply.text,{headers:{'content-type':'application/json'}});
   }));
-  const connect=async(project?:string)=>{await checkAppsScriptSetup(user,setup.setupId,endpoint);const result=await connectAppsScriptSheet(user,{scriptSetupId:setup.setupId,spreadsheetId,worksheetId:42,columnMapping:mapping,project});return db.sheet.findUniqueOrThrow({where:{id:result.id}});};
+  const connect=async(project?:string,sendFeedbackLink?:boolean)=>{await checkAppsScriptSetup(user,setup.setupId,endpoint);const result=await connectAppsScriptSheet(user,{scriptSetupId:setup.setupId,spreadsheetId,worksheetId:42,columnMapping:mapping,project,sendFeedbackLink});return db.sheet.findUniqueOrThrow({where:{id:result.id}});};
   return {user,setup,rows,tags,writes,calls,context,connect,controls};
 }
 
 describe('Apps Script connection',()=>{
+  it.each([true,false])('saves the feedback link preference %s when connecting a sheet',async sendFeedbackLink=>{
+    const f=await fixture();const sheet=await f.connect('Project A',sendFeedbackLink);
+    expect(sheet.sendFeedbackLink).toBe(sendFeedbackLink);
+  });
   it('stores the entered project separately from the sheet title and original source values',async()=>{
     const f=await fixture();const source=f.rows.map(row=>row.slice(0,5));const sheet=await f.connect('Corbett Meadows');
     expect(sheet.project).toBe('Corbett Meadows');expect(sheet.name).toBe('Private script leads');expect(f.rows.map(row=>row.slice(0,5))).toEqual(source);
@@ -127,10 +131,10 @@ describe('Apps Script connection',()=>{
   });
   it('reconnects an existing source without resetting recipients, cursor or successful sends',async()=>{
     const f=await fixture();const employee=await db.employee.create({data:{organizationId:'legacy',name:'Recipient',phone:'+919800000001',projects:[]}});const sender=await db.sender.create({data:{organizationId:'legacy',name:'WhatsApp',provider:'DEMO',status:'CONNECTED'}});
-    const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Existing',project:'Sales',spreadsheetId,worksheetId:42,worksheetName:'Incoming',connectionType:'SIMPLE_PUBLIC',columnMapping:mapping,rule:{create:{mode:'ROUND_ROBIN',enabled:true,senderId:sender.id,template:'Lead',recipients:{create:{employeeId:employee.id,position:0}}}}}});
+    const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Existing',project:'Sales',spreadsheetId,worksheetId:42,worksheetName:'Incoming',connectionType:'SIMPLE_PUBLIC',columnMapping:mapping,sendFeedbackLink:false,rule:{create:{mode:'ROUND_ROBIN',enabled:true,senderId:sender.id,template:'Lead',recipients:{create:{employeeId:employee.id,position:0}}}}}});
     await synchronizeSheet(sheet.id,{read:async()=>simpleSourceRows(sheet,f.rows),write:async()=>{}});const lead=await db.lead.findFirstOrThrow({where:{sheetId:sheet.id,stableSourceId:'public-id:a'}});await assignLead(lead.id);const message=await db.message.findFirstOrThrow({where:{leadId:lead.id}});await db.message.update({where:{id:message.id},data:{status:'SUBMITTED',uncertain:false}});await db.distributionRule.update({where:{sheetId:sheet.id},data:{cursor:7}});
     await db.lead.update({where:{id:lead.id},data:{status:'Interested',lastFeedback:'Arrange a visit'}});
-    const sends=await db.job.count({where:{type:'SEND'}});const connected=await f.connect();expect(connected.id).toBe(sheet.id);expect(await db.sheet.count()).toBe(1);expect((await db.distributionRule.findUniqueOrThrow({where:{sheetId:sheet.id}})).cursor).toBe(7);expect(await db.ruleRecipient.count()).toBe(1);
+    const sends=await db.job.count({where:{type:'SEND'}});const connected=await f.connect();expect(connected.id).toBe(sheet.id);expect(connected.sendFeedbackLink).toBe(false);expect(await db.sheet.count()).toBe(1);expect((await db.distributionRule.findUniqueOrThrow({where:{sheetId:sheet.id}})).cursor).toBe(7);expect(await db.ruleRecipient.count()).toBe(1);
     await synchronizeSheet(sheet.id);await writebackLead(lead.id);expect(await db.message.count()).toBe(1);expect(await db.job.count({where:{type:'SEND'}})).toBe(sends);expect(f.rows[1].slice(-4)).toEqual(['Sent','Recipient','Interested','Arrange a visit']);
   });
   it('rejects other organisations, expired setups and reuse of a consumed setup',async()=>{

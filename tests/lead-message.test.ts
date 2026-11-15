@@ -2,6 +2,11 @@ import {describe,expect,it} from 'vitest';
 import {simpleLeadMessage,sourceQuestions} from '@/lib/simple-shared';
 
 describe('compact WhatsApp lead messages',()=>{
+  it('omits the feedback heading and link when no feedback link is requested',()=>{
+    const body=simpleLeadMessage({customerName:'Sample Customer',mobile:'+919800000001',location:'Delhi'},'Project A');
+    expect(body).toContain('Name: *Sample Customer*');expect(body).toContain('Phone: *+919800000001*');expect(body).toContain('City: *Delhi*');
+    expect(body.endsWith('Thank you!')).toBe(true);expect(body).not.toContain('Submit Feedback');expect(body).not.toContain('undefined');
+  });
   it('uses the requested layout and keeps sheet answers and the feedback URL intact',()=>{
     const headers=['what_is_your_primary_purpose_for_buying_a_plot?','what_is_your_approximate_budget?','when_are_you_planning_to_purchase?','when_would_you_be_available_for_a_site_visit?'];
     const cells=['build_a_holiday_home','₹30–50_lakh','within_1_month','within_1_month'];

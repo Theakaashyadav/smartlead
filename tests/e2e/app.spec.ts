@@ -168,24 +168,27 @@ test('a pasted sheet link offers Apps Script code and checks access before conne
   await page.route('**/api/simple/sheets/script',route=>{prepared=route.request().postDataJSON();return route.fulfill({json:{data:{setupId:'test-setup',sheetUrl:url,code:'function doPost(e) { return ContentService.createTextOutput("test"); }'}}});});
   await page.route('**/api/simple/sheets/script/check',route=>{checked=route.request().postDataJSON();return route.fulfill({json:{data:{scriptSetupId:'test-setup',spreadsheetId:'script-test-spreadsheet-123456789',title:'Private leads',gid:42,canRead:true,canWrite:true,tabs:[{id:0,name:'Other',headers:['Full Name','Phone Number']},{id:42,name:'Incoming',headers:['Name','Phone']}]}}});});
   await page.route('**/api/simple/sheets',route=>{saved=route.request().postDataJSON();state.sheets=[sheet];return route.fulfill({json:{data:{id:sheet.id}}});});
-  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect sheet',exact:true}).first().click();await page.getByLabel('Google Sheets link').fill(url);await page.getByLabel('Project name',{exact:true}).fill('Corbett Meadows');await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect sheet',exact:true}).first().click();await page.getByLabel('Google Sheets link').fill(url);await page.getByLabel('Project name',{exact:true}).fill('Corbett Meadows');
+  await expect(page.getByRole('switch',{name:'Send feedback link',exact:true})).toBeChecked();await page.getByRole('switch',{name:'Send feedback link',exact:true}).click();
+  await page.getByRole('button',{name:'Continue',exact:true}).click();
   await expect(page.getByLabel('Apps Script code')).toContainText('function doPost');await expect(page.getByRole('button',{name:'Copy Apps Script code'})).toBeVisible();expect(checked).toBeUndefined();
   await expect(page.getByRole('dialog')).toContainText('Who has access: Anyone');await page.screenshot({path:'data/apps-script-setup-desktop.png',fullPage:true});
   const endpoint='https://script.google.com/macros/s/AKfycb_test_deployment_123456789/exec';await page.getByLabel('Apps Script web app URL').fill(endpoint);await page.getByRole('button',{name:'Check connection',exact:true}).click();
   await expect(page.getByRole('status')).toContainText('read and write access confirmed');await expect(page.getByLabel('Sheet tab')).toHaveValue('42');await expect(page.getByLabel('Customer name column')).toHaveValue('Name');await expect(page.getByLabel('Phone number column')).toHaveValue('Phone');
+  await expect(page.getByRole('switch',{name:'Send feedback link',exact:true})).not.toBeChecked();
   await page.getByRole('dialog').getByRole('button',{name:'Connect sheet',exact:true}).click();await expect(page.getByRole('heading',{name:'Who should receive these leads?'})).toBeVisible();
-  expect(prepared).toEqual({url});expect(checked).toEqual({setupId:'test-setup',endpoint});expect(saved).toEqual({scriptSetupId:'test-setup',spreadsheetId:'script-test-spreadsheet-123456789',worksheetId:42,columnMapping:{customerName:'Name',mobile:'Phone'},project:'Corbett Meadows'});expect(popups).toBe(0);
+  expect(prepared).toEqual({url});expect(checked).toEqual({setupId:'test-setup',endpoint});expect(saved).toEqual({scriptSetupId:'test-setup',spreadsheetId:'script-test-spreadsheet-123456789',worksheetId:42,columnMapping:{customerName:'Name',mobile:'Phone'},project:'Corbett Meadows',sendFeedbackLink:false});expect(popups).toBe(0);
 });
 
 test('Apps Script reconnect keeps the existing sheet and recipients',async({page})=>{
-  const sheet={id:'existing-sheet',name:'Existing leads',worksheetName:'Incoming',appsScriptConnected:false,enabled:false,leadCount:9,recipients:[{name:'Person',phone:'+919876543210'}],lastSyncError:null};
+  const sheet={id:'existing-sheet',name:'Existing leads',worksheetName:'Incoming',sendFeedbackLink:false,appsScriptConnected:false,enabled:false,leadCount:9,recipients:[{name:'Person',phone:'+919876543210'}],lastSyncError:null};
   const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:null,sheets:[sheet]};
   await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));let prepared:any;
   await page.route('**/api/simple/sheets/script',route=>{prepared=route.request().postDataJSON();return route.fulfill({json:{data:{setupId:'existing-setup',sheetUrl:'https://docs.google.com/spreadsheets/d/existing-test-spreadsheet-123456789/edit#gid=42',code:'function doPost(e) {}'}}});});
   await page.route('**/api/simple/sheets/script/check',route=>route.fulfill({json:{data:{scriptSetupId:'existing-setup',spreadsheetId:'existing-test-spreadsheet-123456789',title:sheet.name,gid:42,canRead:true,canWrite:true,tabs:[{id:42,name:'Incoming',headers:['Name','Phone']}]}}}));
-  await page.route('**/api/simple/sheets',route=>{sheet.appsScriptConnected=true;return route.fulfill({json:{data:{id:sheet.id,reauthorized:true}}});});
+  await page.route('**/api/simple/sheets',route=>{expect(route.request().postDataJSON().sendFeedbackLink).toBe(false);sheet.appsScriptConnected=true;return route.fulfill({json:{data:{id:sheet.id,reauthorized:true}}});});
   await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Connect Apps Script',exact:true}).click();await expect(page.getByLabel('Apps Script code')).toBeVisible();expect(prepared).toEqual({sheetId:sheet.id});
-  await page.getByLabel('Apps Script web app URL').fill('https://script.google.com/macros/s/AKfycb_test_deployment_123456789/exec');await page.getByRole('button',{name:'Check connection',exact:true}).click();await page.getByRole('button',{name:'Save connection',exact:true}).click();
+  await page.getByLabel('Apps Script web app URL').fill('https://script.google.com/macros/s/AKfycb_test_deployment_123456789/exec');await page.getByRole('button',{name:'Check connection',exact:true}).click();await expect(page.getByRole('switch',{name:'Send feedback link',exact:true})).not.toBeChecked();await page.getByRole('button',{name:'Save connection',exact:true}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);await expect(page.getByRole('button',{name:'Reconnect Apps Script',exact:true})).toBeVisible();await expect(page.getByText('9 leads imported',{exact:true})).toBeVisible();await expect(page.getByText('Person (1 lead)',{exact:true})).toBeVisible();
 });
 
@@ -198,16 +201,40 @@ test('Apps Script deployment errors keep the code and retry form available on mo
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await page.screenshot({path:'data/apps-script-setup-mobile.png',fullPage:true});
 });
 test('an existing sheet project can be changed without reconnecting its script',async({page})=>{
-  const sheet={id:'project-sheet',name:'Meta sheet title',project:'Old project',worksheetName:'Incoming',appsScriptConnected:true,enabled:false,leadCount:9,recipients:[],lastSyncError:null};
+  const sheet={id:'project-sheet',name:'Meta sheet title',project:'Old project',sendFeedbackLink:true,worksheetName:'Incoming',appsScriptConnected:true,enabled:false,leadCount:9,recipients:[],lastSyncError:null};
   const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:true,account:null,sheets:[sheet]};
   await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));let saved:any;let scriptOpened=false;
   await page.route('**/api/simple/sheets/script',route=>{scriptOpened=true;return route.abort();});
-  await page.route('**/api/simple/sheets/project-sheet/project',route=>{saved=route.request().postDataJSON();sheet.project=saved.project;return route.fulfill({json:{data:{project:sheet.project}}});});
+  await page.route('**/api/simple/sheets/project-sheet/project',route=>{saved=route.request().postDataJSON();sheet.project=saved.project;sheet.sendFeedbackLink=saved.sendFeedbackLink;return route.fulfill({json:{data:{project:sheet.project,sendFeedbackLink:sheet.sendFeedbackLink}}});});
   await login(page);await page.goto('/sheets');await page.getByRole('button',{name:'Edit project',exact:true}).click();
   await expect(page.getByRole('textbox',{name:'Project name',exact:true})).toHaveValue('Old project');await page.getByRole('textbox',{name:'Project name',exact:true}).fill('Corbett Meadows');
+  await expect(page.getByRole('dialog').getByRole('switch',{name:'Send feedback link',exact:true})).toBeChecked();await page.getByRole('dialog').getByRole('switch',{name:'Send feedback link',exact:true}).click();
   await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await page.screenshot({path:'data/project-name-mobile.png',fullPage:true});
   await page.getByRole('button',{name:'Save project name',exact:true}).click();await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.locator('article')).toContainText('Project: Corbett Meadows');await expect(page.getByRole('heading',{name:'Meta sheet title',exact:true})).toBeVisible();expect(saved).toEqual({project:'Corbett Meadows'});expect(scriptOpened).toBe(false);
+  await expect(page.locator('article')).toContainText('Project: Corbett Meadows');await expect(page.getByRole('heading',{name:'Meta sheet title',exact:true})).toBeVisible();expect(saved).toEqual({project:'Corbett Meadows',sendFeedbackLink:false});expect(scriptOpened).toBe(false);
+  await expect(page.getByRole('switch',{name:'Send feedback link for Meta sheet title',exact:true})).not.toBeChecked();
+});
+
+test('feedback links switch live per sheet without reconnecting and keep the saved state after an error',async({page})=>{
+  const sheet={id:'live-feedback-sheet',name:'Live feedback leads',project:'Corbett Meadows',sendFeedbackLink:undefined as boolean|undefined,worksheetName:'Incoming',appsScriptConnected:true,enabled:true,leadCount:2,recipients:[{name:'Aman',phone:'+919876543211'}],lastSyncError:null};
+  const state={user:{name:'Admin',email:'admin@smartlead.demo'},organization:{id:'legacy',name:'Test Organisation'},workerRunning:false,account:null,sheets:[sheet]};
+  await page.route('**/api/simple/state',route=>route.fulfill({json:{data:state}}));
+  let requests=0,reconnects=0,recipientChanges=0;
+  await page.route('**/api/simple/sheets/script',route=>{reconnects++;return route.abort();});
+  await page.route('**/api/simple/sheets/live-feedback-sheet/recipients',route=>{recipientChanges++;return route.abort();});
+  await page.route('**/api/simple/sheets/live-feedback-sheet/feedback-link',route=>{
+    requests++;const saved=route.request().postDataJSON();expect(route.request().method()).toBe('PUT');
+    if(requests===2)return route.fulfill({status:503,json:{error:{message:'Could not save the feedback link setting. Try again.'}}});
+    sheet.sendFeedbackLink=saved.sendFeedbackLink;return route.fulfill({json:{data:{sendFeedbackLink:sheet.sendFeedbackLink}}});
+  });
+  await login(page);await page.goto('/sheets');
+  const toggle=page.getByRole('switch',{name:'Send feedback link for Live feedback leads',exact:true});
+  await expect(toggle).toBeChecked();await expect(toggle).toBeEnabled();await toggle.click();await expect(toggle).not.toBeChecked();
+  await page.reload();await expect(toggle).not.toBeChecked();
+  await toggle.click();await expect(page.locator('article').getByRole('alert')).toContainText('Could not save the feedback link setting. Try again.');await expect(toggle).not.toBeChecked();await expect(toggle).toBeEnabled();
+  await toggle.click();await expect(toggle).toBeChecked();
+  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await page.screenshot({path:'data/feedback-link-live-toggle-mobile.png',fullPage:true});
+  expect(requests).toBe(3);expect(reconnects).toBe(0);expect(recipientChanges).toBe(0);expect(sheet.recipients).toHaveLength(1);expect(sheet.leadCount).toBe(2);
 });
 
 test('offline WhatsApp connections show an error and keep the retry button usable',async({page})=>{

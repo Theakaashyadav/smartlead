@@ -208,12 +208,13 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
     for(const recipient of chosen.notify) {
       const employee=rule.recipients.find(r=>r.employeeId===recipient)!.employee;
       const assignment=await tx.assignment.create({data:{leadId,employeeId:recipient,assignedBy:userId,isPrimary:recipient===chosen.owner,generation:generation+1}});
-      const raw=shortFeedbackToken();
+      const sendFeedbackLink=!simple||lead.sheet.sendFeedbackLink!==false;
+      const raw=assignment.isPrimary&&sendFeedbackLink?shortFeedbackToken():undefined;
       // Notification-only recipients get no editable bearer link.
-      const feedbackLink=assignment.isPrimary?`${simple?await feedbackBaseURL(tx,true):appUrl()}/f/${raw}`:'The accountable lead owner will submit feedback.';
-      if(assignment.isPrimary)await tx.feedbackToken.create({data:{assignmentId:assignment.id,tokenHash:hash(raw),expiresAt:new Date(Date.now()+30*86400000)}});
+      const feedbackLink=sendFeedbackLink?(assignment.isPrimary?`${simple?await feedbackBaseURL(tx,true):appUrl()}/f/${raw}`:'The accountable lead owner will submit feedback.'):undefined;
+      if(raw)await tx.feedbackToken.create({data:{assignmentId:assignment.id,tokenHash:hash(raw),expiresAt:new Date(Date.now()+30*86400000)}});
       if(rule.senderId) {
-        const body=simple?simpleLeadMessage(lead,lead.sheet.project,feedbackLink):templateBody(rule.template||DEFAULT_TEMPLATE,{customer_name:lead.customerName,mobile_number:lead.mobile,project_name:lead.project,location:lead.location||'',budget:lead.budget||'',lead_source:lead.source||'',assigned_employee:rule.recipients.find(r=>r.employeeId===chosen.owner)!.employee.name,lead_date:lead.leadDate.toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}),feedback_link:feedbackLink});
+        const body=simple?simpleLeadMessage(lead,lead.sheet.project,feedbackLink):templateBody(rule.template||DEFAULT_TEMPLATE,{customer_name:lead.customerName,mobile_number:lead.mobile,project_name:lead.project,location:lead.location||'',budget:lead.budget||'',lead_source:lead.source||'',assigned_employee:rule.recipients.find(r=>r.employeeId===chosen.owner)!.employee.name,lead_date:lead.leadDate.toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}),feedback_link:feedbackLink||''});
         const message=await tx.message.create({data:{idempotencyKey:`assignment:${assignment.id}`,leadId,assignmentId:assignment.id,senderId:rule.senderId,recipient:employee.phone,encryptedBody:encrypt(body)}});
         await enqueue(tx,'SEND',message.id,`send:${message.id}`);
       }
@@ -229,10 +230,20 @@ export async function assignLead(leadId:string, employeeId?:string, userId?:stri
   });
 }
 export async function refreshSimpleQueuedMessages(sheetId:string,messageId?:string,requireOnline=false){
-  const queued=await db.message.findMany({where:{...(messageId?{id:messageId}:{}),lead:{sheetId},status:'QUEUED',assignment:{active:true,isPrimary:true}},select:{id:true}});
+  const queued=await db.message.findMany({where:{...(messageId?{id:messageId}:{}),lead:{sheetId},status:'QUEUED',assignment:{active:true}},select:{id:true}});
   for(const message of queued)await transaction(async tx=>{
     const current=await tx.message.findUniqueOrThrow({where:{id:message.id},include:{assignment:true,lead:{include:{sheet:true}}}});
     if(current.status!=='QUEUED'||!current.assignment.active)return;
+    if(current.lead.sheet.sendFeedbackLink===false){
+      const body=simpleLeadMessage(current.lead,current.lead.sheet.project);
+      if(body!==decrypt(current.encryptedBody))await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(body)}});
+      return;
+    }
+    if(!current.assignment.isPrimary){
+      const body=simpleLeadMessage(current.lead,current.lead.sheet.project,'The accountable lead owner will submit feedback.');
+      if(body!==decrypt(current.encryptedBody))await tx.message.updateMany({where:{id:current.id,status:'QUEUED'},data:{encryptedBody:encrypt(body)}});
+      return;
+    }
     let token=decrypt(current.encryptedBody).match(/\/(?:f|feedback)\/([\w.-]+)/)?.[1];
     const saved=token?await tx.feedbackToken.findUnique({where:{tokenHash:hash(token)}}):null;
     if(!saved||token?.length!==22||saved.assignmentId!==current.assignmentId||saved.revokedAt||saved.expiresAt<new Date()){

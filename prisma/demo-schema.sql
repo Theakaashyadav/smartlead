@@ -66,6 +66,7 @@ CREATE TABLE "Sheet" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "name" TEXT NOT NULL,
     "project" TEXT NOT NULL,
+    "sendFeedbackLink" BOOLEAN NOT NULL DEFAULT true,
     "spreadsheetId" TEXT NOT NULL,
     "worksheetId" INTEGER NOT NULL DEFAULT 0,
     "worksheetName" TEXT NOT NULL DEFAULT 'Sheet1',

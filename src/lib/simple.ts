@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { db } from './db';
 import { AppError, audit, encrypt, opaqueToken, safeUser } from './security';
-import { enqueue, restartUnsentSheetLeads, synchronizeSheet, transaction, updateLeadSheetNow } from './engine';
+import { enqueue, refreshSimpleQueuedMessages, restartUnsentSheetLeads, synchronizeSheet, transaction, updateLeadSheetNow } from './engine';
 import { inspectSpreadsheet, sheetProvider, verifyGoogleSheetEditor, type SheetProvider, type SourceRow } from './google';
 import { attachAuthorizedSheet, googleOAuthConfiguration, startGoogleAuthorization } from './google-oauth';
 import { phoneSchema, projectNameSchema, notificationPhoneSchema } from './validation';
@@ -44,9 +44,9 @@ export async function simpleAction(path:string[],method:string,request:Request,u
       const pending=writebacks.find(c=>c.writebackStatus==='PENDING')?._count||0;
       const failed=writebacks.find(c=>c.writebackStatus==='ERROR')?._count||0;
       const sourceSummary=temporaryLeadStorage(s)?s.sourceSummary as {total?:number;sent?:number}|null:null;
-      return {id:s.id,name:s.name,project:s.project,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:sourceSummary?.total??s._count.leads,enabled:s.rule?.enabled||false,executiveNotificationPhone:s.rule?.executiveNotificationPhone||null,notificationPhone:s.rule?.notificationPhone||null,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:sourceSummary?.sent??total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},sentNotificationError:notificationFailure?.notificationFailureReason||null,writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
+      return {id:s.id,name:s.name,project:s.project,sendFeedbackLink:s.sendFeedbackLink!==false,worksheetName:s.worksheetName,googleAuthorized:!['SIMPLE_PUBLIC','SIMPLE_APPS_SCRIPT'].includes(s.connectionType)&&!!s.credentialId,appsScriptConnected:s.connectionType==='SIMPLE_APPS_SCRIPT'&&!!s.credentialId,lastSyncAt:s.lastSyncAt,lastSyncError:s.lastSyncError,pollInterval:sheetPollSeconds(s),leadCount:sourceSummary?.total??s._count.leads,enabled:s.rule?.enabled||false,executiveNotificationPhone:s.rule?.executiveNotificationPhone||null,notificationPhone:s.rule?.notificationPhone||null,recipients:s.rule?.recipients.map(r=>({...r.employee,leadCount:s.rule?.mode==='BATCH'?Math.max(1,r.weight):1}))||[],delivery:{submitted:sourceSummary?.sent??total(['SUBMITTED','SENT','DELIVERED','READ']),queued:total(['QUEUED','PROCESSING']),failed:total(['FAILED']),error:failure?.failureReason||null},sentNotificationError:notificationFailure?.notificationFailureReason||null,writeback:{pending,failed,error:failed?writebackError?.details||'Sheet updates are waiting to retry.':null}};
     }));
-    let feedbackError:string|null=null;try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
+    let feedbackError:string|null=null;if(sheets.some(sheet=>sheet.sendFeedbackLink!==false))try{await feedbackBaseURL(db,true);}catch(error){if(error instanceof AppError)feedbackError=error.message;else throw error;}
     const workerRunning=workerHeartbeatFresh(worker?.value);
     return {user:safeUser(user),organization,feedbackError,publicSheetWritebackAvailable:true,sheetOutputColumns:Object.values(SIMPLE_OUTPUT_COLUMNS),whatsappLoginMode:backgroundWhatsApp()?'background':nativeWhatsAppLogin()?'browser':'qr',account:account?{id:account.id,phone:account.phone,status:account.status,qrCode:nativeWhatsAppLogin()&&!backgroundWhatsApp()?null:account.qrCode,lastError:account.lastError}:null,sheets:summaries,workerRunning,workerMessage:workerRunning?null:workerOfflineMessage()};
   }
@@ -107,18 +107,18 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   }
   if(route==='sheets'&&method==='POST'){
     const body=await input();
-    if(body.scriptSetupId){const data=z.object({scriptSetupId:z.string(),spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),columnMapping:z.record(z.string(),z.string()),project:projectNameSchema.optional()}).parse(body);return connectAppsScriptSheet(user,data);}
-    const data=z.object({spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),credentialId:z.string().min(1,'Connect this sheet with Apps Script first.'),columnMapping:z.record(z.string(),z.string()),project:projectNameSchema.optional()}).parse(body);
+    if(body.scriptSetupId){const data=z.object({scriptSetupId:z.string(),spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),columnMapping:z.record(z.string(),z.string()),project:projectNameSchema.optional(),sendFeedbackLink:z.boolean().optional()}).parse(body);return connectAppsScriptSheet(user,data);}
+    const data=z.object({spreadsheetId:z.string(),worksheetId:z.number().int().nonnegative(),credentialId:z.string().min(1,'Connect this sheet with Apps Script first.'),columnMapping:z.record(z.string(),z.string()),project:projectNameSchema.optional(),sendFeedbackLink:z.boolean().optional()}).parse(body);
     const info=await inspectSpreadsheet(data.spreadsheetId,data.credentialId,organizationId);const tab=info.tabs.find((t:{id:number})=>t.id===data.worksheetId);
     if(!tab)throw new AppError(400,'Choose a sheet tab.');
     await verifyGoogleSheetEditor(data.spreadsheetId,data.credentialId,organizationId);
     const existing=await db.sheet.findFirst({where:{organizationId,...sheetWhere,spreadsheetId:data.spreadsheetId,worksheetId:data.worksheetId}});
-    if(existing){await attachAuthorizedSheet(user,existing.id,data.credentialId,tab.name);if(data.project)await db.sheet.update({where:{id:existing.id},data:{project:data.project}});return {id:existing.id,reauthorized:true};}
+    if(existing){await attachAuthorizedSheet(user,existing.id,data.credentialId,tab.name);if(data.project||data.sendFeedbackLink!==undefined){await db.sheet.update({where:{id:existing.id},data:{...(data.project?{project:data.project}:{}),...(data.sendFeedbackLink!==undefined?{sendFeedbackLink:data.sendFeedbackLink}:{})}});await refreshSimpleQueuedMessages(existing.id);}return {id:existing.id,reauthorized:true};}
     const allowed=['customerName','mobile','project','email','location','budget','source','requirement','leadDate','leadId'];
     const mapping=Object.fromEntries(Object.entries(data.columnMapping).filter(([k,v])=>allowed.includes(k)&&v));
     if(!mapping.customerName||!mapping.mobile||Object.values(mapping).some(c=>!tab.headers.includes(c))||new Set(Object.values(mapping)).size!==Object.values(mapping).length)throw new AppError(400,'Choose different, valid columns for name and phone.');
     const account=await simpleSender(organizationId);
-    const sheet=await db.sheet.create({data:{organizationId,name:info.title,project:data.project||info.title,spreadsheetId:data.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_GOOGLE',credentialId:data.credentialId,columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:account?.id,template:SIMPLE_TEMPLATE}}}});
+    const sheet=await db.sheet.create({data:{organizationId,name:info.title,project:data.project||info.title,sendFeedbackLink:data.sendFeedbackLink??true,spreadsheetId:data.spreadsheetId,worksheetId:tab.id,worksheetName:tab.name,connectionType:'SIMPLE_GOOGLE',credentialId:data.credentialId,columnMapping:mapping,managedColumnsApproved:false,syncInterval:SIMPLE_POLL_SECONDS,rule:{create:{mode:'ROUND_ROBIN',enabled:false,senderId:account?.id,template:SIMPLE_TEMPLATE}}}});
     await audit(user.id,'CONNECT_SHEET','sheet',sheet.id);return {id:sheet.id};
   }
   if(path[0]==='sheets'&&path[1]&&path.length===2&&method==='DELETE'){
@@ -156,10 +156,19 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='project'&&path.length===3&&method==='PUT'){
     const sheet=await sheetById(path[1],organizationId);
-    const {project}=z.object({project:projectNameSchema}).parse(await input());
-    await db.sheet.update({where:{id:sheet.id},data:{project}});
+    const {project,sendFeedbackLink}=z.object({project:projectNameSchema,sendFeedbackLink:z.boolean().optional()}).parse(await input());
+    await db.sheet.update({where:{id:sheet.id},data:{project,...(sendFeedbackLink!==undefined?{sendFeedbackLink}:{})}});
+    await refreshSimpleQueuedMessages(sheet.id);
     await audit(user.id,'UPDATE_SHEET_PROJECT','sheet',sheet.id);
-    return {project};
+    return {project,...(sendFeedbackLink!==undefined?{sendFeedbackLink}:{})};
+  }
+  if(path[0]==='sheets'&&path[1]&&path[2]==='feedback-link'&&path.length===3&&method==='PUT'){
+    const sheet=await sheetById(path[1],organizationId);
+    const {sendFeedbackLink}=z.object({sendFeedbackLink:z.boolean()}).parse(await input());
+    await db.sheet.update({where:{id:sheet.id},data:{sendFeedbackLink}});
+    await refreshSimpleQueuedMessages(sheet.id);
+    await audit(user.id,'UPDATE_SHEET_FEEDBACK_LINK','sheet',sheet.id);
+    return {sendFeedbackLink};
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='writeback'&&path.length===3&&method==='POST'){
     const sheet=await sheetById(path[1],organizationId);

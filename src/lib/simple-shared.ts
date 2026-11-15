@@ -31,14 +31,14 @@ export function messageQuestionLabel(question:string){
   if(/\b(purchase|purchasing|buy|buying)\b/i.test(label)&&/\b(when|plan|planning|timeline|timeframe)\b/i.test(label))return 'planning to purchase';
   return label;
 }
-export function simpleLeadMessage(lead:{customerName:string;mobile:string;location?:string|null;budget?:string|null;sourceData?:unknown},projectName:string,feedbackLink:string){
+export function simpleLeadMessage(lead:{customerName:string;mobile:string;location?:string|null;budget?:string|null;sourceData?:unknown},projectName:string,feedbackLink?:string){
   const questions=(lead.sourceData as {questions?:LeadQuestion[]}|null)?.questions||[];
   const details=questions.map(q=>({label:messageQuestionLabel(q.question),answer:q.answer}));
   if(lead.budget&&!details.some(q=>q.label==='budget'))details.push({label:'budget',answer:lead.budget});
   const order=['purpose','budget','planning to purchase','available for a site visit'];
   const rank=(label:string)=>{const index=order.indexOf(label);return index<0?order.length:index;};
   details.sort((a,b)=>rank(a.label)-rank(b.label));
-  return ['Hello, You got a new lead',`Project – *${messageValue(projectName)}*`,"Here's what we know:",`Name: *${messageValue(lead.customerName)}*`,`Phone: *${messageValue(lead.mobile)}*`,`City: *${messageValue(lead.location||'Not provided')}*`,...details.map(q=>`${messageValue(q.label)} - *${messageValue(q.answer||'Not provided')}*`),'*Submit Feedback*',feedbackLink,'Thank you!'].join('\n');
+  return ['Hello, You got a new lead',`Project – *${messageValue(projectName)}*`,"Here's what we know:",`Name: *${messageValue(lead.customerName)}*`,`Phone: *${messageValue(lead.mobile)}*`,`City: *${messageValue(lead.location||'Not provided')}*`,...details.map(q=>`${messageValue(q.label)} - *${messageValue(q.answer||'Not provided')}*`),...(feedbackLink?['*Submit Feedback*',feedbackLink]:[]),'Thank you!'].join('\n');
 }
 export function spreadsheetIdentity(input:string) {
   const value=input.trim();

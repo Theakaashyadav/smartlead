@@ -69,6 +69,19 @@
 .simple-app .simple-test-stage.accepted { color: #178368; }
 .simple-app .simple-test-stage.failed { color: #b54747; }
 .simple-app .simple-test-actions { flex-wrap: wrap; }
+.simple-app .simple-feedback-choice { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 14px 15px; border: 1px solid #e0e8ed; border-radius: 11px; background: #f8fbfc; }
+.simple-app .simple-feedback-choice > div { min-width: 0; }
+.simple-app .simple-feedback-choice strong { display: block; color: #476176; font-size: 12px; }
+.simple-app .simple-feedback-choice small { display: block; margin-top: 5px; color: #7c8e9f; font-size: 11px; line-height: 1.6; }
+.simple-app .simple-feedback-switch { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-shrink: 0; min-height: 38px; min-width: 76px; padding: 3px 0 3px 5px; border: 0; background: transparent; color: #6c7f91; font-size: 12px; cursor: pointer; }
+.simple-app .simple-feedback-switch:focus-visible { outline: 2px solid var(--sl-teal); outline-offset: 4px; border-radius: 6px; }
+.simple-app .simple-feedback-switch:disabled { opacity: .55; cursor: wait; }
+.simple-app .simple-feedback-track { display: block; width: 35px; height: 21px; padding: 3px; border-radius: 20px; background: #a7b4c0; transition: background .15s; }
+.simple-app .simple-feedback-track > span { display: block; width: 15px; height: 15px; border-radius: 50%; background: white; box-shadow: 0 1px 3px #11233b20; transition: transform .15s; }
+.simple-app .simple-feedback-switch[aria-checked=true] { color: #087e71; }
+.simple-app .simple-feedback-switch[aria-checked=true] .simple-feedback-track { background: #087e71; }
+.simple-app .simple-feedback-switch[aria-checked=true] .simple-feedback-track > span { transform: translateX(14px); }
+.simple-app .simple-sheet-feedback { margin: 14px 0; }
 .simple-app .simple-intro {
   position: relative; isolation: isolate; min-height: 292px; margin: 0 0 25px; padding: 39px 42px;
   border: 1px solid #254154; border-radius: 25px; overflow: hidden;
