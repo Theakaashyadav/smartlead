@@ -1,4 +1,4 @@
-import type { Contact, WASocket, WAMessage } from 'baileys';
+import type { Contact, GroupMetadata, WASocket, WAMessage } from 'baileys';
 import type { Sender } from '@/generated/mongo';
 import QRCode from 'qrcode';
 import pino from 'pino';
@@ -6,7 +6,7 @@ import { db, databaseTransaction } from './db';
 import { queueDeliveryWriteback } from './delivery';
 import { AppError, decrypt } from './security';
 import { phoneSchema } from './validation';
-import { mergeWhatsAppContact, type WhatsAppContact } from './simple-shared';
+import { isWhatsAppGroup, mergeWhatsAppContact, type WhatsAppContact } from './simple-shared';
 import { clearSocketAuth, socketAuthState } from './whatsapp-socket-auth';
 import { UncertainDelivery, type SendInput, type WhatsAppProvider } from './whatsapp';
 import { redactSessionLogs } from './session-log-redaction';
@@ -27,6 +27,12 @@ const phoneFromJid = (jid?: string | null) => {
   if (!jid || !/^(?:\d+)(?::\d+)?@(?:s\.whatsapp\.net|c\.us)$/.test(jid)) return null;
   const result = phoneSchema.safeParse(`+${jid.split('@')[0].split(':')[0]}`);
   return result.success ? result.data : null;
+};
+const destinationFromJid = (jid?: string | null) => jid && isWhatsAppGroup(jid) ? jid : phoneFromJid(jid);
+const normalizedUser = (jid?: string | null) => jid?.replace(/:\d+@/, '@').replace('@c.us', '@s.whatsapp.net');
+const ownParticipant = (session: Session, participant: Partial<Contact>) => {
+  const own = [session.socket?.user?.id, session.socket?.user?.lid, session.socket?.user?.phoneNumber].map(normalizedUser).filter(Boolean);
+  return [participant.id, participant.lid, participant.phoneNumber].some(jid => !!jid && own.includes(normalizedUser(jid)));
 };
 const update = (id: string, data: Record<string, unknown>) => db.sender.update({ where: { id }, data });
 
@@ -61,6 +67,28 @@ async function saveContacts(session: Session, contacts: Partial<Contact>[]) {
   await db.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
 }
 
+async function saveGroups(session: Session, groups: Partial<GroupMetadata>[], replace = false) {
+  if (replace) {
+    const active = new Set(groups.map(group => group.id));
+    for (const id of session.contacts.keys()) if (isWhatsAppGroup(id) && !active.has(id)) {
+      session.contacts.delete(id); session.recipients.delete(id);
+    }
+  }
+  for (const group of groups) {
+    if (!group.id || !isWhatsAppGroup(group.id)) continue;
+    const previous = session.contacts.get(group.id);
+    session.contacts.set(group.id, { phone: group.id, name: group.subject?.trim().slice(0, 100) || previous?.name || group.id, kind: 'group' });
+    session.recipients.delete(group.id);
+  }
+  await saveContacts(session, []);
+}
+
+async function refreshGroups(session: Session, socket: WASocket) {
+  const groups = await socket.groupFetchAllParticipating();
+  if (session.stopped || !session.connected || session.socket !== socket) return;
+  await saveGroups(session, Object.values(groups), true);
+}
+
 async function reconcile(session: Session, messages: WAMessage[]) {
   // Match only IDs reserved by this app before submission, never arbitrary chat history.
   const own = messages.filter(item => item.key.fromMe && item.key.id);
@@ -74,7 +102,7 @@ async function reconcile(session: Session, messages: WAMessage[]) {
     const message = indexed.get(providerId(session.id, item.key.id!));
     if (!message) continue;
     const body = item.message?.conversation || item.message?.extendedTextMessage?.text;
-    if (phoneFromJid(item.key.remoteJid) !== message.recipient || body !== decrypt(message.encryptedBody)) continue;
+    if (destinationFromJid(item.key.remoteJid) !== message.recipient || body !== decrypt(message.encryptedBody)) continue;
     await databaseTransaction(async tx=>{
       const updated=await tx.message.updateMany({ where: { id: message.id, status: 'FAILED', uncertain: true }, data: {
         status: 'SUBMITTED', uncertain: false, submittedAt: new Date(), failedAt: null, failureReason: null,
@@ -99,7 +127,7 @@ async function wakePendingSends(session: Session) {
 
 async function warmRecipients(session: Session, socket: WASocket) {
   const selected = await db.ruleRecipient.findMany({ where: { rule: { senderId: session.id, enabled: true }, employee: { active: true } }, select: { employee: { select: { phone: true } } } });
-  const numbers = [...new Set(selected.map(recipient => recipient.employee.phone.replace('+', '')))];
+  const numbers = [...new Set(selected.filter(recipient => !isWhatsAppGroup(recipient.employee.phone)).map(recipient => recipient.employee.phone.replace('+', '')))];
   for (let offset = 0; offset < numbers.length && !session.stopped; offset += 50) {
     const registered = await socket.onWhatsApp(...numbers.slice(offset, offset + 50));
     if (session.socket !== socket || !session.connected) return;
@@ -144,6 +172,16 @@ async function open(session: Session) {
   }));
   socket.ev.on('contacts.upsert', contacts => handle(() => saveContacts(session, contacts), true));
   socket.ev.on('contacts.update', contacts => handle(() => saveContacts(session, contacts), true));
+  socket.ev.on('groups.upsert', groups => handle(() => saveGroups(session, groups), true));
+  socket.ev.on('groups.update', groups => handle(() => saveGroups(session, groups), true));
+  socket.ev.on('group-participants.update', event => handle(async () => {
+    session.recipients.delete(event.id);
+    if (event.action === 'remove' && event.participants.some(participant => ownParticipant(session, participant))) {
+      session.contacts.delete(event.id); await saveContacts(session, []);
+    } else if (event.action === 'add' && event.participants.some(participant => ownParticipant(session, participant))) {
+      await saveGroups(session, [await socket.groupMetadata(event.id)]);
+    }
+  }, true));
   socket.ev.on('lid-mapping.update', mapping => handle(async()=>{session.contactMappings.set(mapping.lid,mapping.pn);await saveContacts(session,[]);},true));
   socket.ev.on('messaging-history.set', event => handle(async () => {
     await saveContacts(session, event.contacts); await reconcile(session, event.messages);
@@ -161,6 +199,7 @@ async function open(session: Session) {
       await update(session.id, { status: 'CONNECTED', qrCode: null, phone: phoneFromJid(socket.user?.id), lastConnectedAt: new Date(), lastError: null });
       await wakePendingSends(session);
       handle(() => saveContacts(session, []), true);
+      handle(() => refreshGroups(session, socket), true);
       session.warming = warmRecipients(session, socket).catch(() => {});
     } else if (event.connection === 'close') {
       session.connected = false;
@@ -244,6 +283,7 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
         await session.background;
         if(!session.connected||session.socket!==socket)throw new AppError(409,'WhatsApp is reconnecting; refresh contacts again.','DISCONNECTED');
         session.namesHydrated=true;await saveContacts(session,[]);
+        await refreshGroups(session,socket);
       })().finally(()=>{session.refreshingContacts=undefined;});
     }
     await session.refreshingContacts;
@@ -255,14 +295,27 @@ export class SocketWhatsAppProvider implements WhatsAppProvider {
     const socket = session.socket;
     let recipient = session.recipients.get(input.to);
     if (!recipient || recipient.expiresAt <= Date.now()) {
-      let checked;
-      try { checked = (await socket.onWhatsApp(input.to.replace('+', '')))?.find(item => item.exists); }
-      catch { throw new AppError(409, 'WhatsApp is reconnecting; outgoing leads remain queued.', 'DISCONNECTED'); }
-      if (!checked) throw new AppError(400, 'This phone number is not registered on WhatsApp.');
-      recipient = { jid: checked.jid, expiresAt: Date.now() + 3600000 };
+      if (isWhatsAppGroup(input.to)) {
+        let group: GroupMetadata;
+        try { group = await socket.groupMetadata(input.to); }
+        catch {
+          if (!session.connected || session.socket !== socket) throw new AppError(409, 'WhatsApp is reconnecting; outgoing leads remain queued.', 'DISCONNECTED');
+          throw new AppError(400, 'This WhatsApp group is unavailable. Refresh contacts and groups, then select it again.');
+        }
+        const member = group.participants.find(participant => ownParticipant(session, participant));
+        if (!member) throw new AppError(400, 'The linked WhatsApp account is no longer a member of this group.');
+        if (group.announce && !member.admin && !member.isAdmin && !member.isSuperAdmin) throw new AppError(400, 'Only group admins can send messages to this WhatsApp group.');
+        recipient = { jid: input.to, expiresAt: Date.now() + 60000 };
+      } else {
+        let checked;
+        try { checked = (await socket.onWhatsApp(input.to.replace('+', '')))?.find(item => item.exists); }
+        catch { throw new AppError(409, 'WhatsApp is reconnecting; outgoing leads remain queued.', 'DISCONNECTED'); }
+        if (!checked) throw new AppError(400, 'This phone number is not registered on WhatsApp.');
+        recipient = { jid: checked.jid, expiresAt: Date.now() + 3600000 };
+      }
       session.recipients.set(input.to, recipient);
     }
-    if (!session.connected) throw new AppError(409, 'WhatsApp is reconnecting; leads remain queued.', 'DISCONNECTED');
+    if (!session.connected || session.socket !== socket) throw new AppError(409, 'WhatsApp is reconnecting; leads remain queued.', 'DISCONNECTED');
     const { generateMessageIDV2 } = await import('baileys');
     const messageId = generateMessageIDV2(socket.user?.id);
     if (input.messageId) {

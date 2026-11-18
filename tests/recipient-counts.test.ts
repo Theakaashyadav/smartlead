@@ -2,6 +2,7 @@ import {afterAll,beforeEach,describe,expect,it,vi} from 'vitest';
 import {db} from '@/lib/db';
 import {assignLead,dispatchMessage,synchronizeSheet,writebackLead} from '@/lib/engine';
 import {simpleAction} from '@/lib/simple';
+import {dispatchLeadSentNotification} from '@/lib/lead-sent-notifications';
 import {clearTestModels} from './database-fixture';
 import type {SheetProvider,SourceRow} from '@/lib/google';
 
@@ -18,13 +19,40 @@ async function fixture(){
   const people=[{name:'First person',phone:'+919876543210',leadCount:2},{name:'Second person',phone:'+919876543211',leadCount:1}];
   const rows:SourceRow[]=Array.from({length:6},(_,index)=>({stableId:`lead-${index}`,row:index+2,values:{customerName:`Customer ${index}`,mobile:`+91980000000${index}`}}));
   const source:SheetProvider={read:vi.fn(async()=>rows),write:vi.fn(async(_sheet,id,_metadata,values)=>{Object.assign(rows.find(row=>row.stableId===id)!.values,values);})};
-  const select=(recipients:unknown)=>simpleAction(['sheets',sheet.id,'recipients'],'PUT',new Request('http://localhost/api/simple',{method:'PUT',body:JSON.stringify({recipients})}),admin,source);
+  const select=(recipients:unknown,notifications:{executiveNotificationPhone?:string;notificationPhone?:string}={})=>simpleAction(['sheets',sheet.id,'recipients'],'PUT',new Request('http://localhost/api/simple',{method:'PUT',body:JSON.stringify({recipients,...notifications})}),admin,source);
   await synchronizeSheet(sheet.id,source);
   const leads=await db.lead.findMany({where:{sheetId:sheet.id},orderBy:{sourceRow:'asc'}});
   const queued=()=>db.message.findMany({where:{lead:{sheetId:sheet.id},status:'QUEUED'},orderBy:{lead:{sourceRow:'asc'}}});
   return {admin,sheet,people,select,leads,queued,source};
 }
 describe('per-recipient lead counts',()=>{
+  it('round-trips contact and group recipients and sends both notifications to groups',async()=>{
+    const f=await fixture();
+    const group={name:'Sales team',phone:'120363123456789012@g.us',leadCount:1};
+    const notifications={executiveNotificationPhone:'919876543210-1234567890@g.us',notificationPhone:'120363987654321012@g.us'};
+    await f.select([f.people[0],group],notifications);
+    for(const lead of f.leads)await assignLead(lead.id);
+    const messages=await f.queued();
+    expect(messages.map(message=>message.recipient)).toEqual([f.people[0].phone,f.people[0].phone,group.phone,f.people[0].phone,f.people[0].phone,group.phone]);
+    const state=await simpleAction(['state'],'GET',new Request('http://localhost'),f.admin) as any;
+    expect(state.sheets[0]).toMatchObject({...notifications,recipients:[f.people[0],group]});
+    const send=vi.fn(async(_input:{to:string})=>({id:`group-message-${crypto.randomUUID()}`,status:'SUBMITTED' as const}));
+    const provider={sendMessage:send} as never;
+    await dispatchMessage(messages[2].id,provider,f.source);
+    await writebackLead(messages[2].leadId,f.source);
+    await dispatchLeadSentNotification(messages[2].id,provider);
+    expect(send.mock.calls.map(([input])=>input.to)).toEqual([group.phone,notifications.executiveNotificationPhone,notifications.notificationPhone]);
+    expect(f.source.write).toHaveBeenCalledWith(expect.anything(),expect.anything(),null,expect.objectContaining({sentStatus:'Sent',sharedTo:group.name}));
+    expect(await db.message.findUniqueOrThrow({where:{id:messages[2].id}})).toMatchObject({notificationStatus:'SUBMITTED',executiveNotificationStatus:'SUBMITTED',notificationName:group.name});
+  });
+  it('rejects duplicate groups and a notification group also selected for leads',async()=>{
+    const f=await fixture();const group={name:'Sales team',phone:'120363123456789012@g.us'};
+    await expect(f.select([group,group])).rejects.toThrow('only once');
+    await expect(f.select([group],{executiveNotificationPhone:group.phone})).rejects.toThrow('separately');
+    await expect(f.select([group],{notificationPhone:group.phone})).rejects.toThrow('separately');
+    expect((await db.distributionRule.findUniqueOrThrow({where:{sheetId:f.sheet.id}})).enabled).toBe(false);
+    expect(await db.message.count()).toBe(0);
+  });
   it('saves 2:1 and restarts from the first unsent row on an unchanged save',async()=>{
     const f=await fixture();await f.select(f.people);
     for(const lead of f.leads.slice(0,2))await assignLead(lead.id);

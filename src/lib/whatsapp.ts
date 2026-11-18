@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { EncryptedAuthStore } from './whatsapp-archives';
 import QRCode from 'qrcode';
 import { phoneSchema } from './validation';
-import { mergeWhatsAppContact, type WhatsAppContact } from './simple-shared';
+import { isWhatsAppGroup, mergeWhatsAppContact, type WhatsAppContact } from './simple-shared';
 import { nativeWhatsAppLogin, NativeWhatsAppProvider } from './whatsapp-native';
 import { installWhatsAppCompatibility } from './whatsapp-compat';
 import { socketWhatsApp } from './whatsapp-mode';
@@ -44,6 +44,7 @@ export class MetaWhatsAppProvider implements WhatsAppProvider {
   async getConnectionStatus(){return this.sender.status;}
   async getQRCode(){return null;}
   async sendMessage(input:SendInput){
+    if(isWhatsAppGroup(input.to))throw new AppError(400,'Use a linked WhatsApp account to send to groups.');
     if(!input.template)throw new AppError(400,'Set an approved Meta template for this sheet. Automatic notifications always use approved templates.');
     const payload={messaging_product:'whatsapp',to:input.to.replace('+',''),type:'template',template:{name:input.template,language:{code:input.language||'en'},components:[{type:'body',parameters:input.parameters.map(text=>({type:'text',text}))}]}};
     await assertMessageSubmission(input,this.sender.id);
@@ -109,12 +110,13 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
       // Full chat serialization also reads old messages. A damaged message must
       // not prevent selecting otherwise valid contacts from this account.
       const [contacts,chats]=await Promise.allSettled([client.getContacts(),client.pupPage!.evaluate(()=>{
-        const app=window as unknown as {require:(name:string)=>{Chat:{getModelsArray:()=>Array<{id:{_serialized:string;user:string};name?:string;formattedTitle?:string}>}}};
-        return app.require('WAWebCollections').Chat.getModelsArray().filter(c=>/@(c\.us|lid)$/.test(c.id._serialized)).map(c=>({id:c.id._serialized,name:c.name||c.formattedTitle||'',number:c.id.user}));
+        const app=window as unknown as {require:(name:string)=>{Chat:{getModelsArray:()=>Array<{id:{_serialized:string;user:string};name?:string;formattedTitle?:string;groupMetadata?:{subject?:string;isPastParticipant?:boolean}}>}}};
+        return app.require('WAWebCollections').Chat.getModelsArray().filter(c=>/@(c\.us|lid|g\.us)$/.test(c.id._serialized)&&c.groupMetadata?.isPastParticipant!==true).map(c=>({id:c.id._serialized,name:c.groupMetadata?.subject||c.name||c.formattedTitle||'',number:c.id.user}));
       })]);
       if(contacts.status==='rejected'&&chats.status==='rejected')throw contacts.reason;
       const previous=await db.setting.findUnique({where:{key:`whatsapp-contacts:${this.sender.id}`}});
       const people=new Map<string,WhatsAppContact>(((previous?.value as {contacts?:WhatsAppContact[]})?.contacts||[]).map(c=>[c.phone,c]));
+      if(chats.status==='fulfilled')for(const id of people.keys())if(isWhatsAppGroup(id))people.delete(id);
       const records=[...(chats.status==='fulfilled'?chats.value||[]:[]).map(c=>({...c,savedName:''})),...(contacts.status==='fulfilled'?contacts.value:[]).filter(c=>!c.isGroup&&!c.isMe&&c.isWAContact!==false).map(c=>({id:c.id._serialized,name:c.pushname||'',savedName:c.name||'',number:c.number}))];
       const lids=[...new Set(records.filter(r=>r.id.endsWith('@lid')).map(r=>r.id))];
       const numbers=new Map<string,string>();
@@ -123,6 +125,7 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
         for(const result of resolved)if(result.status==='fulfilled')for(const r of result.value)if(r.lid&&r.pn)numbers.set(r.lid,r.pn);
       }
       for(const record of records){
+        if(isWhatsAppGroup(record.id)){people.set(record.id,{phone:record.id,name:record.name.trim().slice(0,100)||record.id,kind:'group'});continue;}
         const raw=record.id.endsWith('@lid')?numbers.get(record.id)?.split('@')[0]:record.id.endsWith('@c.us')?record.number:undefined;
         if(!raw)continue;const number=phoneSchema.safeParse(`+${raw}`);if(!number.success||number.data===`+${client.info?.wid?.user}`)continue;
         people.set(number.data,mergeWhatsAppContact(people.get(number.data),number.data,record.savedName,record.name));
@@ -131,15 +134,39 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
       await db.setting.upsert({where:{key:`whatsapp-contacts:${this.sender.id}`},create:{key:`whatsapp-contacts:${this.sender.id}`,value},update:{value}});
       return value.contacts;
     }catch(error){
-      const key=`whatsapp-contacts:${this.sender.id}`;const previous=await db.setting.findUnique({where:{key}});const value={...((previous?.value||{contacts:[],updatedAt:null}) as object),error:'Could not load contacts. Refresh contacts or add a phone number.'};
+      const key=`whatsapp-contacts:${this.sender.id}`;const previous=await db.setting.findUnique({where:{key}});const value={...((previous?.value||{contacts:[],updatedAt:null}) as object),error:'Could not load contacts and groups. Refresh or add a phone number.'};
       await db.setting.upsert({where:{key},create:{key,value},update:{value}});throw error;
     }
   }
   async sendMessage(input:SendInput){
     const c=clients.get(this.sender.id);if(!c||await this.getConnectionStatus()!=='CONNECTED')throw new AppError(409,'WhatsApp is disconnected','DISCONNECTED');
     try{await c.pupPage!.evaluate(installWhatsAppCompatibility);}catch{throw new AppError(409,'WhatsApp is reconnecting; outgoing leads remain queued.','DISCONNECTED');}
-    let recipient;try{recipient=await c.getNumberId(input.to.replace('+',''));}catch{throw new AppError(502,'Could not check this WhatsApp number.');}
-    if(!recipient)throw new AppError(400,'This phone number is not registered on WhatsApp.');
+    let recipient:{_serialized:string}|null;
+    if(isWhatsAppGroup(input.to)){
+      let group:import('whatsapp-web.js').GroupChat;
+      try{group=await c.getChatById(input.to) as import('whatsapp-web.js').GroupChat;}catch{
+        if(clients.get(this.sender.id)!==c||await this.getConnectionStatus().catch(()=>'DISCONNECTED')!=='CONNECTED')throw new AppError(409,'WhatsApp is reconnecting; outgoing leads remain queued.','DISCONNECTED');
+        throw new AppError(400,'This WhatsApp group is unavailable. Refresh contacts and groups, then select it again.');
+      }
+      if(!group?.isGroup)throw new AppError(400,'This WhatsApp group is unavailable.');
+      const normalize=(id:string)=>id.replace(/:\d+@/,'@').replace('@s.whatsapp.net','@c.us');
+      const own=c.info?.wid?._serialized||(c.info?.wid?.user?`${c.info.wid.user}@c.us`:'');
+      const ownIds=new Set(own?[normalize(own)]:[]);
+      let member=group.participants?.find(person=>ownIds.has(normalize(person.id._serialized)));
+      if(!member&&own){
+        let mapping:Array<{lid:string;pn:string}>;
+        try{mapping=await c.getContactLidAndPhone([own]);}catch{throw new AppError(502,'Could not check WhatsApp group membership. Refresh contacts and groups, then try again.');}
+        for(const item of mapping)for(const id of [item.lid,item.pn])if(id)ownIds.add(normalize(id));
+        member=group.participants?.find(person=>ownIds.has(normalize(person.id._serialized)));
+      }
+      if(!member)throw new AppError(400,'The linked WhatsApp account is no longer a member of this group.');
+      if(group.isReadOnly&&!member.isAdmin&&!member.isSuperAdmin)throw new AppError(400,'Only group admins can send messages to this WhatsApp group.');
+      recipient={_serialized:input.to};
+    }else{
+      try{recipient=await c.getNumberId(input.to.replace('+',''));}catch{throw new AppError(502,'Could not check this WhatsApp number.');}
+      if(!recipient)throw new AppError(400,'This phone number is not registered on WhatsApp.');
+    }
+    if(clients.get(this.sender.id)!==c)throw new AppError(409,'WhatsApp is reconnecting; outgoing leads remain queued.','DISCONNECTED');
     await assertMessageSubmission(input,this.sender.id);
     try{
       const message=await c.sendMessage(recipient._serialized,input.body,{sendSeen:false});
@@ -163,7 +190,7 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
         type Existing={id:{fromMe:boolean;_serialized?:string;$1?:string};body:string;t:number};
         type Chat={msgs:{getModelsArray:()=>Existing[]}};
         const app=window as unknown as {WWebJS:{getChat:(id:string,options:{getAsModel:false})=>Promise<Chat|null>};require:(name:string)=>{loadEarlierMsgs:(options:{chat:Chat})=>Promise<Existing[]>}};
-        const chat=await app.WWebJS.getChat(input.recipient.replace('+','')+'@c.us',{getAsModel:false});
+        const chat=await app.WWebJS.getChat(input.chatId,{getAsModel:false});
         if(!chat)return [];
         let loaded=chat.msgs.getModelsArray();
         const earliest=Math.min(...input.attempts.map(a=>a.attemptAt))-15000;
@@ -181,7 +208,7 @@ export class WebWhatsAppProvider implements WhatsAppProvider {
           const found=loaded.filter(m=>m.id.fromMe&&m.body===attempt.body&&Math.abs(m.t*1000-attempt.attemptAt)<15000);
           return found.length===1?[{messageId:attempt.id,id:found[0].id._serialized||found[0].id.$1,time:found[0].t*1000}]:[];
         });
-      },{recipient,attempts:attempts.map(m=>({id:m.id,body:decrypt(m.encryptedBody),attemptAt:m.lastAttemptAt!.getTime()}))}).catch(()=>[]);
+      },{chatId:isWhatsAppGroup(recipient)?recipient:recipient.replace('+','')+'@c.us',attempts:attempts.map(m=>({id:m.id,body:decrypt(m.encryptedBody),attemptAt:m.lastAttemptAt!.getTime()}))}).catch(()=>[]);
       for(const match of matches){
         if(!match.id||await db.message.findUnique({where:{providerMessageId:match.id}}))continue;
         const message=attempts.find(attempt=>attempt.id===match.messageId);if(!message)continue;

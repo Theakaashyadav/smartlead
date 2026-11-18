@@ -3,7 +3,7 @@ import type { Prisma } from '@/generated/mongo';
 import { db, databaseTransaction } from './db';
 import { isDemo } from './config';
 import { AppError, hash, opaqueToken } from './security';
-import { phoneSchema } from './validation';
+import { requiredWhatsappDestinationSchema } from './validation';
 import { requireWhatsAppWorker, workerHeartbeatFresh, workerOfflineMessage } from './worker-status';
 import { UncertainDelivery, whatsappProvider, type WhatsAppProvider } from './whatsapp';
 import { leadSentNotificationMessage } from './simple-shared';
@@ -28,9 +28,9 @@ export type TestLeadFlow = {
 type StoredFlow=Omit<TestLeadFlow,'workerMessage'>&{senderId:string;payloadHash:string;claimToken?:string;claimedAt?:string};
 const schema=z.object({
   requestId:z.uuid(),
-  recipients:z.array(z.object({name:z.string().trim().min(1).max(100).transform(value=>value.replace(/[\r\n]+/g,' ')),phone:phoneSchema})).min(1,'Choose at least one test recipient.').max(10,'Choose up to 10 test recipients.'),
-  executiveNotificationPhone:phoneSchema,
-  notificationPhone:phoneSchema,
+  recipients:z.array(z.object({name:z.string().trim().min(1).max(100).transform(value=>value.replace(/[\r\n]+/g,' ')),phone:requiredWhatsappDestinationSchema})).min(1,'Choose at least one test recipient.').max(10,'Choose up to 10 test recipients.'),
+  executiveNotificationPhone:requiredWhatsappDestinationSchema,
+  notificationPhone:requiredWhatsappDestinationSchema,
 });
 const keyFor=(organizationId:string,id:string)=>`test-lead-flow:${organizationId}:${id}`;
 const json=(value:StoredFlow)=>JSON.parse(JSON.stringify(value)) as Prisma.InputJsonObject;
@@ -58,7 +58,7 @@ export async function createTestLeadFlow(organizationId:string,input:unknown){
   const existing=await db.setting.findUnique({where:{key}});
   if(existing){
     const run=existing.value as unknown as StoredFlow;
-    if(run.payloadHash!==payloadHash)throw new AppError(409,'This test has already started with different numbers. Start a new test to change them.');
+    if(run.payloadHash!==payloadHash)throw new AppError(409,'This test has already started with different recipients. Start a new test to change them.');
     return publicFlow(run);
   }
   const sender=await db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
@@ -77,7 +77,7 @@ export async function createTestLeadFlow(organizationId:string,input:unknown){
     const winner=await db.setting.findUnique({where:{key}});
     if(!winner)throw error;
     const saved=winner.value as unknown as StoredFlow;
-    if(saved.payloadHash!==payloadHash)throw new AppError(409,'This test has already started with different numbers. Start a new test to change them.');
+    if(saved.payloadHash!==payloadHash)throw new AppError(409,'This test has already started with different recipients. Start a new test to change them.');
     return publicFlow(saved);
   }
   return publicFlow(run);

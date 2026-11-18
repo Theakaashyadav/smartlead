@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { FEEDBACK_STATUSES } from './feedback-statuses';
+import { isWhatsAppGroup } from './simple-shared';
 export const STATUSES: string[] = [...FEEDBACK_STATUSES];
 export const CLOSED = ['Converted / Closed Won','Lost / Closed Lost','Not Interested','Invalid Number','Invalid no.','Duplicate Lead'];
 export const MODES = ['SINGLE','ROUND_ROBIN','ALL','MANUAL','WEIGHTED','CAPACITY'] as const;
@@ -11,6 +12,14 @@ export const phoneSchema = z.string().trim().max(40).transform((v,ctx)=>{
 });
 export const pinSchema = z.string().regex(/^\d{4}$/, 'Enter a 4-digit PIN');
 export const notificationPhoneSchema = z.preprocess(value=>typeof value==='string'&&!value.trim()?null:value,phoneSchema.nullish());
+export const requiredWhatsappDestinationSchema = z.string().trim().max(80).transform((value,ctx)=>{
+  if(isWhatsAppGroup(value))return value;
+  const phone=value.includes('@')?null:phoneSchema.safeParse(value);
+  if(phone?.success)return phone.data;
+  ctx.addIssue({code:'custom',message:'Choose a WhatsApp contact or group, or enter a valid phone number'});
+  return z.NEVER;
+});
+export const whatsappDestinationSchema = z.preprocess(value=>typeof value==='string'&&!value.trim()?null:value,requiredWhatsappDestinationSchema.nullish());
 export const projectNameSchema=z.string().trim().min(1,'Enter the project name.').max(120).regex(/^[^\r\n]*$/,'Use a single line for the project name.');
 export const loginSchema = z.union([
   z.object({phone:phoneSchema,pin:pinSchema,code:z.string().max(6).optional()}),

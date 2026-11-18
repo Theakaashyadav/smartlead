@@ -24,6 +24,8 @@ beforeEach(async()=>{
       end:vi.fn(),logout:vi.fn().mockResolvedValue(undefined),
       authState:{keys:{set:vi.fn().mockResolvedValue(undefined)}},resyncAppState:vi.fn().mockResolvedValue(undefined),
       signalRepository:{lidMapping:{getPNForLID:vi.fn().mockResolvedValue('919876543212@s.whatsapp.net')}},
+      groupFetchAllParticipating:vi.fn().mockResolvedValue({}),
+      groupMetadata:vi.fn(async(id:string)=>({id,subject:'Sales group',participants:[{id:'919876543210@s.whatsapp.net'}]})),
       onWhatsApp:vi.fn(async(number:string)=>[{exists:true,jid:`${number}@s.whatsapp.net`}]),
       sendMessage:vi.fn(async(_to:string,_body:unknown,opts:any)=>({key:{id:opts.messageId}})),
     };mocks.instances.push(socket);return socket;
@@ -44,9 +46,9 @@ async function linked(){
   await vi.waitFor(async()=>expect(await f.provider.getConnectionStatus()).toBe('CONNECTED'));
   return f;
 }
-async function source(senderId:string){
+async function source(senderId:string,groupRecipients=false){
   await db.setting.create({data:{key:'feedback:remoteRequired',value:false}});
-  const employees=await Promise.all([1,2].map(i=>db.employee.create({data:{organizationId:'legacy',name:`Employee ${i}`,phone:`+91987654321${i}`,projects:[]}})));
+  const employees=await Promise.all([1,2].map(i=>db.employee.create({data:{organizationId:'legacy',name:`${groupRecipients?'Group':'Employee'} ${i}`,phone:groupRecipients?`12036300000${i}@g.us`:`+91987654321${i}`,projects:[]}})));
   const sheet=await db.sheet.create({data:{organizationId:'legacy',name:'Test source',project:'Sales',spreadsheetId:'public-socket-test-spreadsheet',connectionType:'SIMPLE_PUBLIC',columnMapping:{customerName:'Name',mobile:'Phone'},rule:{create:{enabled:true,senderId,mode:'ROUND_ROBIN',template:SIMPLE_TEMPLATE,recipients:{create:employees.map((employee,position)=>({employeeId:employee.id,position}))}}}}});
   vi.stubGlobal('fetch',vi.fn(async()=>new Response('Name,Phone\nLead one,919800000001\nLead two,919800000002',{headers:{'content-type':'text/csv'}})));
   await synchronizeSheet(sheet.id);
@@ -104,6 +106,44 @@ describe('WhatsApp QR login without Chromium',()=>{
     const f=await linked();
     f.socket.ev.emit('contacts.upsert',[{id:'919876543211@s.whatsapp.net',name:'First'},{id:'123@g.us',name:'Group'},{id:f.socket.user.id,name:'Self'},{id:'123@lid',name:'Second'}]);
     await vi.waitFor(async()=>expect((await f.provider.refreshContacts()).map(c=>c.phone).sort()).toEqual(['+919876543211','+919876543212']));
+  });
+  it('loads group names alongside contacts and removes groups after leaving or refreshing membership',async()=>{
+    const f=await linked();const id='120363000001@g.us',oldId='919876543210-1234567890@g.us';
+    f.socket.groupFetchAllParticipating.mockResolvedValue({[id]:{id,subject:'Sales team'},[oldId]:{id:oldId,subject:'Older group'}});
+    expect(await f.provider.refreshContacts()).toEqual(expect.arrayContaining([{phone:id,name:'Sales team',kind:'group'},{phone:oldId,name:'Older group',kind:'group'}]));
+    f.socket.ev.emit('groups.update',[{id,subject:'Sales managers'}]);
+    await vi.waitFor(async()=>expect((await db.setting.findUniqueOrThrow({where:{key:`whatsapp-contacts:${f.sender.id}`}})).value).toMatchObject({contacts:expect.arrayContaining([{phone:id,name:'Sales managers',kind:'group'}])}));
+    f.socket.ev.emit('group-participants.update',{id,action:'remove',participants:[{id:f.socket.user.id}]});
+    await vi.waitFor(async()=>expect((await db.setting.findUniqueOrThrow({where:{key:`whatsapp-contacts:${f.sender.id}`}})).value).toMatchObject({contacts:[{phone:oldId,name:'Older group',kind:'group'}]}));
+    f.socket.groupFetchAllParticipating.mockResolvedValue({});expect(await f.provider.refreshContacts()).toEqual([]);
+  });
+  it('checks group membership and admin restrictions without looking up a phone number',async()=>{
+    const f=await linked(),id='120363000001@g.us';
+    await expect(f.provider.sendMessage({to:id,body:'Group lead',parameters:[]})).resolves.toMatchObject({status:'SUBMITTED'});
+    expect(f.socket.sendMessage).toHaveBeenCalledWith(id,{text:'Group lead',linkPreview:null},expect.anything());expect(f.socket.onWhatsApp).not.toHaveBeenCalled();
+    f.socket.groupMetadata.mockResolvedValueOnce({id:'120363000002@g.us',participants:[]});
+    await expect(f.provider.sendMessage({to:'120363000002@g.us',body:'Lead',parameters:[]})).rejects.toThrow('no longer a member');
+    f.socket.groupMetadata.mockResolvedValueOnce({id:'120363000003@g.us',announce:true,participants:[{id:f.socket.user.id}]});
+    await expect(f.provider.sendMessage({to:'120363000003@g.us',body:'Lead',parameters:[]})).rejects.toThrow('Only group admins');expect(f.socket.sendMessage).toHaveBeenCalledOnce();
+  });
+  it('sends group leads and both group notifications and reconciles the exact group after an uncertain send',async()=>{
+    const f=await linked(),data=await source(f.sender.id,true),notificationPhone='120363000003@g.us',executiveNotificationPhone='120363000004@g.us';
+    await db.distributionRule.update({where:{sheetId:data.sheet.id},data:{notificationPhone,executiveNotificationPhone}});
+    const [first,second]=data.messages;
+    await dispatchMessage(first.id);await writebackLead(first.leadId,{read:vi.fn(),write:vi.fn(async()=>{})});await dispatchLeadSentNotification(first.id);
+    expect(f.socket.sendMessage.mock.calls.map((call:any[])=>call[0])).toEqual([first.recipient,executiveNotificationPhone,notificationPhone]);
+    expect(await db.message.findUniqueOrThrow({where:{id:first.id}})).toMatchObject({status:'SUBMITTED',executiveNotificationStatus:'SUBMITTED',notificationStatus:'SUBMITTED'});
+    f.socket.sendMessage.mockRejectedValueOnce(new Error('connection interrupted'));await dispatchMessage(second.id);
+    const failed=await db.message.findUniqueOrThrow({where:{id:second.id}});expect(failed.uncertain).toBe(true);
+    f.socket.ev.emit('messages.upsert',{messages:[{key:{id:failed.providerMessageId!.split(':').at(-1),fromMe:true,remoteJid:second.recipient},message:{conversation:decrypt(second.encryptedBody)}}]});
+    await vi.waitFor(async()=>expect(await db.message.findUniqueOrThrow({where:{id:second.id}})).toMatchObject({status:'SUBMITTED',uncertain:false}));expect(f.socket.onWhatsApp).not.toHaveBeenCalled();
+  });
+  it('keeps a group send retryable if WhatsApp disconnects while checking membership',async()=>{
+    const f=await linked();
+    f.socket.groupMetadata.mockImplementationOnce(async()=>{
+      f.socket.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:{output:{statusCode:515}}}});throw new Error('Connection closed');
+    });
+    await expect(f.provider.sendMessage({to:'120363000001@g.us',body:'Lead',parameters:[]})).rejects.toMatchObject({code:'DISCONNECTED'});expect(f.socket.sendMessage).not.toHaveBeenCalled();
   });
   it('recovers saved phone names on refresh and keeps them through profile updates and restarts',async()=>{
     const f=await linked();const phone='+919876543211';

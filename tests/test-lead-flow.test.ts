@@ -94,6 +94,32 @@ describe('sheet-free test lead flow',()=>{
     await dispatchTestLeadFlow(f.input.requestId,f.admin.organizationId,f.provider);await f.create();expect(f.send).toHaveBeenCalledTimes(6);
     expect(await Promise.all([db.sheet.count(),db.lead.count(),db.message.count(),db.employee.count(),db.feedbackToken.count()])).toEqual([0,0,0,0,0]);
   });
+  it('preserves group destinations for test leads and both notifications alongside contacts',async()=>{
+    const f=await fixture();
+    const group='120363123456789012@g.us',executiveGroup='919876543210-1234567890@g.us',ownerGroup='120363987654321098@g.us';
+    const input={...f.input,recipients:[{name:'Sales team',phone:` ${group} `},...f.input.recipients],executiveNotificationPhone:executiveGroup,notificationPhone:ownerGroup};
+    const queued=await f.create(input);
+    expect(queued).toMatchObject({status:'QUEUED',recipients:[{name:'Sales team',phone:group},{name:'Aman',phone:'+919876543211'}],executiveNotificationPhone:executiveGroup,notificationPhone:ownerGroup});
+    await f.create({...input,recipients:queued.recipients.map(({name,phone})=>({name,phone}))});
+    expect(await db.job.count({where:{type:'TEST_FLOW'}})).toBe(1);
+    await dispatchTestLeadFlow(f.input.requestId,f.admin.organizationId,f.provider);
+    expect(f.send.mock.calls.map(([input])=>input.to)).toEqual([group,executiveGroup,ownerGroup,'+919876543211',executiveGroup,ownerGroup]);
+    expect(f.send.mock.calls[1][0].body).toContain('shared to (Sales team).');
+    expect(await f.read()).toMatchObject({status:'COMPLETED',executiveNotificationPhone:executiveGroup,notificationPhone:ownerGroup});
+    await dispatchTestLeadFlow(f.input.requestId,f.admin.organizationId,f.provider);
+    expect(f.send).toHaveBeenCalledTimes(6);
+  });
+  it('rejects malformed WhatsApp group identifiers and duplicate group recipients',async()=>{
+    const f=await fixture();
+    for(const destination of ['sales@g.us','120363123456789012@g.us.extra','120363123456789012@broadcast','120363123456789012@s.whatsapp.net','919876543210@g.us.extra','919876543210@broadcast','919876543210@s.whatsapp.net']){
+      await expect(f.create({...f.input,recipients:[{name:'Sales team',phone:destination}]})).rejects.toThrow();
+      await expect(f.create({...f.input,executiveNotificationPhone:destination})).rejects.toThrow();
+      await expect(f.create({...f.input,notificationPhone:destination})).rejects.toThrow();
+    }
+    const group='120363123456789012@g.us';
+    await expect(f.create({...f.input,recipients:[{name:'Sales team',phone:group},{name:'Duplicate group',phone:` ${group} `}]})).rejects.toMatchObject({status:400});
+    expect(await db.job.count({where:{type:'TEST_FLOW'}})).toBe(0);
+  });
   it.each(['lead','executive','owner'] as const)('stops on a confirmed %s rejection and never resends prior accepted stages',async stage=>{
     const f=await fixture();await f.create();
     const position=['lead','executive','owner'].indexOf(stage);

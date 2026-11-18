@@ -4,7 +4,7 @@ import { AppError, audit, encrypt, opaqueToken, safeUser } from './security';
 import { enqueue, refreshSimpleQueuedMessages, restartUnsentSheetLeads, synchronizeSheet, transaction, updateLeadSheetNow } from './engine';
 import { inspectSpreadsheet, sheetProvider, verifyGoogleSheetEditor, type SheetProvider, type SourceRow } from './google';
 import { attachAuthorizedSheet, googleOAuthConfiguration, startGoogleAuthorization } from './google-oauth';
-import { phoneSchema, projectNameSchema, notificationPhoneSchema } from './validation';
+import { requiredWhatsappDestinationSchema, projectNameSchema, whatsappDestinationSchema } from './validation';
 import { SIMPLE_OUTPUT_COLUMNS, SIMPLE_TEMPLATE, spreadsheetIdentity } from './simple-shared';
 import type { User } from '@/generated/mongo';
 import { backgroundWhatsApp, nativeWhatsAppLogin } from './whatsapp-native';
@@ -18,7 +18,7 @@ import { createTestLeadFlow, getTestLeadFlow } from './test-lead-flow';
 
 export const simpleSender=(organizationId:string)=>db.sender.findFirst({where:{organizationId,provider:'WEB'},orderBy:{createdAt:'asc'}});
 const sheetWhere={connectionType:{startsWith:'SIMPLE_'}};
-const recipientSchema=z.object({name:z.string().trim().min(1).max(100),phone:phoneSchema,leadCount:z.number().int().min(1).max(1000).default(1)});
+const recipientSchema=z.object({name:z.string().trim().min(1).max(100),phone:requiredWhatsappDestinationSchema,leadCount:z.number().int().min(1).max(1000).default(1)});
 async function sheetById(id:string,organizationId:string) {
   const sheet=await db.sheet.findFirst({where:{id,organizationId,...sheetWhere},include:{rule:true}});
   if(!sheet)throw new AppError(404,'Sheet not found');return sheet;
@@ -185,12 +185,12 @@ export async function simpleAction(path:string[],method:string,request:Request,u
   }
   if(path[0]==='sheets'&&path[1]&&path[2]==='recipients'&&method==='PUT'){
     const sheet=await sheetById(path[1],organizationId);
-    const {recipients,executiveNotificationPhone,notificationPhone}=z.object({recipients:z.array(recipientSchema).min(1,'Select at least one person.').max(100),executiveNotificationPhone:notificationPhoneSchema,notificationPhone:notificationPhoneSchema}).parse(await input());
-    if(new Set(recipients.map(r=>r.phone)).size!==recipients.length)throw new AppError(400,'Select each phone number only once.');
+    const {recipients,executiveNotificationPhone,notificationPhone}=z.object({recipients:z.array(recipientSchema).min(1,'Select at least one contact or group.').max(100),executiveNotificationPhone:whatsappDestinationSchema,notificationPhone:whatsappDestinationSchema}).parse(await input());
+    if(new Set(recipients.map(r=>r.phone)).size!==recipients.length)throw new AppError(400,'Select each contact or group only once.');
     const effectiveExecutiveNotificationPhone=executiveNotificationPhone===undefined?sheet.rule?.executiveNotificationPhone:executiveNotificationPhone;
     const effectiveNotificationPhone=notificationPhone===undefined?sheet.rule?.notificationPhone:notificationPhone;
-    if(effectiveExecutiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveExecutiveNotificationPhone))throw new AppError(400,'Enter the executive notification number separately from the lead recipients.');
-    if(effectiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveNotificationPhone))throw new AppError(400,'Enter your notification number separately from the lead recipients.');
+    if(effectiveExecutiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveExecutiveNotificationPhone))throw new AppError(400,'Choose the executive notification contact or group separately from the lead recipients.');
+    if(effectiveNotificationPhone&&recipients.some(recipient=>recipient.phone===effectiveNotificationPhone))throw new AppError(400,'Choose your notification contact or group separately from the lead recipients.');
     const account=await simpleSender(organizationId);if(account?.status!=='CONNECTED')throw new AppError(409,'Connect WhatsApp before starting.');
     const source=sourceProvider||sheetProvider(sheet);
     let rows:SourceRow[]=[];

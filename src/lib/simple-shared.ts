@@ -1,4 +1,8 @@
-export type WhatsAppContact = {name:string;phone:string;nameSource?:'saved'|'profile'|'number'};
+export type WhatsAppContact = {name:string;phone:string;nameSource?:'saved'|'profile'|'number';kind?:'contact'|'group'};
+export function isWhatsAppGroup(value:string):boolean{return value.length<=80&&/^\d+(?:-\d+)?@g\.us$/.test(value);}
+export function whatsappDestinationLabel(value:string,contacts:WhatsAppContact[]):string{
+  return contacts.find(contact=>contact.phone===value)?.name||(isWhatsAppGroup(value)?'WhatsApp group':value);
+}
 export function mergeWhatsAppContact(previous:WhatsAppContact|undefined,phone:string,savedName?:string|null,profileName?:string|null):WhatsAppContact{
   const meaningful=(value?:string|null)=>{const text=value?.trim().slice(0,100);return text&&text.replace(/\D/g,'')!==phone.replace(/\D/g,'')?text:undefined;};
   const saved=meaningful(savedName)||((previous?.nameSource==='saved'||!previous?.nameSource)?meaningful(previous?.name):undefined);

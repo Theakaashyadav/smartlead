@@ -18,6 +18,7 @@ input,textarea,select,.field{min-width:0}.form-grid,.mapping-grid{grid-template-
 .modal{position:fixed;inset:0;margin:auto;height:fit-content;max-height:calc(100dvh - 32px);overflow-y:auto}
 .simple-contact-choice{display:flex;align-items:center;gap:12px;flex:1;min-width:0;cursor:pointer}
 .simple-contact-details{display:grid;gap:4px;flex:1;min-width:0}
+.simple-destination-picker{display:grid;gap:12px}.simple-destination-picker>h3{font-size:13px;color:#536f5c}.simple-destination-list{max-height:190px}.simple-form .simple-destination-picker input[type=radio]{appearance:auto;accent-color:#267a4d;flex-shrink:0;width:15px;height:15px;min-height:0;padding:0;border:0;box-shadow:none}.simple-destination-picker>.btn{justify-self:start;min-height:30px;padding:5px 0}.simple-destination-selected{display:flex;align-items:center;gap:8px;font-size:12px;color:#37724d;background:#eff7f0;padding:10px 12px;border-radius:8px}.simple-destination-selected>svg{flex-shrink:0}.simple-destination-selected strong{overflow-wrap:anywhere}
 .simple-recipient-count{display:grid;gap:5px;flex:0 0 78px;cursor:default}
 .simple-recipient-count>span{font-size:10px;color:#607c68;white-space:nowrap}
 .simple-recipient-count input:not([type=checkbox]){min-height:36px;padding:7px 8px;text-align:center}
