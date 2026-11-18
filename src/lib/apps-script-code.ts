@@ -8,7 +8,7 @@ var SMARTLEAD_SHEET_ID = ${JSON.stringify(spreadsheetId)};
 var SMARTLEAD_KEY = ${JSON.stringify(token)};
 `+String.raw`
 var SMARTLEAD_PROTOCOL = 'smartlead-apps-script-v1';
-var SMARTLEAD_CODE_VERSION = 2;
+var SMARTLEAD_CODE_VERSION = 3;
 var SMARTLEAD_OUTPUTS = {sentStatus:'Sent Status',sharedTo:'Shared To',status:'Feedback',feedback:'Remark'};
 
 function doGet() {
@@ -40,13 +40,13 @@ function doPost(e) {
     }
     return smartLeadReply_({ok:true,data:data});
   } catch (error) {
-    var known = ['SOURCE','CONFLICT','REQUEST','VERIFY','PROTECTED'];
+    var known = ['SOURCE','CONFLICT','REQUEST','VERIFY','PROTECTED','LAYOUT','DUPLICATE_OUTPUT'];
     var stage = request && request._stage;
     return smartLeadReply_({ok:false,code:known.indexOf(error.message)>=0?error.message:'SCRIPT',stage:['SOURCE','LAYOUT','PERMISSION','SAVE','VERIFY'].indexOf(stage)>=0?stage:undefined});
   } finally { if (lock && lock.hasLock()) lock.releaseLock(); }
 }
 function smartLeadReply_(result) {
-  result.protocol = SMARTLEAD_PROTOCOL; result.spreadsheetId = SMARTLEAD_SHEET_ID;
+  result.protocol = SMARTLEAD_PROTOCOL; result.spreadsheetId = SMARTLEAD_SHEET_ID; result.codeVersion = SMARTLEAD_CODE_VERSION;
   return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
 }
 function smartLeadEqual_(a,b) {
@@ -57,7 +57,7 @@ function smartLeadEqual_(a,b) {
 function smartLeadHeading_(value) { return String(value).trim().toLowerCase().replace(/[\s_]+/g,''); }
 function smartLeadColumn_(headers,label) {
   var found=[];headers.forEach(function(header,index){if(smartLeadHeading_(header)===smartLeadHeading_(label))found.push(index);});
-  if(found.length>1)throw new Error('CONFLICT');
+  if(found.length>1)throw new Error('DUPLICATE_OUTPUT');
   return found.length?found[0]:-1;
 }
 function smartLeadMatches_(headers,row,identity) {
@@ -86,24 +86,36 @@ function smartLeadFindRow_(tab,request) {
 }
 function smartLeadLayout_(tab) {
   var headers=tab.getRange(1,1,1,Math.max(1,tab.getLastColumn())).getDisplayValues()[0];
+  var labels=Object.keys(SMARTLEAD_OUTPUTS).map(function(field){return SMARTLEAD_OUTPUTS[field];});
+  // Validate every managed heading before making any layout changes.
+  labels.forEach(function(label){smartLeadColumn_(headers,label);});
   var normalized=headers.map(smartLeadHeading_);
   var legacy=normalized.indexOf('leadstatus')>=0 && normalized.indexOf('remark')<0?smartLeadColumn_(headers,'Feedback'):-1;
-  if(legacy>=0){tab.getRange(1,legacy+1).setValue('Remark');headers[legacy]='Remark';}
-  var labels=Object.keys(SMARTLEAD_OUTPUTS).map(function(field){return SMARTLEAD_OUTPUTS[field];});
+  if(legacy>=0){
+    var legacyHeading=tab.getRange(1,legacy+1);
+    if(!legacyHeading.canEdit())throw new Error('PROTECTED');
+    legacyHeading.setValue('Remark');headers[legacy]='Remark';
+  }
   var missing=labels.filter(function(label){return smartLeadColumn_(headers,label)<0;});
   if(missing.length){
     var start=Math.max(1,tab.getLastColumn());
-    if(start+missing.length>tab.getMaxColumns())tab.insertColumnsAfter(tab.getMaxColumns(),start+missing.length-tab.getMaxColumns());
-    tab.getRange(1,start+1,1,missing.length).setValues([missing]);
+    try {
+      if(start+missing.length>tab.getMaxColumns())tab.insertColumnsAfter(tab.getMaxColumns(),start+missing.length-tab.getMaxColumns());
+      var destination=tab.getRange(1,start+1,1,missing.length);
+      if(!destination.canEdit())throw new Error('PROTECTED');
+      destination.setValues([missing]);
+    } catch (layoutError) {
+      if(layoutError.message==='PROTECTED')throw layoutError;
+      throw new Error('LAYOUT');
+    }
   }
-  // Move complete columns, keeping original values, formulas and source order.
-  for(var i=labels.length-1;i>=0;i--){
-    headers=tab.getRange(1,1,1,tab.getLastColumn()).getDisplayValues()[0];
-    var source=smartLeadColumn_(headers,labels[i])+1;
-    var target=tab.getLastColumn()-(labels.length-1-i);
-    if(source!==target)tab.moveColumns(tab.getRange(1,source,tab.getMaxRows(),1),source<target?target+1:target);
-  }
-  return tab.getRange(1,1,1,tab.getLastColumn()).getDisplayValues()[0];
+  // Existing outputs can be anywhere. Moving whole columns can fail on sheets
+  // with protected source cells, merged ranges or tables, even with editable
+  // outputs. Resolve by heading and append only missing columns instead.
+  if(legacy>=0 || missing.length)SpreadsheetApp.flush();
+  headers=tab.getRange(1,1,1,tab.getLastColumn()).getDisplayValues()[0];
+  labels.forEach(function(label){if(smartLeadColumn_(headers,label)<0)throw new Error('VERIFY');});
+  return headers;
 }
 function smartLeadWrite_(tab,request) {
   var values=request.values,snapshot=request.snapshot||{};

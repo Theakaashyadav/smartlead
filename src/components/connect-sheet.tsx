@@ -45,7 +45,7 @@ export function ConnectSheet({initialSheet,onClose,onConnected}:{initialSheet:{i
       <Button type="submit" variant="primary" busy={busy}>Check connection<ArrowRight size={16}/></Button>
     </form>:<form className="simple-form" onSubmit={connect}>
       <div className="simple-found-sheet"><FileSpreadsheet size={22}/><strong>{info.title}</strong><button type="button" onClick={()=>setInfo(null)}>Check again</button></div>
-      <p role="status" className="simple-share-note">Connection checked: read and write access confirmed.</p>
+      <p role="status" className="simple-share-note">Spreadsheet access confirmed. Output columns will be checked when you save the connection.</p>
       <Field label="Project name"><input aria-label="Project name" required maxLength={120} value={project} onChange={e=>setProject(e.target.value)} placeholder="e.g. Godrej Evergreen"/></Field>
       <FeedbackLinkToggle enabled={sendFeedbackLink} onChange={setSendFeedbackLink} disabled={busy}/>
       {info.tabs.length>1&&<Field label="Sheet tab"><Select value={tabId} disabled={!!initialSheet} onChange={e=>{const id=Number(e.target.value);setTabId(id);setMapping(detectColumns(info.tabs.find(t=>t.id===id)!.headers));}}>{info.tabs.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</Select></Field>}

@@ -489,7 +489,7 @@ export async function processJob(id:string, candidate?:Job,beforeNotificationSen
       if(job.type==='SYNC'){sourceChecks.delete(job.entityId);invalidateTemporarySource(job.entityId);}
       return true;
     }
-    const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED','APPS_SCRIPT_AUTH','APPS_SCRIPT_UPGRADE','APPS_SCRIPT_PROTECTED'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
+    const paused=error instanceof AppError && (['DISCONNECTED','CAPACITY','PAUSED','FEEDBACK_OFFLINE','GOOGLE_AUTH_REQUIRED','APPS_SCRIPT_AUTH','APPS_SCRIPT_UPGRADE','APPS_SCRIPT_PROTECTED','APPS_SCRIPT_LAYOUT'].includes(error.code)||(job.type==='WRITEBACK'&&error.code==='SHEET_READ_ONLY'));
     const attempts=job.attempts+(paused?0:1);
     await db.job.updateMany({where:ownership,data:{status:attempts>=8?'DEAD':'PENDING',attempts,lockedAt:null,lockToken:null,error:error instanceof AppError?error.message:'Background operation failed; check integration configuration.',runAt:new Date(Date.now()+(paused?60000:Math.min(3600000,5000*2**attempts)))}});
   }

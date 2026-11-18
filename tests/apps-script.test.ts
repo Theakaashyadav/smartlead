@@ -105,12 +105,34 @@ describe('Apps Script connection',()=>{
     f.controls.editable=false;
     await expect(provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'})).rejects.toMatchObject({code:'APPS_SCRIPT_PROTECTED'});expect(f.rows[1].at(-4)).not.toBe('Sent');
     f.controls.editable=true;f.controls.saveError=true;
-    await expect(provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'})).rejects.toMatchObject({code:'APPS_SCRIPT_UPGRADE',message:expect.stringContaining('saving the output cells')});
+    await expect(provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'})).rejects.toMatchObject({code:'APPS_SCRIPT_WRITE',message:expect.stringContaining('saving the output cells')});
     try{await provider.write(sheet,'public-id:a',null,{sentStatus:'Sent'});}catch(error:any){expect(error.message).not.toContain('Sensitive');}
+  });
+  it('distinguishes old layout code from current layout and duplicate-heading failures',async()=>{
+    const settings={endpoint,spreadsheetId,token:'private-token-'.repeat(4)};
+    const replies=[
+      [{code:'SCRIPT',stage:'LAYOUT'},{code:'APPS_SCRIPT_UPGRADE',message:expect.stringContaining('version 3')}],
+      [{code:'SCRIPT',stage:'LAYOUT',codeVersion:3},{code:'APPS_SCRIPT_LAYOUT',message:expect.stringContaining('header row')}],
+      [{code:'LAYOUT',stage:'LAYOUT',codeVersion:3},{code:'APPS_SCRIPT_LAYOUT',message:expect.stringContaining('missing output columns')}],
+      [{code:'DUPLICATE_OUTPUT',stage:'LAYOUT',codeVersion:3},{code:'SYNC_CONFLICT',message:expect.stringContaining('Duplicate output headings')}],
+    ];
+    for(const [reply,expected] of replies){
+      vi.stubGlobal('fetch',vi.fn(async()=>Response.json({ok:false,protocol:'smartlead-apps-script-v1',spreadsheetId,...reply})));
+      await expect(appsScriptRequest(settings,'prepare',{worksheetId:42})).rejects.toMatchObject(expected);
+    }
+  });
+  it('rejects a reachable older deployment before attempting to prepare its columns',async()=>{
+    const f=await fixture();
+    vi.stubGlobal('fetch',vi.fn(async(_url:string,init?:RequestInit)=>{
+      const request=JSON.parse(String(init?.body));expect(request.action).toBe('check');
+      return Response.json({ok:true,protocol:'smartlead-apps-script-v1',spreadsheetId,data:{title:'Old connector',codeVersion:2,canRead:true,canWrite:true,challenge:request.challenge,tabs:[{id:42,name:'Incoming',headers:['Name','Phone']}]}});
+    }));
+    await expect(checkAppsScriptSetup(f.user,f.setup.setupId,endpoint)).rejects.toMatchObject({code:'APPS_SCRIPT_VERIFY',message:expect.stringContaining('version 3')});
+    expect(await db.sheet.count()).toBe(0);
   });
   it('reuses an existing connection key when generating repair code and retains its deployment URL',async()=>{
     const f=await fixture();const sheet=await f.connect();const previous=runInContext('SMARTLEAD_KEY',f.context);
-    const setup=await startAppsScriptSetup(f.user,{sheetId:sheet.id});expect(setup.endpoint).toBe(endpoint);expect(setup.code).toContain(previous);expect(setup.code).toContain('SMARTLEAD_CODE_VERSION = 2');
+    const setup=await startAppsScriptSetup(f.user,{sheetId:sheet.id});expect(setup.endpoint).toBe(endpoint);expect(setup.code).toContain(previous);expect(setup.code).toContain('SMARTLEAD_CODE_VERSION = 3');
   });
   it('checks output writes before saving a connection and preserves feedback after a failed immediate attempt',async()=>{
     const f=await fixture();f.controls.editable=false;await expect(f.connect()).rejects.toMatchObject({code:'APPS_SCRIPT_PROTECTED'});expect(await db.sheet.count()).toBe(0);

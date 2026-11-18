@@ -240,13 +240,13 @@ describe('Sent Status and Shared To',()=>{
     expect(f.write.mock.calls[0][3]).toEqual({sentStatus:'Sent',sharedTo:'Original recipient',status:'Interested',feedback:'Call tomorrow afternoon'});
     expect(await db.lead.findUnique({where:{id:f.lead.id}})).toMatchObject({writebackStatus:'SYNCED',managedSnapshot:{status:'Interested',feedback:'Call tomorrow afternoon',__publicOutputV2:'1'}});
   });
-  it('keeps read-only sheet updates retryable and saves them after sharing is corrected',async()=>{
+  it.each(['SHEET_READ_ONLY','APPS_SCRIPT_LAYOUT'])('keeps %s updates retryable and saves them after the sheet is corrected',async code=>{
     const f=await fixture();await dispatchMessage(f.message.id,f.provider);
     const job=await db.job.findFirstOrThrow({where:{key:{startsWith:'writeback:delivery:'}}});
     await db.job.update({where:{id:job.id},data:{attempts:7,runAt:new Date(0)}});
-    const write=vi.spyOn(PublicSheetsProvider.prototype,'write').mockRejectedValueOnce(new AppError(403,'Sheet is read-only','SHEET_READ_ONLY')).mockResolvedValue({});
+    const write=vi.spyOn(PublicSheetsProvider.prototype,'write').mockRejectedValueOnce(new AppError(403,'Sheet setup needs repair',code)).mockResolvedValue({});
     await processJob(job.id);
-    expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'PENDING',attempts:7,error:'Sheet is read-only'});
+    expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'PENDING',attempts:7,error:'Sheet setup needs repair'});
     await db.job.update({where:{id:job.id},data:{runAt:new Date(0)}});await processJob(job.id);
     expect(await db.job.findUniqueOrThrow({where:{id:job.id}})).toMatchObject({status:'COMPLETED',error:null});
     expect(write).toHaveBeenLastCalledWith(expect.anything(),f.lead.stableSourceId,null,{sentStatus:'Sent',sharedTo:'Original recipient'});

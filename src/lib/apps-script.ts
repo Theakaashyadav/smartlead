@@ -16,7 +16,7 @@ const protocol='smartlead-apps-script-v1';
 const settingsSchema=z.object({token:z.string().min(32),spreadsheetId:z.string().regex(/^[\w-]+$/),gid:z.number().optional(),sheetId:z.string().optional(),endpoint:z.string().optional(),identityStyle:z.enum(['PUBLIC','RAW_ID']).optional()});
 type Settings=z.infer<typeof settingsSchema>;
 type Pending={userId:string;organizationId:string;createdAt:number;encrypted:string};
-const inspectionSchema=z.object({title:z.string(),codeVersion:z.literal(2),canRead:z.literal(true),canWrite:z.literal(true),challenge:z.string(),tabs:z.array(z.object({id:z.number().int().nonnegative(),name:z.string(),headers:z.array(z.string())}))});
+const inspectionSchema=z.object({title:z.string(),codeVersion:z.literal(3),canRead:z.literal(true),canWrite:z.literal(true),challenge:z.string(),tabs:z.array(z.object({id:z.number().int().nonnegative(),name:z.string(),headers:z.array(z.string())}))});
 export function appsScriptEndpoint(value:string){
   let url:URL;try{url=new URL(value.trim());}catch{throw new AppError(400,'Paste the Apps Script web app URL ending in /exec.');}
   if(url.origin!=='https://script.google.com'||url.username||url.password||url.search||url.hash||!/^\/(?:macros\/s|a\/macros\/[\w.-]+\/s)\/[\w-]{20,}\/exec$/.test(url.pathname))throw new AppError(400,'Use the deployed Google Apps Script web app URL ending in /exec, not the editor or /dev link.');
@@ -46,8 +46,12 @@ export async function appsScriptRequest(settings:Settings,action:string,data:Rec
     if(result.code==='SCRIPT'){
       const stages:Record<string,string>={SOURCE:'locating the source row',LAYOUT:'preparing output columns',PERMISSION:'checking output permissions',SAVE:'saving the output cells',VERIFY:'verifying the saved cells'};
       const stage=stages[String(result.stage)];
-      throw new AppError(409,`Apps Script failed${stage?' while '+stage:''}. Reconnect Apps Script, paste the latest code, then deploy a new version before checking the connection. If it still fails, check protection on the four output columns.`,'APPS_SCRIPT_UPGRADE');
+      if(result.codeVersion!==3)throw new AppError(409,`Apps Script failed${stage?' while '+stage:''}. Copy the latest connector code (version 3) from Reconnect Apps Script, then deploy it as a new version. Version 3 keeps existing output columns in place instead of moving whole columns.`,'APPS_SCRIPT_UPGRADE');
+      if(result.stage==='LAYOUT')throw new AppError(409,'Apps Script could not prepare the output headings. Allow the script account to edit the header row and add any missing output columns, then retry. Existing columns stay in place.','APPS_SCRIPT_LAYOUT');
+      throw new AppError(502,`Apps Script failed${stage?' while '+stage:''}. Check the failed execution under Apps Script > Executions for Google's error, then select Update sheet now to retry saved updates.`,'APPS_SCRIPT_WRITE');
     }
+    if(result.code==='LAYOUT')throw new AppError(409,'Apps Script could not add missing output columns. Allow the script account to edit the header row and insert columns, or add the missing headings Sent Status, Shared To, Feedback and Remark yourself, then retry.','APPS_SCRIPT_LAYOUT');
+    if(result.code==='DUPLICATE_OUTPUT')throw new AppError(409,'Duplicate output headings found. Keep one column for each heading: Sent Status, Shared To, Feedback and Remark. No lead update was saved.','SYNC_CONFLICT');
     if(result.code==='PROTECTED')throw new AppError(403,'The script account cannot edit the output cells. Remove protection from Sent Status, Shared To, Feedback and Remark, or deploy as a Google account allowed to edit those cells.','APPS_SCRIPT_PROTECTED');
     const errors:Record<string,[number,string,string]>={AUTH:[401,'The script connection key does not match. Paste the latest code, then deploy a new version.','APPS_SCRIPT_AUTH'],SOURCE:[409,'The original lead row is missing, duplicated or changed. No lead update was confirmed.','SYNC_CONFLICT'],CONFLICT:[409,'A managed sheet value was edited outside SmartLead. Review the conflict before retrying.','SYNC_CONFLICT'],TAB:[409,'The selected sheet tab no longer exists. Reconnect its Apps Script.','APPS_SCRIPT_SOURCE'],BUSY:[429,'The sheet script is busy. Its update will retry.','APPS_SCRIPT_BUSY'],VERIFY:[502,'Apps Script has not confirmed the saved lead fields. The update will retry.','APPS_SCRIPT_VERIFY'],SCRIPT:[403,'The script could not access or update this sheet. Check its authorization, protected cells and deployment permissions.','SHEET_READ_ONLY']};
     const [status,message,code]=errors[String(result.code)]||[502,'The script returned an invalid request response. Copy the current code and deploy a new version.','APPS_SCRIPT_DEPLOYMENT'];
@@ -57,7 +61,7 @@ export async function appsScriptRequest(settings:Settings,action:string,data:Rec
 }
 async function inspect(settings:Settings){
   const challenge=opaqueToken();const parsed=inspectionSchema.safeParse(await appsScriptRequest(settings,'check',{challenge}));
-  if(!parsed.success||parsed.data.challenge!==challenge)throw new AppError(502,'Deploy the latest Apps Script code as a new version, then check the connection again. The deployed code did not confirm the current connection check.','APPS_SCRIPT_VERIFY');
+  if(!parsed.success||parsed.data.challenge!==challenge)throw new AppError(502,'Copy the latest Apps Script code (version 3) and deploy it as a new version, then check the connection again. The deployed code did not confirm the current connection check.','APPS_SCRIPT_VERIFY');
   if(!parsed.data.tabs.length||settings.gid!==undefined&&!parsed.data.tabs.some(t=>t.id===settings.gid))throw new AppError(400,'The selected sheet tab was not found. Check the sheet link.');
   return {...parsed.data,spreadsheetId:settings.spreadsheetId,gid:settings.gid};
 }
